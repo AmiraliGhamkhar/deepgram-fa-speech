@@ -1,0 +1,21 @@
+# Runtime settings (override sensitive values via .env)
+
+model: nova-3
+language: fa
+sample_rate: 16000
+channels: 1
+block_duration: 0.08
+endpointing: 400
+utterance_end_ms: 1200
+
+# paste = clipboard + Ctrl+V (best for RTL/Persian shaping)
+# type  = Unicode key events character-by-character
+inject_mode: paste
+paste_settle_seconds: 0.12
+restore_clipboard: true
+
+overlay_enabled: true
+
+# Reconnection
+reconnect_delay: 2.0
+max_reconnect_attempts: 0   # 0 = unlimited

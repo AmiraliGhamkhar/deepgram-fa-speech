@@ -1,0 +1,84 @@
+# Deepgram keyterm boosting (high-value medical terms)
+keyterms:
+  # Abbreviations
+  - ICU
+  - CCU
+  - OR
+  - BP
+  - FBS
+  - BS
+  - CBC
+  - ECG
+  - EKG
+  - CXR
+  - CPR
+  - NPO
+  - PRN
+  - IV
+  - IM
+  - SC
+  - ETT
+  - ABG
+  - SBP
+  - HTN
+  - CHF
+  - COPD
+  - MI
+  - CVA
+  - DVT
+  - PE
+  - HF
+  - TKA
+  - THA
+  - ACL
+  - CTS
+  - D&C
+  - ERCP
+  - TURP
+  - PCNL
+  - TUL
+  - ORIF
+  - CRIF
+  - PFNA
+  - BIRADS
+  - IUGR
+  - CRL
+  - BPD
+  - AFI
+  - EFW
+  - EDC
+
+  # English phrases
+  - myocardial infarction
+  - pulmonary embolism
+  - heart failure
+  - Ultrasound
+  - Biopsy
+  - Catheter
+  - Stent
+  - Fracture
+  - Hernia
+  - Cyst
+  - Pregnancy
+  - Placenta
+  - Fetus
+  - Uterus
+  - Ovary
+  - Kidney
+  - Liver
+  - Heart
+  - Lung
+  - Breast
+
+  # Persian high-value phrases
+  - فشار خون
+  - قند خون
+  - علائم حیاتی
+  - نوار قلب
+  - اتاق عمل
+  - سکته قلبی
+  - سکته مغزی
+  - آمبولی ریوی
+  - نارسایی قلبی
+  - واحد مراقبت های ویژه
+  - واحد مراقبت‌های ویژه

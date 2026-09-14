@@ -1,0 +1,7 @@
+deepgram-sdk>=3.0.0
+python-dotenv>=1.0.0
+PyYAML>=6.0
+sounddevice>=0.4.6
+# Non-Windows fallback only (Windows uses native Win32)
+pyautogui>=0.9.54; sys_platform != "win32"
+pyperclip>=1.8.2; sys_platform != "win32"
