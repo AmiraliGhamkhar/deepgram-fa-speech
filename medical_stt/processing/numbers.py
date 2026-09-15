@@ -35,7 +35,8 @@ _PATTERNS: List[re.Pattern[str]] = [
     re.compile(
         rf"\b{_NUM}\s*"
         r"(?:mg/kg/day|mg/kg|mcg/kg|mg|mcg|g|kg|ml|l|cc|mmHg|mmol/l|mEq/l|"
-        r"cm|mm|km|IU|units?|bpm|C|F|%|درصد)\b",
+        r"cm|mm|km|IU|units?|bpm|C|F|%|درصد)\b"
+        r"(?:\s+(?:IV|IM|SC|PO))?",
         re.IGNORECASE,
     ),
     # Bare percentage / decimal lab value with a trailing % sign.

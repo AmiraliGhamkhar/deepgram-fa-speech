@@ -1,5 +1,4 @@
-# Legacy fallback for deployments that do not include data/keyterms/.
-# New configurations load general.yaml plus the selected specialty file.
+# Rare, acoustically confusable terms shared across specialties.
 keyterms:
   - HbA1c
   - ICU

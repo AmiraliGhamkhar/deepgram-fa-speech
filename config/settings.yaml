@@ -28,3 +28,13 @@ reconnect_jitter: 0.5       # fraction of computed delay, e.g. 0.5 = +/-50%
 # because they can misfire on ordinary speech. Enable only if you have
 # reviewed data/corrections.yaml and accept the risk.
 enable_context_dependent_terms: false
+
+# Deepgram recognition hints: general terms are always loaded, followed by
+# the selected specialty's focused terms.
+specialty: general
+
+# Low-confidence high-risk words are preserved and exposed as warnings.
+medical_confidence_threshold: 0.65
+
+# Apply only the explicit provider-side substitutions in data/asr_replacements.yaml.
+use_asr_replacements: true

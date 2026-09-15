@@ -35,7 +35,7 @@ def test_spans_are_non_overlapping_and_sorted():
 
 def test_dose_expression_with_route():
     spans = find_numeric_spans("500 mg IV")
-    assert any(s.text.startswith("500 mg") for s in spans)
+    assert any(s.text == "500 mg IV" for s in spans)
 
 
 def test_range_expression_protected():

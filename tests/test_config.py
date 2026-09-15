@@ -88,6 +88,18 @@ def test_empty_language_rejected():
     assert any("language" in e for e in errors)
 
 
+def test_invalid_medical_confidence_threshold_rejected():
+    errors = validate_settings(_valid_settings(medical_confidence_threshold=1.1))
+    assert any("medical_confidence_threshold" in error for error in errors)
+
+
+def test_new_settings_defaults_are_backward_compatible():
+    settings = Settings()
+    assert settings.specialty == "general"
+    assert settings.medical_confidence_threshold == 0.65
+    assert settings.use_asr_replacements is True
+
+
 def test_settings_dict_like_access_backward_compatible():
     s = _valid_settings()
     assert s["model"] == "nova-3"

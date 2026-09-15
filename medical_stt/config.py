@@ -22,6 +22,11 @@ _DATA_DIR = _ROOT / "data"
 _VALID_INJECT_MODES = frozenset({"paste", "type"})
 _SUPPORTED_MODELS = frozenset({"nova-3", "nova-2", "nova", "enhanced", "base"})
 
+
+def _valid_specialty_name(value: str) -> bool:
+    return bool(value) and value.replace("_", "").replace("-", "").isalnum()
+
+
 load_dotenv(_ROOT / ".env")
 load_dotenv()
 
@@ -48,6 +53,9 @@ class Settings:
     reconnect_backoff_max: float = 30.0
     reconnect_jitter: float = 0.5
     enable_context_dependent_terms: bool = False
+    specialty: str = "general"
+    medical_confidence_threshold: float = 0.65
+    use_asr_replacements: bool = True
     api_key: str = field(default="", repr=False)
 
     def as_dict(self) -> Dict[str, Any]:
@@ -68,6 +76,9 @@ class Settings:
             "reconnect_backoff_max": self.reconnect_backoff_max,
             "reconnect_jitter": self.reconnect_jitter,
             "enable_context_dependent_terms": self.enable_context_dependent_terms,
+            "specialty": self.specialty,
+            "medical_confidence_threshold": self.medical_confidence_threshold,
+            "use_asr_replacements": self.use_asr_replacements,
             "api_key": self.api_key,
         }
 
@@ -122,6 +133,10 @@ def validate_settings(settings: Settings) -> List[str]:
         )
     if not settings.language:
         errors.append("language must not be empty")
+    if not _valid_specialty_name(settings.specialty):
+        errors.append("specialty must contain only letters, numbers, '_' or '-'")
+    if not (0.0 <= settings.medical_confidence_threshold <= 1.0):
+        errors.append("medical_confidence_threshold must be between 0 and 1")
     if not settings.api_key:
         errors.append("DEEPGRAM_API_KEY is not set (put it in .env or the environment)")
 
@@ -150,14 +165,76 @@ def get_settings() -> Settings:
         reconnect_backoff_max=float(cfg.get("reconnect_backoff_max", 30.0)),
         reconnect_jitter=float(cfg.get("reconnect_jitter", 0.5)),
         enable_context_dependent_terms=bool(cfg.get("enable_context_dependent_terms", False)),
+        specialty=str(cfg.get("specialty", "general")),
+        medical_confidence_threshold=float(cfg.get("medical_confidence_threshold", 0.65)),
+        use_asr_replacements=bool(cfg.get("use_asr_replacements", True)),
         api_key=os.getenv("DEEPGRAM_API_KEY", ""),
     )
 
 
-def load_keyterms() -> List[str]:
-    data = _load_yaml(_DATA_DIR / "keyterms.yaml")
+MAX_KEYTERMS = 100
+
+
+def _terms_from_file(path: Path) -> List[str]:
+    data = _load_yaml(path)
     terms = data.get("keyterms") if isinstance(data, dict) else data
-    return [str(t).strip() for t in (terms or []) if str(t).strip()]
+    if terms is None:
+        return []
+    if not isinstance(terms, list):
+        raise ConfigError(f"{path} must contain a 'keyterms' list")
+    return [str(term).strip() for term in terms if term is not None and str(term).strip()]
+
+
+def load_keyterms(specialty: str = "general", max_count: int = MAX_KEYTERMS) -> List[str]:
+    """Load general plus selected specialty terms, preserving priority order."""
+    if not _valid_specialty_name(specialty):
+        raise ConfigError("invalid keyterm specialty name")
+    if max_count < 0:
+        raise ConfigError("maximum keyterm count must be non-negative")
+    if max_count == 0:
+        return []
+    keyterm_dir = _DATA_DIR / "keyterms"
+    if keyterm_dir.is_dir():
+        paths = [keyterm_dir / "general.yaml"]
+        if specialty != "general":
+            selected = keyterm_dir / f"{specialty}.yaml"
+            if not selected.is_file():
+                raise ConfigError(f"unknown keyterm specialty: {specialty!r}")
+            paths.append(selected)
+    else:
+        # Existing deployments with only the original file continue to work.
+        paths = [_DATA_DIR / "keyterms.yaml"]
+
+    result: List[str] = []
+    seen = set()
+    for path in paths:
+        for term in _terms_from_file(path):
+            if term not in seen:
+                seen.add(term)
+                result.append(term)
+                if len(result) == max_count:
+                    return result
+    return result
+
+
+def load_asr_replacements() -> List[str]:
+    """Load safe Deepgram `from:to` replacement parameters."""
+    data = _load_yaml(_DATA_DIR / "asr_replacements.yaml")
+    replacements = data.get("replacements", []) if isinstance(data, dict) else []
+    if not isinstance(replacements, list):
+        raise ConfigError("data/asr_replacements.yaml 'replacements' must be a list")
+
+    result: List[str] = []
+    for item in replacements:
+        if not isinstance(item, dict) or not item.get("from") or item.get("to") is None:
+            continue
+        source, target = str(item["from"]).strip(), str(item["to"]).strip()
+        # Keep provider-side replacement away from clinical numbers; those
+        # remain protected locally during all terminology operations.
+        if any(ch.isdigit() for ch in source + target) or ":" in source + target:
+            raise ConfigError("ASR replacements cannot contain digits or ':'")
+        result.append(f"{source}:{target}")
+    return result
 
 
 def load_correction_rules_raw() -> List[Dict[str, Any]]:
