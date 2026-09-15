@@ -165,6 +165,7 @@ if _SYSTEM == "windows":
 
 class TextInjector:
     """Injects Persian/RTL and Unicode text at current cursor position."""
+    
 
     #: Modifiers that silently turn Ctrl+V into a different command.
     _INTERFERING_MODIFIERS = ("VK_SHIFT", "VK_MENU", "VK_LWIN", "VK_RWIN")
@@ -182,6 +183,19 @@ class TextInjector:
         #: How long to let the target app consume the clipboard after Ctrl+V.
         self.paste_settle_seconds = max(0.0, paste_settle_seconds)
         self._last_partial: str = ""
+        
+    def prepare_mixed_text(self, text: str) -> str:
+        """آماده‌سازی متن ترکیبی فارسی-انگلیسی برای RTL صحیح"""
+        if not text:
+            return text
+        # تمیز کردن فاصله‌ها
+        text = " ".join(text.split())
+        # اجبار جهت RTL برای متن‌های دارای فارسی
+        if any("\u0600" <= c <= "\u06FF" for c in text):
+            text = "\u202B" + text + "\u202C"   # RLE ... PDF
+            if not text.startswith("\u200F"):
+                text = "\u200F" + text          # RLM
+        return text
 
     def reset_partial(self) -> None:
         """Reset the streaming state (call when a sentence is finalized)."""
@@ -278,11 +292,13 @@ class TextInjector:
             print(f"  [inject error] {e}")
             return False
 
-    def paste_text(self, text: str, add_rtl_mark: bool = False) -> bool:
+    def paste_text(self, text: str, add_rtl_mark: bool = True) -> bool:
         """
         Instantly pastes text via Clipboard (Ctrl+V).
         Recommended for complete sentences to ensure proper BiDi shaping in target apps.
         """
+        text = self.prepare_mixed_text(text)
+   
         if not text:
             return False
 

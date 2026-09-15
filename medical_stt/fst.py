@@ -1,56 +1,42 @@
-"""Lightweight character-level Finite State Transducer (pure Python)."""
-
+"""Aho-Corasick based longest-match rewriter."""
 from __future__ import annotations
+from typing import List, Tuple
+import ahocorasick
 
-from typing import Dict, List, Tuple
-
-
-class SimpleFST:
-    """Longest-match left-to-right string rewriter built as a trie."""
-
+class AhoFST:
     def __init__(self) -> None:
-        self.root: Dict = {}
-        self._outputs: Dict[int, str] = {}
+        self.automaton = ahocorasick.Automaton()
+        self._ready = False
 
     def add_rule(self, source: str, target: str) -> None:
-        if not source:
-            return
-        node = self.root
-        for char in source:
-            if char not in node:
-                node[char] = {}
-            node = node[char]
-        self._outputs[id(node)] = target
+        if source:
+            self.automaton.add_word(source, (source, target))
+
+    def make(self) -> None:
+        self.automaton.make_automaton()
+        self._ready = True
 
     def apply(self, text: str) -> str:
-        if not text:
+        if not text or not self._ready:
             return text
-        result: List[str] = []
-        i = 0
-        n = len(text)
-        while i < n:
-            node = self.root
-            last_end = -1
-            last_out = None
-            j = i
-            while j < n and text[j] in node:
-                node = node[text[j]]
-                nid = id(node)
-                if nid in self._outputs:
-                    last_end = j + 1
-                    last_out = self._outputs[nid]
-                j += 1
-            if last_end != -1:
-                result.append(last_out)  # type: ignore[arg-type]
-                i = last_end
-            else:
-                result.append(text[i])
-                i += 1
+        result = []
+        last_end = 0
+        for end, (original, replacement) in self.automaton.iter(text):
+            start = end - len(original) + 1
+            if start >= last_end:
+                result.append(text[last_end:start])
+                result.append(replacement)
+                last_end = end + 1
+        result.append(text[last_end:])
         return "".join(result)
 
+    @property
+    def _outputs(self):
+        return self.automaton
 
-def load_rules_from_pairs(pairs: List[Tuple[str, str]]) -> SimpleFST:
-    fst = SimpleFST()
+def load_rules_from_pairs(pairs: List[Tuple[str, str]]) -> AhoFST:
+    fst = AhoFST()
     for src, tgt in pairs:
         fst.add_rule(src, tgt)
+    fst.make()
     return fst

@@ -1,16 +1,10 @@
-"""
-Medical STT – real-time Persian + English medical dictation.
-
-Mic → Deepgram Nova-3 → normalize → FST corrections → overlay + inject.
-"""
-
+"""Medical STT – real-time Persian + English medical dictation."""
 from __future__ import annotations
-
 import queue
 import sys
 import threading
 import time
-from typing import Any, List, Optional
+from typing import Any, List
 
 from deepgram import DeepgramClient
 from deepgram.core.events import EventType
@@ -22,7 +16,6 @@ from .injector import TextInjector
 from .normalize import normalize
 from .overlay import TranscriptOverlay
 
-
 def load_sounddevice() -> Any:
     try:
         import sounddevice
@@ -33,7 +26,6 @@ def load_sounddevice() -> Any:
             "  (Linux: sudo apt install libportaudio2)"
         ) from exc
     return sounddevice
-
 
 class LiveMedicalSTT:
     def __init__(self) -> None:
@@ -59,8 +51,6 @@ class LiveMedicalSTT:
         self._errors: List[Exception] = []
         self._reconnect_count = 0
 
-    # ── Deepgram callbacks ──────────────────────────────────────────────
-
     def _on_message(self, message: object) -> None:
         if not isinstance(message, ListenV1Results):
             return
@@ -77,14 +67,10 @@ class LiveMedicalSTT:
             text = self.fst.apply(normalize(raw))
             self.overlay.set_done(text)
             self.injector.reset_partial()
-            if self.settings["inject_mode"] == "paste":
-                self.injector.paste_text(text + " ", add_rtl_mark=True)
-            else:
-                self.injector.type_text(text + " ")
+            self.injector.paste_text(text + " ", add_rtl_mark=True)
             time.sleep(0.08)
             self.overlay.set_idle()
         else:
-            # Partial: light normalize only (FST can wait for final)
             self.overlay.set_partial(normalize(raw))
 
     def _on_error(self, error: Exception) -> None:
@@ -103,8 +89,6 @@ class LiveMedicalSTT:
             self._audio_q.put_nowait(bytes(indata))
         except queue.Full:
             pass
-
-    # ── single connection session ───────────────────────────────────────
 
     def _run_session(self) -> None:
         sounddevice = load_sounddevice()
@@ -185,12 +169,10 @@ class LiveMedicalSTT:
             if self._errors:
                 raise self._errors[0]
 
-    # ── outer loop with reconnection ────────────────────────────────────
-
     def run(self) -> int:
         s = self.settings
         print("=" * 60)
-        print("Medical STT – Finite State Transducer post-processing")
+        print("Medical STT – Aho-Corasick post-processing")
         print(f"Model: {s['model']}  Language: {s['language']}")
         print(f"Correction rules loaded: {len(self.fst._outputs)}")
         print(f"Keyterms: {len(self.keyterms)}")
@@ -204,7 +186,7 @@ class LiveMedicalSTT:
             while True:
                 try:
                     self._run_session()
-                    break  # clean exit
+                    break
                 except KeyboardInterrupt:
                     break
                 except Exception as e:
@@ -226,14 +208,12 @@ class LiveMedicalSTT:
             print("Session ended.")
         return exit_code
 
-
 def main() -> int:
     try:
         return LiveMedicalSTT().run()
     except RuntimeError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 2
-
 
 if __name__ == "__main__":
     sys.exit(main())
