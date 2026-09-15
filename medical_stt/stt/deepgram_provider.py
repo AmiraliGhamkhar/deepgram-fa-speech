@@ -14,7 +14,7 @@ import threading
 from typing import Any, List, Optional
 
 from ..config import Settings
-from .base import ErrorCategory, OnError, OnTranscript, ProviderError, STTProvider, TranscriptEvent
+from .base import ErrorCategory, OnError, OnTranscript, ProviderError, STTProvider, TranscriptEvent, WordInfo
 
 log = logging.getLogger("medical_stt.stt.deepgram")
 
@@ -68,10 +68,66 @@ def classify_deepgram_exception(exc: BaseException) -> ErrorCategory:
     return ErrorCategory.UNKNOWN
 
 
+def _optional_float(value: object) -> Optional[float]:
+    try:
+        return float(value) if value is not None else None  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def transcript_event_from_result(message: object) -> Optional[TranscriptEvent]:
+    """Convert one Deepgram result object to the small internal event model."""
+    channel = getattr(message, "channel", None)
+    alternatives = getattr(channel, "alternatives", None)
+    if not alternatives:
+        return None
+
+    alternative = alternatives[0]
+    text = str(getattr(alternative, "transcript", "") or "").strip()
+    is_final = bool(getattr(message, "is_final", False))
+    speech_final = bool(getattr(message, "speech_final", False))
+    if not text and not (is_final and speech_final):
+        return None
+
+    words: tuple[WordInfo, ...] = ()
+    if is_final:
+        parsed_words = []
+        for word in getattr(alternative, "words", None) or ():
+            raw_text = getattr(word, "punctuated_word", None) or getattr(word, "word", "")
+            word_text = str(raw_text or "").strip()
+            start = _optional_float(getattr(word, "start", None))
+            end = _optional_float(getattr(word, "end", None))
+            if not word_text or start is None or end is None:
+                continue
+            parsed_words.append(
+                WordInfo(
+                    text=word_text,
+                    start=start,
+                    end=end,
+                    confidence=_optional_float(getattr(word, "confidence", None)),
+                )
+            )
+        words = tuple(parsed_words)
+
+    return TranscriptEvent(
+        text=text,
+        is_final=is_final,
+        speech_final=speech_final,
+        confidence=_optional_float(getattr(alternative, "confidence", None)),
+        words=words,
+    )
+
+
 class DeepgramProvider(STTProvider):
-    def __init__(self, settings: Settings, keyterms: Optional[List[str]] = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        keyterms: Optional[List[str]] = None,
+        asr_replacements: Optional[List[str]] = None,
+    ) -> None:
         self._settings = settings
         self._keyterms = keyterms or []
+        self._asr_replacements = asr_replacements or []
         self._stop_event = threading.Event()
         self._connection: Any = None
         self._connection_lock = threading.Lock()
@@ -95,7 +151,7 @@ class DeepgramProvider(STTProvider):
         # Deepgram SDK to be installed.
         from deepgram import DeepgramClient
         from deepgram.core.events import EventType
-        from deepgram.listen.v1.types import ListenV1Results
+        from deepgram.listen.v1.types import ListenV1Results, ListenV1UtteranceEnd
 
         s = self._settings
         self._stop_event.clear()
@@ -115,20 +171,21 @@ class DeepgramProvider(STTProvider):
                 smart_format=True,
                 punctuate=True,
                 keyterm=self._keyterms or None,
+                replace=self._asr_replacements or None,
             ) as connection:
                 with self._connection_lock:
                     self._connection = connection
 
                 def _on_message(message: object) -> None:
+                    if isinstance(message, ListenV1UtteranceEnd):
+                        # UtteranceEnd can close segments when no result carried speech_final.
+                        on_transcript(TranscriptEvent(text="", is_final=True, speech_final=True))
+                        return
                     if not isinstance(message, ListenV1Results):
                         return
-                    if message.channel is None or not message.channel.alternatives:
-                        return
-                    text = (message.channel.alternatives[0].transcript or "").strip()
-                    if not text:
-                        return
-                    confidence = getattr(message.channel.alternatives[0], "confidence", None)
-                    on_transcript(TranscriptEvent(text=text, is_final=bool(message.is_final), confidence=confidence))
+                    event = transcript_event_from_result(message)
+                    if event is not None:
+                        on_transcript(event)
 
                 def _on_provider_error(exc: object) -> None:
                     category = classify_deepgram_exception(exc if isinstance(exc, BaseException) else Exception(str(exc)))

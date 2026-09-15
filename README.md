@@ -91,8 +91,9 @@ automatically. Stop with `Ctrl+C`.
 | File | Purpose |
 |------|---------|
 | `.env` | `DEEPGRAM_API_KEY` (required, never commit this file) |
-| `config/settings.yaml` | model, language, audio, injection, reconnection, terminology safety toggle |
-| `data/keyterms.yaml` | Deepgram keyterm boosting list (sent as separate values, per the current API) |
+| `config/settings.yaml` | model, language, audio, specialty, confidence, injection, and reconnection settings |
+| `data/keyterms/*.yaml` | focused general and specialty-specific Deepgram Keyterms |
+| `data/asr_replacements.yaml` | optional, explicit known ASR substitutions |
 | `data/corrections.yaml` | categorized terminology rules (see below) |
 
 All settings are validated at startup (`medical_stt/config.py`); invalid
@@ -227,11 +228,26 @@ real display required).
 
 ## Deepgram / streaming
 
+- Persian uses `model: nova-3` with `language: fa`, interim results, smart
+  formatting, and punctuation. Do not use the English-oriented
+  `nova-3-medical` model for this workflow; a separate English Medical
+  configuration may be added later.
+- Interim results update only the overlay. `is_final` segments are buffered,
+  and only `speech_final` (or Deepgram `UtteranceEnd`) completes one logical
+  utterance for terminology, BiDi, and permanent injection. Repeated final
+  segments are deduplicated.
+- Final results retain provider-neutral word timestamps and confidence.
+  Low-confidence numbers, doses, abbreviations, drug-like words, procedures,
+  and diagnoses produce an in-memory warning; recognized text is preserved,
+  never guessed or automatically repaired.
+- `specialty` selects `general + specialty` terms from `data/keyterms/`, with
+  stable deduplication and a 100-term cap. Keyterms improve recognition;
+  `data/asr_replacements.yaml` is a separate optional list for a few known,
+  safe ASR errors; the terminology FST remains responsible for canonical
+  clinical output.
 - SDK pinned to `deepgram-sdk==7.9.0`, tested against the
-  `client.listen.v1.connect(...)` call shape used here (Nova-3,
-  `interim_results`, `endpointing`, `utterance_end_ms`, `smart_format`,
-  `punctuate`, `keyterm`). Keyterms are passed as a list of separate
-  values, as required by the current API.
+  `client.listen.v1.connect(...)` call shape used here. Keyterms and ASR
+  replacements are passed as separate values expected by the current API.
 - Configuration is validated (`STTProvider.validate_config()`) before any
   connection is opened.
 - Errors are classified into `ErrorCategory` (`stt/base.py`): `AUTH`,
@@ -250,9 +266,9 @@ real display required).
   `stats()` exposes `depth`, `max_depth`, `dropped_total`, `put_total`,
   `get_total`. A dropped chunk is never silent — it's logged (rate-limited)
   as a warning.
-- Latency instrumentation (`app.py::LatencyTracker`) logs stage durations
-  (terminology, BiDi, injection, total) at INFO/DEBUG level — **never**
-  transcript content.
+- Latency instrumentation (`app.py::LatencyTracker`) measures audio to first
+  interim, audio to speech final, terminology, BiDi, injection, and total
+  utterance latency — **never** transcript content.
 
 ## Logging
 

@@ -15,12 +15,22 @@ import threading
 import time
 from typing import Any, List, Optional
 
-from .audio import BoundedAudioQueue
-from .config import ConfigError, Settings, get_settings, load_correction_rules_raw, load_keyterms, validate_settings
+from .audio import BoundedAudioQueue, QueueStats
+from .config import (
+    ConfigError,
+    Settings,
+    get_settings,
+    load_asr_replacements,
+    load_correction_rules_raw,
+    load_keyterms,
+    validate_settings,
+)
 from .injection import TextInjector
 from .processing.bidi import to_injected
+from .processing.confidence import MedicalConfidenceWarning, find_low_confidence_medical_words
 from .processing.normalize import normalize
 from .processing.terminology import TerminologyEngine
+from .stt.accumulator import UtteranceAccumulator
 from .stt.base import ErrorCategory, ProviderError, STTProvider, TranscriptEvent
 from .stt.deepgram_provider import DeepgramProvider
 from .stt.reconnect import ReconnectPolicy, decide
@@ -51,23 +61,38 @@ class LatencyTracker:
     def __init__(self) -> None:
         self._capture_start: Optional[float] = None
         self._first_interim: Optional[float] = None
+        self._speech_final: Optional[float] = None
 
     def mark_utterance_start(self) -> None:
-        self._capture_start = time.monotonic()
-        self._first_interim = None
+        if self._capture_start is None:
+            self._capture_start = time.monotonic()
+            self._first_interim = None
+            self._speech_final = None
 
     def mark_first_interim(self) -> None:
         if self._capture_start is not None and self._first_interim is None:
             self._first_interim = time.monotonic()
             log.debug("latency: first interim after %.3fs", self._first_interim - self._capture_start)
 
+    def mark_speech_final(self) -> None:
+        if self._capture_start is not None:
+            self._speech_final = time.monotonic()
+
     def mark_final(self, terminology_s: float, bidi_s: float, injection_s: float) -> None:
         if self._capture_start is None:
             return
-        total = time.monotonic() - self._capture_start
+        now = time.monotonic()
+        speech_final_s = (self._speech_final or now) - self._capture_start
+        first_interim_s = None if self._first_interim is None else self._first_interim - self._capture_start
         log.info(
-            "latency: total=%.3fs terminology=%.3fs bidi=%.3fs injection=%.3fs",
-            total, terminology_s, bidi_s, injection_s,
+            "latency: total=%.3fs audio_to_first_interim=%s audio_to_speech_final=%.3fs "
+            "terminology=%.3fs bidi=%.3fs injection=%.3fs",
+            now - self._capture_start,
+            "n/a" if first_interim_s is None else f"{first_interim_s:.3f}s",
+            speech_final_s,
+            terminology_s,
+            bidi_s,
+            injection_s,
         )
         self._capture_start = None
 
@@ -89,8 +114,9 @@ class LiveMedicalSTT:
         if load_result.conflicts:
             log.warning("terminology rule conflicts detected: %d", len(load_result.conflicts))
 
-        self.keyterms = load_keyterms()
-        self.provider: STTProvider = provider or DeepgramProvider(self.settings, self.keyterms)
+        self.keyterms = load_keyterms(self.settings.specialty)
+        asr_replacements = load_asr_replacements() if self.settings.use_asr_replacements else []
+        self.provider: STTProvider = provider or DeepgramProvider(self.settings, self.keyterms, asr_replacements)
 
         self.injector = TextInjector(
             dry_run=False,
@@ -100,6 +126,8 @@ class LiveMedicalSTT:
         )
         self.overlay = TranscriptOverlay(enabled=self.settings.overlay_enabled)
         self.latency = LatencyTracker()
+        self.last_confidence_warning: Optional[MedicalConfidenceWarning] = None
+        self._utterance = UtteranceAccumulator()
 
         self._audio_q = BoundedAudioQueue(maxsize=40)
         self._stop = threading.Event()
@@ -107,34 +135,56 @@ class LiveMedicalSTT:
         self._reconnect_count = 0
         self._last_drop_logged = 0
 
+    @property
+    def audio_queue_stats(self) -> QueueStats:
+        """Current queue depth and dropped-audio counters."""
+        return self._audio_q.stats()
+
     # -- transcript handling --------------------------------------------
 
     def _on_transcript(self, event: TranscriptEvent) -> None:
         if not event.is_final:
             self.latency.mark_first_interim()
-            normalized = normalize(event.text)
-            self.overlay.set_partial(normalized)
+            self.overlay.set_partial(normalize(event.text))
             return
 
-        t0 = time.monotonic()
-        normalized = normalize(event.text)
-        rewritten = self.terminology.apply(normalized)
-        t1 = time.monotonic()
+        utterance = self._utterance.add(event)
+        if utterance is None:
+            return
+
+        self.latency.mark_speech_final()
+        self.last_confidence_warning = find_low_confidence_medical_words(
+            utterance.words, self.settings.medical_confidence_threshold
+        )
+        if self.last_confidence_warning is not None:
+            categories = {item.category for item in self.last_confidence_warning.uncertain_words}
+            log.warning(
+                "low-confidence medical tokens: count=%d categories=%s (original text preserved)",
+                len(self.last_confidence_warning.uncertain_words),
+                ",".join(sorted(categories)),
+            )
+
+        normalized = normalize(utterance.text)
+        terminology_start = time.monotonic()
+        # A low-confidence clinical token must not be transformed into a
+        # more authoritative-looking concept. Preserve the provider text.
+        rewritten = normalized if self.last_confidence_warning is not None else self.terminology.apply(normalized)
+        terminology_end = time.monotonic()
 
         injected_repr = to_injected(rewritten)
-        t2 = time.monotonic()
+        bidi_end = time.monotonic()
 
         self.overlay.set_done(rewritten)
         self.injector.reset_partial()
         ok = self.injector.paste_text(injected_repr + " ", add_rtl_mark=True)
-        t3 = time.monotonic()
+        injection_end = time.monotonic()
         if not ok:
             log.warning("injection failed for a final transcript (see injector.last_error)")
 
         self.latency.mark_final(
-            terminology_s=t1 - t0,
-            bidi_s=t2 - t1,
-            injection_s=t3 - t2,
+            terminology_s=terminology_end - terminology_start,
+            bidi_s=bidi_end - terminology_end,
+            injection_s=injection_end - bidi_end,
         )
         time.sleep(0.08)
         self.overlay.set_idle()
@@ -145,6 +195,7 @@ class LiveMedicalSTT:
         self._stop.set()
 
     def _on_audio(self, indata: Any, frames: int, time_info: Any, status: Any) -> None:
+        self.latency.mark_utterance_start()
         if status:
             log.warning("microphone status: %s", status)
         ok = self._audio_q.put_nowait(bytes(indata))
@@ -169,6 +220,7 @@ class LiveMedicalSTT:
 
         self._stop.clear()
         self._errors.clear()
+        self._utterance.reset()
         self.latency.mark_utterance_start()
 
         session_stopped = threading.Event()

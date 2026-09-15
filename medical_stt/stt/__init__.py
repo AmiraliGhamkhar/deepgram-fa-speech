@@ -13,12 +13,14 @@ from .base import (
     ProviderError,
     STTProvider,
     TranscriptEvent,
+    WordInfo,
 )
 from .deepgram_provider import DeepgramProvider
 
 __all__ = [
     "STTProvider",
     "TranscriptEvent",
+    "WordInfo",
     "ProviderError",
     "ErrorCategory",
     "ConnectionClosed",

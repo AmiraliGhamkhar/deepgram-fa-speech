@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import enum
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
-from typing import Callable, Optional
+from dataclasses import dataclass, field
+from typing import Callable, Optional, Tuple
 
 
 class ErrorCategory(enum.Enum):
@@ -51,13 +51,26 @@ class ConnectionClosed(ProviderError):
 
 
 @dataclass(frozen=True)
+class WordInfo:
+    """Provider-neutral timing and confidence for one recognized word."""
+
+    text: str
+    start: float
+    end: float
+    confidence: Optional[float] = None
+
+
+@dataclass(frozen=True)
 class TranscriptEvent:
     """A single transcript update from the provider, decoupled from any
     provider-specific message schema."""
 
     text: str
     is_final: bool
+    # Defaulting to complete preserves older provider implementations.
+    speech_final: bool = True
     confidence: Optional[float] = None
+    words: Tuple[WordInfo, ...] = field(default_factory=tuple)
 
 
 # Callback signatures used by STTProvider.

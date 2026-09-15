@@ -1,0 +1,5 @@
+# Small provider-side corrections for repeatedly observed ASR forms.
+# Clinical terminology normalization remains in corrections.yaml.
+replacements:
+  - from: "هایپرتمشن"
+    to: "هایپرتنشن"

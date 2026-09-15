@@ -8,7 +8,7 @@ import pytest
 
 from medical_stt.injection.backend import DryRunBackend
 from medical_stt.injection.text_injector import TextInjector
-from medical_stt.stt.base import ErrorCategory, OnError, OnTranscript, ProviderError, STTProvider, TranscriptEvent
+from medical_stt.stt.base import ErrorCategory, OnError, OnTranscript, ProviderError, STTProvider, TranscriptEvent, WordInfo
 
 
 class FakeProvider(STTProvider):
@@ -73,6 +73,41 @@ def test_interim_transcript_does_not_inject(monkeypatch):
 
     stt._on_transcript(TranscriptEvent(text="بیمار در آی", is_final=False))
     assert backend.pasted == []
+
+
+def test_final_segments_inject_only_after_speech_final(monkeypatch):
+    from medical_stt import app as app_module
+
+    stt = app_module.LiveMedicalSTT(provider=FakeProvider([]))
+    backend = DryRunBackend()
+    stt.injector = TextInjector(backend=backend, paste_settle_seconds=0.0)
+    stt.overlay.enabled = False
+
+    stt._on_transcript(TranscriptEvent("فشار خون", is_final=True, speech_final=False))
+    assert backend.pasted == []
+    stt._on_transcript(TranscriptEvent("120/80 mmHg", is_final=True, speech_final=True))
+    assert len(backend.pasted) == 1
+    assert "فشار خون 120/80 mmHg" in backend.pasted[0]
+
+
+def test_low_confidence_medical_term_is_preserved(monkeypatch):
+    from medical_stt import app as app_module
+
+    stt = app_module.LiveMedicalSTT(provider=FakeProvider([]))
+    backend = DryRunBackend()
+    stt.injector = TextInjector(backend=backend, paste_settle_seconds=0.0)
+    stt.overlay.enabled = False
+    event = TranscriptEvent(
+        "هایپرتنشن",
+        is_final=True,
+        speech_final=True,
+        words=(WordInfo("هایپرتنشن", 0.0, 1.0, 0.4),),
+    )
+
+    stt._on_transcript(event)
+    assert "هایپرتنشن" in backend.pasted[0]
+    assert "hypertension" not in backend.pasted[0]
+    assert stt.last_confidence_warning is not None
 
 
 def test_dangerous_term_not_injected(monkeypatch):

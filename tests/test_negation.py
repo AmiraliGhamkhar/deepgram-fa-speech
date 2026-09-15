@@ -1,6 +1,8 @@
 """Negation / clinical-fidelity guard tests (task section 10)."""
 from __future__ import annotations
 
+import pytest
+
 from medical_stt.processing.negation import contains_negation, find_negation_spans
 
 
@@ -26,6 +28,20 @@ def test_detects_manfi_ast():
 
 def test_detects_rad_mishavad():
     assert contains_negation("MI رد می\u200cشود")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "توده مشاهده نشد",
+        "درد ندارد",
+        "شواهدی از DVT وجود ندارد",
+        "بیماری قلبی ندارد",
+        "MI مشاهده نشد",
+    ],
+)
+def test_medical_negation_regressions(text):
+    assert contains_negation(text)
 
 
 def test_no_negation_in_positive_statement():
