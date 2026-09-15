@@ -1,0 +1,10 @@
+title = "gitleaks config for deepgram-v6"
+
+[allowlist]
+description = "Allow documented placeholders"
+regexes = [
+  '''your_deepgram_api_key_here''',
+]
+paths = [
+  '''\.env\.example$''',
+]
