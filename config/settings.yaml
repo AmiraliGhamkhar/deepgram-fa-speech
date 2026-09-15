@@ -16,6 +16,15 @@ restore_clipboard: true
 
 overlay_enabled: true
 
-# Reconnection
+# Reconnection (exponential backoff with bounded jitter; auth/config
+# errors are never retried regardless of these settings)
 reconnect_delay: 2.0
 max_reconnect_attempts: 0   # 0 = unlimited
+reconnect_backoff_max: 30.0
+reconnect_jitter: 0.5       # fraction of computed delay, e.g. 0.5 = +/-50%
+
+# Terminology safety: "context_dependent" rules map a common standalone
+# word to an abbreviation (e.g. "نبض" -> "HR") and are disabled by default
+# because they can misfire on ordinary speech. Enable only if you have
+# reviewed data/corrections.yaml and accept the risk.
+enable_context_dependent_terms: false

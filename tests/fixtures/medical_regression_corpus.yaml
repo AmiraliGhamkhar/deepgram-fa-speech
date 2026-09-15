@@ -1,0 +1,135 @@
+# Realistic Persian-English medical dictation regression corpus.
+#
+# Each case documents an INTENT (what must be semantically preserved) rather
+# than an exact string match, per task section 9 ("focus on semantic
+# preservation, not merely string matching"). See
+# tests/regression/test_medical_cases.py for how these are checked:
+#
+#   must_contain        - substrings that MUST appear in the final output
+#   must_not_contain     - substrings that MUST NOT appear (e.g. a flipped
+#                          negation, a corrupted number, a dangerous
+#                          over-normalization)
+#   preserves_negation   - true if the input contains a negation that must
+#                          survive
+cases:
+  - id: icu_admission
+    input: "بیمار در آی سی یو بستری شد"
+    must_contain: ["ICU"]
+    must_not_contain: []
+
+  - id: icu_full_phrase_not_partial
+    description: >
+      Longest-match regression: a shorter rule ("آی" -> X) must not win
+      over the full spelled-out abbreviation.
+    input: "آی سی یو"
+    must_contain: ["ICU"]
+    must_not_contain: ["X"]
+
+  - id: mi_history
+    input: "بیمار سابقه سکته قلبی دارد"
+    must_contain: ["MI"]
+    must_not_contain: []
+
+  - id: ecg_finding
+    input: "MI در ECG مشاهده شد"
+    must_contain: ["MI", "ECG"]
+    must_not_contain: []
+
+  - id: blood_pressure_numeric_fidelity
+    input: "فشار خون بیمار 120/80 mmHg است"
+    must_contain: ["120/80", "mmHg"]
+    must_not_contain: []
+
+  - id: hba1c_percentage_fidelity
+    input: "HbA1c برابر 7.2 درصد است"
+    must_contain: ["7.2", "HbA1c"]
+    must_not_contain: []
+
+  - id: tka_right_side
+    input: "TKA سمت راست"
+    must_contain: ["TKA", "راست"]
+    must_not_contain: []
+
+  - id: negation_no_infection
+    description: "A negated finding must not become positive."
+    input: "علائم عفونت ندارد"
+    must_contain: ["ندارد"]
+    must_not_contain: []
+    preserves_negation: true
+
+  - id: negation_no_mass_seen
+    input: "توده‌ای مشاهده نشد"
+    must_contain: ["مشاهده نشد"]
+    must_not_contain: []
+    preserves_negation: true
+
+  - id: negation_rules_out_mi
+    description: >
+      Even though "سکته قلبی" -> MI is a valid rule, the negation marker
+      itself must remain intact and untouched.
+    input: "سکته قلبی رد می‌شود"
+    must_contain: ["رد می\u200cشود"]
+    must_not_contain: []
+    preserves_negation: true
+
+  - id: dose_fidelity_iv
+    input: "500 mg IV تجویز شد"
+    must_contain: ["500 mg", "IV"]
+    must_not_contain: []
+
+  - id: dose_fidelity_mg
+    input: "دوز دارو 5 mg است"
+    must_contain: ["5 mg"]
+    must_not_contain: []
+
+  - id: fasting_word_not_forced_to_npo
+    description: >
+      Medical-safety regression: a generic word ("fasting") must not be
+      blindly forced into the order-context abbreviation NPO.
+    input: "بیمار از دیشب ناشتا بوده است"
+    must_contain: ["ناشتا"]
+    must_not_contain: ["NPO"]
+
+  - id: decrease_word_not_forced_to_dc
+    description: >
+      Medical-safety regression: "کاهش" (decrease) must not be forced into
+      "DC" (discontinue) -- doing so can invert clinical meaning.
+    input: "بیمار کاهش وزن داشته است"
+    must_contain: ["کاهش"]
+    must_not_contain: ["DC"]
+
+  - id: cbc_lab_order
+    input: "درخواست سی بی سی شد"
+    must_contain: ["CBC"]
+    must_not_contain: []
+
+  - id: mixed_measurement_cm
+    input: "توده به قطر 2 cm مشاهده شد"
+    must_contain: ["2 cm"]
+    must_not_contain: []
+
+  - id: mixed_measurement_ratio
+    input: "اندازه ضایعه 10 × 5 mm بود"
+    must_contain: ["10", "5 mm"]
+    must_not_contain: []
+
+  - id: persian_digits_preserved_as_value
+    description: "Persian digit glyphs must convert to ASCII without changing the value."
+    input: "فشار خون ۱۲۰/۸۰ است"
+    must_contain: ["120/80"]
+    must_not_contain: ["۱۲۰"]
+
+  - id: no_medical_terms_plain_sentence
+    input: "امروز هوا خوب است"
+    must_contain: ["هوا خوب است"]
+    must_not_contain: ["ICU", "MI", "ECG"]
+
+  - id: copd_history
+    input: "سابقه سی او پی دی دارد"
+    must_contain: ["COPD"]
+    must_not_contain: []
+
+  - id: dvt_finding
+    input: "علائم دی وی تی مشاهده شد"
+    must_contain: ["DVT"]
+    must_not_contain: []

@@ -1,1699 +1,5051 @@
-# Medical correction rules for the FST (longest-match, left-to-right).
-# Format: - from: SOURCE
-#         to: TARGET
-# Expanded & improved version – more variants, ASR errors, high-frequency terms.
-
+# Medical correction rules for the terminology engine (deterministic
+# longest-match, left-to-right; see medical_stt/processing/fst.py).
+#
+# Schema (one entry per rule):
+#   from:              source Persian/English phrase as it may be dictated
+#   to:                normalized/target text
+#   category:          one of
+#       safe_lexical            - pure spelling/formatting normalization,
+#                                  meaning cannot change (e.g. spacing
+#                                  variants of the same word)
+#       abbreviation_expansion   - the physician spelled out an abbreviation
+#                                  letter-by-letter ("آی سی یو" = I-C-U);
+#                                  low ambiguity
+#       specialty_terminology    - multi-word or unambiguous specialty term
+#                                  / procedure / anatomy phrase
+#       context_dependent        - single ordinary word or short phrase
+#                                  whose "abbreviation" could also be a
+#                                  common word in unrelated speech; NOT
+#                                  applied unless the caller explicitly
+#                                  enables context-dependent rules
+#       unsafe                   - can flip clinical meaning (e.g. turning
+#                                  a generic word into a directive
+#                                  abbreviation without context); disabled
+#                                  by default, kept only for documentation
+#   confidence:        high | medium | low - engine's trust in the mapping
+#   requires_context:  true if this rule should only fire when the caller
+#                       opts in (see TerminologyEngine(enable_context_dependent=...))
+#   dangerous:         true if the rule must never be applied automatically
+#
+# Regenerated from the legacy flat from/to list by
+# scripts/classify_corrections.py (see that file for the classification
+# heuristics and rationale). Manual review is still recommended before
+# adding new "specialty_terminology" or "context_dependent" entries.
+#
 rules:
-  # ===== ICU / Vitals / Monitoring =====
-  - from: 'سی سی یو'
-    to: 'CCU'
-  - from: 'سی\u200cسی\u200cیو'
-    to: 'CCU'
-  - from: 'سی-سی-یو'
-    to: 'CCU'
-  - from: 'سیسی یو'
-    to: 'CCU'
-  - from: 'سیسیو'
-    to: 'CCU'
-  - from: 'سی سیو'
-    to: 'CCU'
-  - from: 'سی\u200cسیو'
-    to: 'CCU'
-  - from: 'آی سی یو'
-    to: 'ICU'
-  - from: 'آی\u200cسی\u200cیو'
-    to: 'ICU'
-  - from: 'آی-سی-یو'
-    to: 'ICU'
-  - from: 'آیسی یو'
-    to: 'ICU'
-  - from: 'آیسیو'
-    to: 'ICU'
-  - from: 'آی سیو'
-    to: 'ICU'
-  - from: 'آی\u200cسیو'
-    to: 'ICU'
-  - from: 'ای سی یو'
-    to: 'ICU'
-  - from: 'ای\u200cسی\u200cیو'
-    to: 'ICU'
-  - from: 'ایسیو'
-    to: 'ICU'
-  - from: 'واحد مراقبت های ویژه'
-    to: 'ICU'
-  - from: 'واحد مراقبت\u200cهای ویژه'
-    to: 'ICU'
-  - from: 'واحد مراقبتهای ویژه'
-    to: 'ICU'
-  - from: 'مراقبتهای ویژه'
-    to: 'ICU'
-  - from: 'مراقبت\u200cهای ویژه'
-    to: 'ICU'
-  - from: 'واحد مراقبت قلبی'
-    to: 'CCU'
-  - from: 'علائم حیاتی'
-    to: 'V/S'
-  - from: 'علائمحیاتی'
-    to: 'V/S'
-  - from: 'وی اس'
-    to: 'V/S'
-  - from: 'وی/اس'
-    to: 'V/S'
-  - from: 'وی\u200cاس'
-    to: 'V/S'
-  - from: 'ویاس'
-    to: 'V/S'
-  - from: 'فشار خون'
-    to: 'BP'
-  - from: 'فشارخون'
-    to: 'BP'
-  - from: 'بی پی'
-    to: 'BP'
-  - from: 'بی\u200cپی'
-    to: 'BP'
-  - from: 'بیپی'
-    to: 'BP'
-  - from: 'فشار خون سیستولیک'
-    to: 'SBP'
-  - from: 'فشار خون دیاستولیک'
-    to: 'DBP'
-  - from: 'نبض'
-    to: 'HR'
-  - from: 'ضربان قلب'
-    to: 'HR'
-  - from: 'درجه حرارت'
-    to: 'T'
-  - from: 'دما'
-    to: 'T'
-  - from: 'تنفس'
-    to: 'RR'
-  - from: 'تعداد تنفس'
-    to: 'RR'
-  - from: 'اشباع اکسیژن'
-    to: 'SpO2'
-  - from: 'اس پی او دو'
-    to: 'SpO2'
-  - from: 'اس\u200cپی\u200cاو\u200cدو'
-    to: 'SpO2'
-  - from: 'اسپواوتو'
-    to: 'SpO2'
-  - from: 'جی سی اس'
-    to: 'GCS'
-  - from: 'جی\u200cسی\u200cاس'
-    to: 'GCS'
-  - from: 'مقیاس کما گلاسکو'
-    to: 'GCS'
-  - from: 'سی وی پی'
-    to: 'CVP'
-  - from: 'سی\u200cوی\u200cپی'
-    to: 'CVP'
-  - from: 'فشار ورید مرکزی'
-    to: 'CVP'
-  - from: 'ام ای پی'
-    to: 'MAP'
-  - from: 'ام\u200cای\u200cپی'
-    to: 'MAP'
-  - from: 'فشار متوسط شریانی'
-    to: 'MAP'
-  - from: 'پی سی دبلیو پی'
-    to: 'PCWP'
-  - from: 'پی\u200cسی\u200cدبلیو\u200cپی'
-    to: 'PCWP'
-  - from: 'ای اف'
-    to: 'EF'
-  - from: 'ای\u200cاف'
-    to: 'EF'
-  - from: 'کسر جهشی'
-    to: 'EF'
-  - from: 'اس او اف ای'
-    to: 'SOFA'
-  - from: 'اس\u200cاو\u200cاف\u200cای'
-    to: 'SOFA'
-  - from: 'آپاچی'
-    to: 'APACHE'
-  - from: 'آپاچی دو'
-    to: 'APACHE II'
-
-  # ===== Common Abbreviations & Orders =====
-  - from: 'آی وی'
-    to: 'IV'
-  - from: 'آی\u200cوی'
-    to: 'IV'
-  - from: 'آیوی'
-    to: 'IV'
-  - from: 'آی ام'
-    to: 'IM'
-  - from: 'آی\u200cام'
-    to: 'IM'
-  - from: 'آیام'
-    to: 'IM'
-  - from: 'اس سی'
-    to: 'SC'
-  - from: 'اس\u200cسی'
-    to: 'SC'
-  - from: 'اسسی'
-    to: 'SC'
-  - from: 'پی آر ان'
-    to: 'PRN'
-  - from: 'پی\u200cآر\u200cان'
-    to: 'PRN'
-  - from: 'پیآرآن'
-    to: 'PRN'
-  - from: 'پی ار ان'
-    to: 'PRN'
-  - from: 'ان پی او'
-    to: 'NPO'
-  - from: 'ان\u200cپی\u200cاو'
-    to: 'NPO'
-  - from: 'انپیاو'
-    to: 'NPO'
-  - from: 'ان پیو'
-    to: 'NPO'
-  - from: 'نپو'
-    to: 'NPO'
-  - from: 'ن.پ.و'
-    to: 'NPO'
-  - from: 'ن پ و'
-    to: 'NPO'
-  - from: 'ان پ او'
-    to: 'NPO'
-  - from: 'انپو'
-    to: 'NPO'
-  - from: 'ناشتا'
-    to: 'NPO'
-  - from: 'از راه دهان چیزی نخورد'
-    to: 'NPO'
-  - from: 'دو بار در روز'
-    to: 'BD'
-  - from: 'سه بار در روز'
-    to: 'TDS'
-  - from: 'چهار بار در روز'
-    to: 'QID'
-  - from: 'روزی سه بار خورده شود'
-    to: 'TDS'
-  - from: 'هر ساعت'
-    to: 'QH'
-  - from: 'هر دو ساعت'
-    to: 'Q2H'
-  - from: 'هر سه ساعت'
-    to: 'Q3H'
-  - from: 'در صورت نیاز'
-    to: 'PRN'
-  - from: 'به اندازه کافی'
-    to: 'QS'
-  - from: 'به مقدار کافی'
-    to: 'QS'
-  - from: 'صبح و شب'
-    to: 'M&N'
-  - from: 'قبل از ظهر'
-    to: 'AM'
-  - from: 'بعد از ظهر'
-    to: 'PM'
-  - from: 'میانه روز'
-    to: 'MD'
-  - from: 'میانه شب'
-    to: 'MN'
-
-  # ===== Cardiology / Respiratory =====
-  - from: 'اچ تی ان'
-    to: 'HTN'
-  - from: 'اچ\u200cتی\u200cان'
-    to: 'HTN'
-  - from: 'اچتی\u200cان'
-    to: 'HTN'
-  - from: 'اچ تی\u200cان'
-    to: 'HTN'
-  - from: 'هایپرتنشن'
-    to: 'hypertension'
-  - from: 'هایپر تمشن'
-    to: 'hypertension'
-  - from: 'هایپرتمشن'
-    to: 'hypertension'
-  - from: 'هایپر تنشن'
-    to: 'hypertension'
-  - from: 'افزایش فشار خون'
-    to: 'HTN'
-  - from: 'سی اچ اف'
-    to: 'CHF'
-  - from: 'سی\u200cاچ\u200cاف'
-    to: 'CHF'
-  - from: 'سیاچ\u200cاف'
-    to: 'CHF'
-  - from: 'نارسایی احتقانی قلب'
-    to: 'CHF'
-  - from: 'نارسایی احتقانی قلبی'
-    to: 'CHF'
-  - from: 'نارساییاحتقانیقلب'
-    to: 'CHF'
-  - from: 'نارسایی قلبی'
-    to: 'HF'
-  - from: 'نارساییقلبی'
-    to: 'HF'
-  - from: 'سی او پی دی'
-    to: 'COPD'
-  - from: 'سی\u200cاو\u200cپی\u200cدی'
-    to: 'COPD'
-  - from: 'سیاوپی\u200cدی'
-    to: 'COPD'
-  - from: 'بیماری مزمن انسدادی ریوی'
-    to: 'COPD'
-  - from: 'ام آی'
-    to: 'MI'
-  - from: 'ام\u200cآی'
-    to: 'MI'
-  - from: 'امآی'
-    to: 'MI'
-  - from: 'امی'
-    to: 'MI'
-  - from: 'میوکاردیال اینفارکشن'
-    to: 'myocardial infarction'
-  - from: 'میوکاردیالاینفارکشن'
-    to: 'myocardial infarction'
-  - from: 'انفارکتوس میوکارد'
-    to: 'MI'
-  - from: 'سکته قلبی'
-    to: 'MI'
-  - from: 'سکتهقلبی'
-    to: 'MI'
-  - from: 'سی وی ای'
-    to: 'CVA'
-  - from: 'سی\u200cوی\u200cای'
-    to: 'CVA'
-  - from: 'سیوی\u200cای'
-    to: 'CVA'
-  - from: 'حادثه عروق مغزی'
-    to: 'CVA'
-  - from: 'سکته مغزی'
-    to: 'CVA'
-  - from: 'سکتهمغزی'
-    to: 'CVA'
-  - from: 'دی وی تی'
-    to: 'DVT'
-  - from: 'دی\u200cوی\u200cتی'
-    to: 'DVT'
-  - from: 'دیوی\u200cتی'
-    to: 'DVT'
-  - from: 'دیویتی'
-    to: 'DVT'
-  - from: 'ترومبوز وریدی عمقی'
-    to: 'DVT'
-  - from: 'پی ای'
-    to: 'PE'
-  - from: 'پی\u200cای'
-    to: 'PE'
-  - from: 'پیای'
-    to: 'PE'
-  - from: 'پولمونری امبولیسم'
-    to: 'pulmonary embolism'
-  - from: 'پولمونریامبولیسم'
-    to: 'pulmonary embolism'
-  - from: 'آمبولی ریوی'
-    to: 'PE'
-  - from: 'آمبولیریوی'
-    to: 'PE'
-  - from: 'ای سی جی'
-    to: 'ECG'
-  - from: 'ای\u200cسی\u200cجی'
-    to: 'ECG'
-  - from: 'ایسیجی'
-    to: 'ECG'
-  - from: 'ای سیجی'
-    to: 'ECG'
-  - from: 'ای کی جی'
-    to: 'EKG'
-  - from: 'ای\u200cکی\u200cجی'
-    to: 'EKG'
-  - from: 'ایکیجی'
-    to: 'EKG'
-  - from: 'نوار قلب'
-    to: 'ECG'
-  - from: 'نوارقلب'
-    to: 'ECG'
-  - from: 'الکتروکاردیوگرام'
-    to: 'ECG'
-  - from: 'سی پی آر'
-    to: 'CPR'
-  - from: 'سی\u200cپی\u200cآر'
-    to: 'CPR'
-  - from: 'سیپیآر'
-    to: 'CPR'
-  - from: 'احیاء قلبی ریوی'
-    to: 'CPR'
-  - from: 'احیای قلبی ریوی'
-    to: 'CPR'
-  - from: 'ای تی تی'
-    to: 'ETT'
-  - from: 'ای\u200cتی\u200cتی'
-    to: 'ETT'
-  - from: 'ایتی\u200cتی'
-    to: 'ETT'
-  - from: 'ایتی تی'
-    to: 'ETT'
-  - from: 'لوله داخل نای'
-    to: 'ETT'
-  - from: 'تست تحمل ورزش'
-    to: 'ETT'
-  - from: 'سندرم دسترس تنفس بزرگسال'
-    to: 'ARDS'
-  - from: 'سندرم زجر تنفسی حاد'
-    to: 'ARDS'
-  - from: 'زوال تهویه ای هیپوکسیک'
-    to: 'HVD'
-  - from: 'زوال تهویه\u200cای هیپوکسیک'
-    to: 'HVD'
-  - from: 'تنگ کننده عروق ریوی هیپوکسیک'
-    to: 'HPV'
-  - from: 'تنگی عروق ریوی هیپوکسیک'
-    to: 'HPV'
-  - from: 'آنزیمهای قلبی'
-    to: 'cardiac enzymes'
-  - from: 'آنزیم\u200cهای قلبی'
-    to: 'cardiac enzymes'
-  - from: 'ایسکمیک'
-    to: 'ischemic'
-
-  # ===== Labs =====
-  - from: 'سی بی سی'
-    to: 'CBC'
-  - from: 'سی\u200cبی\u200cسی'
-    to: 'CBC'
-  - from: 'سیبیسی'
-    to: 'CBC'
-  - from: 'سی بیسی'
-    to: 'CBC'
-  - from: 'شمارش سلولهای خون'
-    to: 'CBC'
-  - from: 'شمارش سلول\u200cهای خون'
-    to: 'CBC'
-  - from: 'شمارش کامل سلولهای خونی'
-    to: 'CBC'
-  - from: 'اف بی اس'
-    to: 'FBS'
-  - from: 'اف\u200cبی\u200cاس'
-    to: 'FBS'
-  - from: 'افبیاس'
-    to: 'FBS'
-  - from: 'اف بیاس'
-    to: 'FBS'
-  - from: 'قند خون ناشتا'
-    to: 'FBS'
-  - from: 'قندخونناشتا'
-    to: 'FBS'
-  - from: 'قند خون'
-    to: 'BS'
-  - from: 'قندخون'
-    to: 'BS'
-  - from: 'بی\u200cاس'
-    to: 'BS'
-  - from: 'سی ایکس آر'
-    to: 'CXR'
-  - from: 'سی\u200cایکس\u200cآر'
-    to: 'CXR'
-  - from: 'سیایکسآر'
-    to: 'CXR'
-  - from: 'سی ایکسار'
-    to: 'CXR'
-  - from: 'رادیوگرافی قفسه سینه'
-    to: 'CXR'
-  - from: 'گازهای خون شریانی'
-    to: 'ABG'
-  - from: 'ای بی جی'
-    to: 'ABG'
-  - from: 'ای\u200cبی\u200cجی'
-    to: 'ABG'
-  - from: 'شاخص توده بدن'
-    to: 'BMI'
-  - from: 'زمان پروترومبین'
-    to: 'PT'
-  - from: 'پی تی'
-    to: 'PT'
-  - from: 'پی\u200cتی'
-    to: 'PT'
-  - from: 'زمان نسبی ترومبوپلاستین'
-    to: 'PTT'
-  - from: 'پی تی تی'
-    to: 'PTT'
-  - from: 'پی\u200cتی\u200cتی'
-    to: 'PTT'
-  - from: 'رنج نرمال بین المللی'
-    to: 'INR'
-  - from: 'رنج نرمال بین\u200cالمللی'
-    to: 'INR'
-  - from: 'آی ان آر'
-    to: 'INR'
-  - from: 'آی\u200cان\u200cآر'
-    to: 'INR'
-  - from: 'آیانآر'
-    to: 'INR'
-  - from: 'نیتروژن اوره خون'
-    to: 'BUN'
-  - from: 'بی یو ان'
-    to: 'BUN'
-  - from: 'بی\u200cیو\u200cان'
-    to: 'BUN'
-  - from: 'کراتینین'
-    to: 'Cr'
-  - from: 'کراتین'
-    to: 'Cr'
-  - from: 'سلول قرمز خون'
-    to: 'RBC'
-  - from: 'گلبول قرمز خون'
-    to: 'RBC'
-  - from: 'گلبول سفید خون'
-    to: 'WBC'
-  - from: 'هموگلوبین'
-    to: 'Hb'
-  - from: 'هماتوکریت'
-    to: 'Hct'
-  - from: 'پلاکت'
-    to: 'PLT'
-  - from: 'تری گلیسرید'
-    to: 'TG'
-  - from: 'تری\u200cگلیسرید'
-    to: 'TG'
-  - from: 'کلسترول'
-    to: 'Chol'
-  - from: 'لیپوپروتئین با چگالی کم'
-    to: 'LDL'
-  - from: 'لیپوپروتئین با چگالی زیاد'
-    to: 'HDL'
-  - from: 'میزان رسوب گلبول قرمز'
-    to: 'ESR'
-  - from: 'سرعت رسوب گلبول قرمز'
-    to: 'ESR'
-  - from: 'سی آر پی'
-    to: 'CRP'
-  - from: 'سی\u200cآر\u200cپی'
-    to: 'CRP'
-  - from: 'دی دایمر'
-    to: 'D-dimer'
-  - from: 'دی\u200cدایمر'
-    to: 'D-dimer'
-  - from: 'تروپونین'
-    to: 'Troponin'
-  - from: 'بی ان پی'
-    to: 'BNP'
-  - from: 'بی\u200cان\u200cپی'
-    to: 'BNP'
-  - from: 'اچ بی ای وان سی'
-    to: 'HbA1c'
-  - from: 'اچ\u200cبی\u200cای\u200cوان\u200cسی'
-    to: 'HbA1c'
-  - from: 'هموگلوبین ای وان سی'
-    to: 'HbA1c'
-  - from: 'جی اف آر'
-    to: 'GFR'
-  - from: 'جی\u200cاف\u200cآر'
-    to: 'GFR'
-  - from: 'ای جی اف آر'
-    to: 'eGFR'
-  - from: 'ای\u200cجی\u200cاف\u200cآر'
-    to: 'eGFR'
-  - from: 'پتاسیم'
-    to: 'K'
-  - from: 'کلسیم'
-    to: 'Ca'
-  - from: 'سدیم'
-    to: 'Na'
-  - from: 'منیزیم'
-    to: 'Mg'
-  - from: 'تری یدوتیرونین'
-    to: 'T3'
-  - from: 'تری\u200cیدوتیرونین'
-    to: 'T3'
-  - from: 'تیروکسین'
-    to: 'T4'
-  - from: 'هورمون محرک تیروئید'
-    to: 'TSH'
-  - from: 'آنتی ژن اختصاصی پروستات'
-    to: 'PSA'
-  - from: 'آنتی\u200cژن اختصاصی پروستات'
-    to: 'PSA'
-  - from: 'آنتی بادی'
-    to: 'Ab'
-  - from: 'آنتی\u200cبادی'
-    to: 'Ab'
-  - from: 'تجزیه ادرار'
-    to: 'U/A'
-  - from: 'خون در مدفوع'
-    to: 'OB'
-  - from: 'خون مخفی در مدفوع'
-    to: 'OB'
-  - from: 'پلاسمای تازه منجمد شده'
-    to: 'FFP'
-
-  # ===== Fluids / Meds =====
-  - from: 'نرمال سالین'
-    to: 'NS'
-  - from: 'نرمال\u200cسالین'
-    to: 'NS'
-  - from: 'نرمال سالین'
-    to: 'Normal Saline'
-  - from: 'آب مقطر'
-    to: 'DW'
-  - from: 'دکستروز 5% در آب'
-    to: 'D5W'
-  - from: 'دکستروز 5 درصد در آب'
-    to: 'D5W'
-  - from: 'تزریق دکستروز 5 درصد در آب'
-    to: 'D5W'
-  - from: 'دکستروز 5% در سالین'
-    to: 'D5S'
-  - from: 'دکستروز 5 درصد در سالین'
-    to: 'D5S'
-  - from: 'دکستروز سالین'
-    to: 'DS'
-  - from: 'تزریق دکستروز 10 درصد در آب'
-    to: 'D10W'
-  - from: 'تزریق دکستروز 20 درصد در آب'
-    to: 'D20W'
-  - from: 'تزریق دکستروز 50 درصد در آب'
-    to: 'D50W'
-  - from: 'هپارین'
-    to: 'Heparin'
-  - from: 'هپارین لاک'
-    to: 'HL'
-  - from: 'آسپرین'
-    to: 'Aspirin'
-  - from: 'آمپول'
-    to: 'Amp'
-  - from: 'قرص'
-    to: 'Tab'
-  - from: 'شربت'
-    to: 'Syr'
-  - from: 'قابل تزریق، تزریق کردن'
-    to: 'inj'
-  - from: 'تزریقی'
-    to: 'inj'
-  - from: 'دیازپام'
-    to: 'DZP'
-  - from: 'پنی سیلین'
-    to: 'Pen'
-  - from: 'پنی\u200cسیلین'
-    to: 'Pen'
-  - from: 'سفازولین'
-    to: 'Cefazolin'
-  - from: 'لیدوکائین'
-    to: 'Lidocaine'
-  - from: 'تریامسینولون'
-    to: 'Triamcinolone'
-  - from: 'دپو مدرول'
-    to: 'Depo-Medrol'
-  - from: 'جنتامایسین'
-    to: 'Gentamicin'
-  - from: 'اپی\u200cنفرین'
-    to: 'Epinephrine'
-  - from: 'بتادین'
-    to: 'Betadine'
-
-  # ===== Procedures / Surgery =====
-  - from: 'او آر'
-    to: 'OR'
-  - from: 'او\u200cآر'
-    to: 'OR'
-  - from: 'اوآر'
-    to: 'OR'
-  - from: 'اتاق عمل'
-    to: 'OR'
-  - from: 'اتاقعمل'
-    to: 'OR'
-  - from: 'بیهوشی عمومی'
-    to: 'GA'
-  - from: 'بی\u200cحسی اسپاینال'
-    to: 'SA'
-  - from: 'پرپ و درپ'
-    to: 'P&D'
-  - from: 'سی\u200cآرم'
-    to: 'C-arm'
-  - from: 'سی آرم'
-    to: 'C-arm'
-  - from: 'سیآرم'
-    to: 'C-arm'
-  - from: 'دبل جی'
-    to: 'DJ'
-  - from: 'دبل\u200cجی'
-    to: 'DJ'
-  - from: 'دبلجی'
-    to: 'DJ'
-  - from: 'دی جی'
-    to: 'DJ'
-  - from: 'استنت دبل جی'
-    to: 'Double-J stent'
-  - from: 'استنت DJ'
-    to: 'Double-J stent'
-  - from: 'تعبیه استنت دبل جی'
-    to: 'Double-J stent insertion'
-  - from: 'یورتروسکوپی و سنگ\u200cشکنی'
-    to: 'TUL'
-  - from: 'تی یو ال'
-    to: 'TUL'
-  - from: 'تی\u200cیو\u200cال'
-    to: 'TUL'
-  - from: 'فیکساسیون باز و تثبیت داخلی'
-    to: 'ORIF'
-  - from: 'او آر آی اف'
-    to: 'ORIF'
-  - from: 'او\u200cآر\u200cآی\u200cاف'
-    to: 'ORIF'
-  - from: 'اوآرایاف'
-    to: 'ORIF'
-  - from: 'فیکساسیون داخلی با جااندازی بسته'
-    to: 'CRIF'
-  - from: 'سی آر آی اف'
-    to: 'CRIF'
-  - from: 'سی\u200cآر\u200cآی\u200cاف'
-    to: 'CRIF'
-  - from: 'میخ فمورال پروگزیمال ضد چرخش'
-    to: 'PFNA'
-  - from: 'پی اف ان ای'
-    to: 'PFNA'
-  - from: 'پی\u200cاف\u200cان\u200cای'
-    to: 'PFNA'
-  - from: 'تعویض کامل مفصل زانو'
-    to: 'TKA'
-  - from: 'تی کا'
-    to: 'TKA'
-  - from: 'تی\u200cکا'
-    to: 'TKA'
-  - from: 'تیکا'
-    to: 'TKA'
-  - from: 'تعویض کامل مفصل هیپ'
-    to: 'THA'
-  - from: 'تی اچ ای'
-    to: 'THA'
-  - from: 'تی\u200cاچ\u200cای'
-    to: 'THA'
-  - from: 'تیاچای'
-    to: 'THA'
-  - from: 'لیگامان صلیبی قدامی'
-    to: 'ACL'
-  - from: 'ای سی ال'
-    to: 'ACL'
-  - from: 'ای\u200cسی\u200cال'
-    to: 'ACL'
-  - from: 'ایسیال'
-    to: 'ACL'
-  - from: 'بازسازی لیگامان صلیبی قدامی'
-    to: 'ACL reconstruction'
-  - from: 'لیگامان تالوفیبولار قدامی'
-    to: 'ATFL'
-  - from: 'لیگامان کولترال مدیال'
-    to: 'MCL'
-  - from: 'سندرم تونل کارپ'
-    to: 'CTS'
-  - from: 'سی تی اس'
-    to: 'CTS'
-  - from: 'سی\u200cتی\u200cاس'
-    to: 'CTS'
-  - from: 'سیتیاس'
-    to: 'CTS'
-  - from: 'آزادسازی تونل کارپ'
-    to: 'Carpal tunnel release'
-  - from: 'نفرولیتوتومی از طریق پوست'
-    to: 'PCNL'
-  - from: 'پی سی ان ال'
-    to: 'PCNL'
-  - from: 'پی\u200cسی\u200cان\u200cال'
-    to: 'PCNL'
-  - from: 'پیسیانال'
-    to: 'PCNL'
-  - from: 'عمل برداشتن از طریق پیشابراه'
-    to: 'TUR'
-  - from: 'برداشتن از راه مجرا'
-    to: 'TUR'
-  - from: 'برداشتن پروستات از راه مجرا'
-    to: 'TURP'
-  - from: 'تی یو آر پی'
-    to: 'TURP'
-  - from: 'تی\u200cیو\u200cآر\u200cپی'
-    to: 'TURP'
-  - from: 'تییوآرپی'
-    to: 'TURP'
-  - from: 'دیلاتاسیون و کورتاژ'
-    to: 'D&C'
-  - from: 'دی اند سی'
-    to: 'D&C'
-  - from: 'دی و سی'
-    to: 'D&C'
-  - from: 'دی\u200cاند\u200cسی'
-    to: 'D&C'
-  - from: 'دیاندسی'
-    to: 'D&C'
-  - from: 'دیوسی'
-    to: 'D&C'
-  - from: 'کاندید دی اند سی'
-    to: 'candidate for D&C'
-  - from: 'کاندید دی\u200cاند\u200cسی'
-    to: 'candidate for D&C'
-  - from: 'کلانژیوپانکراتوگرافی رتروگراد اندوسکوپیک'
-    to: 'ERCP'
-  - from: 'ای آر سی پی'
-    to: 'ERCP'
-  - from: 'ای\u200cآر\u200cسی\u200cپی'
-    to: 'ERCP'
-  - from: 'ایآرسیپی'
-    to: 'ERCP'
-  - from: 'لاپاراتومی'
-    to: 'Laparotomy'
-  - from: 'لاپروتومی'
-    to: 'Laparotomy'
-  - from: 'لاپاروتومی'
-    to: 'Laparotomy'
-  - from: 'اسلیو گاسترکتومی'
-    to: 'Sleeve gastrectomy'
-  - from: 'کوله سیستکتومی'
-    to: 'Cholecystectomy'
-  - from: 'سزارین'
-    to: 'Cesarean section'
-  - from: 'کورتاژ تخلیه\u200cای'
-    to: 'Evacuation curettage'
-  - from: 'یورتروپلاستی'
-    to: 'Urethroplasty'
-  - from: 'آرتروسکوپی'
-    to: 'Arthroscopy'
-  - from: 'آرتروتومی'
-    to: 'Arthrotomy'
-  - from: 'آرتروپلاستی'
-    to: 'Arthroplasty'
-  - from: 'رزکسیون ارتروپلاستی'
-    to: 'Resection arthroplasty'
-  - from: 'ترمیم روتاتور کاف'
-    to: 'Rotator cuff repair'
-  - from: 'آکرومیوپلاستی'
-    to: 'Acromioplasty'
-  - from: 'بورسکتومی'
-    to: 'Bursectomy'
-  - from: 'تنودز'
-    to: 'Tenodesis'
-  - from: 'تنودز بایسپس'
-    to: 'Biceps tenodesis'
-  - from: 'فیستولکتومی'
-    to: 'Fistulectomy'
-  - from: 'فیستولوتومی'
-    to: 'Fistulotomy'
-  - from: 'هموروئیدکتومی'
-    to: 'Hemorrhoidectomy'
-  - from: 'ترمیم فتق'
-    to: 'Hernia repair'
-  - from: 'ترمیم فتق اینگوئینال'
-    to: 'Inguinal hernia repair'
-  - from: 'ترمیم فتق نافی'
-    to: 'Umbilical hernia repair'
-  - from: 'کارگذاری مش'
-    to: 'Mesh placement'
-  - from: 'جااندازی بسته'
-    to: 'Closed reduction'
-  - from: 'جااندازی باز'
-    to: 'Open reduction'
-  - from: 'فیکساسیون داخلی'
-    to: 'Internal fixation'
-  - from: 'خروج پلاک و پیچ'
-    to: 'Hardware removal'
-  - from: 'جااندازی دررفتگی شانه'
-    to: 'Shoulder dislocation reduction'
-  - from: 'جااندازی شکستگی بینی'
-    to: 'Nasal fracture reduction'
-  - from: 'آزادسازی انگشت ماشه\u200cای'
-    to: 'Trigger finger release'
-  - from: 'تزریق داخل مفصلی'
-    to: 'Intra-articular injection'
-  - from: 'کشیدن ناخن'
-    to: 'Nail avulsion'
-  - from: 'اکسزیون سینوس پایلونیدال'
-    to: 'Pilonidal sinus excision'
-  - from: 'گرافت استخوان'
-    to: 'Bone graft'
-  - from: 'گرافت استخوان ایلیاک'
-    to: 'Iliac bone graft'
-  - from: 'ترمیم تاندون آشیل'
-    to: 'Achilles tendon repair'
-  - from: 'سینووکتومی'
-    to: 'Synovectomy'
-  - from: 'ترمیم لیگامان'
-    to: 'Ligament repair'
-  - from: 'بازسازی لیگامان'
-    to: 'Ligament reconstruction'
-  - from: 'آزادسازی لیگامان'
-    to: 'Ligament release'
-  - from: 'نورکتومی'
-    to: 'Neurectomy'
-  - from: 'کپسولورافی'
-    to: 'Capsulorrhaphy'
-  - from: 'استئوتومی کالکانئوس'
-    to: 'Calcaneal osteotomy'
-  - from: 'سنترالیزاسیون مینیسک'
-    to: 'Meniscus centralization'
-  - from: 'جراحی رویژن'
-    to: 'Revision surgery'
-  - from: 'دبریدمان'
-    to: 'Debridement'
-  - from: 'اسفنکتروتومی'
-    to: 'Sphincterotomy'
-  - from: 'هیستروسکوپی'
-    to: 'Hysteroscopy'
-  - from: 'کورتاژ'
-    to: 'Curettage'
-  - from: 'پولیپکتومی'
-    to: 'Polypectomy'
-  - from: 'دیلاتاسیون'
-    to: 'Dilation'
-  - from: 'بیوپسی'
-    to: 'Biopsy'
-  - from: 'نمونه\u200cبرداری'
-    to: 'Biopsy'
-  - from: 'لنفادنکتومی'
-    to: 'Lymphadenectomy'
-  - from: 'آزادسازی چسبندگی روده'
-    to: 'Enterolysis'
-  - from: 'آناستوموز کولورکتال'
-    to: 'Colorectal anastomosis'
-  - from: 'ایلئوستومی'
-    to: 'Ileostomy'
-  - from: 'فلپ اومنتوم'
-    to: 'Omental flap'
-  - from: 'رزکسیون پرولاپس رکتوم'
-    to: 'Rectal prolapse resection'
-  - from: 'آناستوموز با استاپلر'
-    to: 'Stapled anastomosis'
-  - from: 'اسکاروتومی'
-    to: 'Scar revision'
-  - from: 'ترمیم اسکار'
-    to: 'Scar revision'
-  - from: 'فلپ پوستی'
-    to: 'Skin flap'
-  - from: 'برداشتن خال'
-    to: 'Nevus excision'
-  - from: 'دکمپریشن لیزری دیسک'
-    to: 'Laser disc decompression'
-  - from: 'بلوک فاست'
-    to: 'Facet block'
-  - from: 'تزریق فورامینال کورتون'
-    to: 'Foraminal steroid injection'
-  - from: 'استخراج با بالون'
-    to: 'Balloon extraction'
-  - from: 'نورولیز'
-    to: 'Neurolysis'
-  - from: 'لیزر CO2'
-    to: 'CO2 laser'
-  - from: 'تعبیه سوند فولی'
-    to: 'Foley catheter insertion'
-  - from: 'تعبیه پورت'
-    to: 'Port insertion'
-  - from: 'کاتتریزاسیون ورید مرکزی'
-    to: 'Central venous catheterization'
-  - from: 'وضعیت ترندلنبرگ'
-    to: 'Trendelenburg position'
-  - from: 'مانیپولاسیون'
-    to: 'Manipulation'
-  - from: 'بخیه'
-    to: 'Suturing'
-  - from: 'سوچور'
-    to: 'Suturing'
-  - from: 'پانسمان'
-    to: 'Dressing'
-  - from: 'پانسمان استریل'
-    to: 'Sterile dressing'
-  - from: 'گچ'
-    to: 'Cast'
-  - from: 'آتل'
-    to: 'Splint'
-  - from: 'اسپلینت'
-    to: 'Splint'
-  - from: 'ابداکشن پیلو'
-    to: 'Abduction pillow'
-  - from: 'انکور سوچور'
-    to: 'Anchor suture'
-  - from: 'تامپون بینی'
-    to: 'Nasal packing'
-  - from: 'اسپلینت بینی'
-    to: 'Nasal splint'
-
-  # ===== Imaging / OB =====
-  - from: 'سونوگرافی'
-    to: 'Ultrasound'
-  - from: 'سونوگرافی کالر داپلر'
-    to: 'Color Doppler'
-  - from: 'ماموگرافی'
-    to: 'Mammography'
-  - from: 'رادیوگرافی'
-    to: 'X-ray'
-  - from: 'فلوروسکوپی'
-    to: 'Fluoroscopy'
-  - from: 'سیستم گزارش\u200cدهی و داده\u200cهای تصویربرداری پستان'
-    to: 'BI-RADS'
-  - from: 'بی آی آر ای دی اس'
-    to: 'BI-RADS'
-  - from: 'بی\u200cآی\u200cآر\u200cای\u200cدی\u200cاس'
-    to: 'BI-RADS'
-  - from: 'کالج رادیولوژی آمریکا'
-    to: 'ACR'
-  - from: 'طول سر تا باسن جنین'
-    to: 'CRL'
-  - from: 'سی آر ال'
-    to: 'CRL'
-  - from: 'سی\u200cآر\u200cال'
-    to: 'CRL'
-  - from: 'قطر دوپارییتال'
-    to: 'BPD'
-  - from: 'بی پی دی'
-    to: 'BPD'
-  - from: 'بی\u200cپی\u200cدی'
-    to: 'BPD'
-  - from: 'دور سر'
-    to: 'HC'
-  - from: 'اچ سی'
-    to: 'HC'
-  - from: 'اچ\u200cسی'
-    to: 'HC'
-  - from: 'دور شکم'
-    to: 'AC'
-  - from: 'ای سی'
-    to: 'AC'
-  - from: 'ای\u200cسی'
-    to: 'AC'
-  - from: 'طول استخوان ران جنین'
-    to: 'FL'
-  - from: 'اف ال'
-    to: 'FL'
-  - from: 'اف\u200cال'
-    to: 'FL'
-  - from: 'شاخص مایع آمنیوتیک'
-    to: 'AFI'
-  - from: 'ای اف آی'
-    to: 'AFI'
-  - from: 'ای\u200cاف\u200cآی'
-    to: 'AFI'
-  - from: 'وزن تخمینی جنین'
-    to: 'EFW'
-  - from: 'ای اف دبلیو'
-    to: 'EFW'
-  - from: 'ای\u200cاف\u200cدبلیو'
-    to: 'EFW'
-  - from: 'تاریخ احتمالی زایمان'
-    to: 'EDC'
-  - from: 'ای دی سی'
-    to: 'EDC'
-  - from: 'ای\u200cدی\u200cسی'
-    to: 'EDC'
-  - from: 'ضخامت پشت گردنی'
-    to: 'NT'
-  - from: 'ان تی'
-    to: 'NT'
-  - from: 'ان\u200cتی'
-    to: 'NT'
-  - from: 'شاخص مقاومت'
-    to: 'RI'
-  - from: 'آر آی'
-    to: 'RI'
-  - from: 'آر\u200cآی'
-    to: 'RI'
-  - from: 'شاخص پالس'
-    to: 'PI'
-  - from: 'پی آی'
-    to: 'PI'
-  - from: 'پی\u200cآی'
-    to: 'PI'
-  - from: 'نسبت سیستول به دیاستول'
-    to: 'S/D'
-  - from: 'حداکثر سرعت سیستولیک'
-    to: 'PSV'
-  - from: 'پی اس وی'
-    to: 'PSV'
-  - from: 'پی\u200cاس\u200cوی'
-    to: 'PSV'
-  - from: 'سرعت دیاستولیک نهایی'
-    to: 'EDV'
-  - from: 'ای دی وی'
-    to: 'EDV'
-  - from: 'ای\u200cدی\u200cوی'
-    to: 'EDV'
-  - from: 'پروفایل بیوفیزیکی'
-    to: 'BPS'
-  - from: 'بی پی اس'
-    to: 'BPS'
-  - from: 'بی\u200cپی\u200cاس'
-    to: 'BPS'
-  - from: 'محدودیت رشد داخل رحمی'
-    to: 'IUGR'
-  - from: 'آی یو جی آر'
-    to: 'IUGR'
-  - from: 'آی\u200cیو\u200cجی\u200cآر'
-    to: 'IUGR'
-  - from: 'بقایای بارداری'
-    to: 'RPOC'
-  - from: 'آر پی او سی'
-    to: 'RPOC'
-  - from: 'آر\u200cپی\u200cاو\u200cسی'
-    to: 'RPOC'
-  - from: 'بارداری خارج رحمی'
-    to: 'Ectopic pregnancy'
-  - from: 'بارداری خارج\u200cرحمی'
-    to: 'Ectopic pregnancy'
-  - from: 'سن بارداری'
-    to: 'Gestational age'
-  - from: 'طول سرویکس'
-    to: 'Cervical length'
-  - from: 'شریان رحمی'
-    to: 'Uterine artery'
-  - from: 'شریان بند ناف'
-    to: 'Umbilical artery'
-  - from: 'شریان مغزی میانی'
-    to: 'Middle cerebral artery'
-  - from: 'پرزانتاسیون سفالیک'
-    to: 'Cephalic presentation'
-  - from: 'بریچ'
-    to: 'Breech presentation'
-  - from: 'گرید جفت'
-    to: 'Placental grade'
-  - from: 'مایع آمنیوتیک'
-    to: 'Amniotic fluid'
-  - from: 'ساک بارداری'
-    to: 'Gestational sac'
-  - from: 'کیسه زرده'
-    to: 'Yolk sac'
-  - from: 'رویان'
-    to: 'Embryo'
-  - from: 'جنین'
-    to: 'Fetus'
-  - from: 'جفت'
-    to: 'Placenta'
-  - from: 'بند ناف'
-    to: 'Umbilical cord'
-
-  # ===== Anatomy / Pathology =====
-  - from: 'رحم'
-    to: 'Uterus'
-  - from: 'تخمدان'
-    to: 'Ovary'
-  - from: 'اندومتر'
-    to: 'Endometrium'
-  - from: 'میومتر'
-    to: 'Myometrium'
-  - from: 'دهانه رحم'
-    to: 'Cervix'
-  - from: 'سرویکس'
-    to: 'Cervix'
-  - from: 'دهانه داخلی رحم'
-    to: 'Internal os'
-  - from: 'حفره اندومتر'
-    to: 'Endometrial cavity'
-  - from: 'واژن'
-    to: 'Vagina'
-  - from: 'مثانه'
-    to: 'Bladder'
-  - from: 'مجرای ادراری'
-    to: 'Urethra'
-  - from: 'حالب'
-    to: 'Ureter'
-  - from: 'لگنچه کلیه'
-    to: 'Renal pelvis'
-  - from: 'کلیه'
-    to: 'Kidney'
-  - from: 'پروستات'
-    to: 'Prostate'
-  - from: 'بزرگی خوش خیم پروستات'
-    to: 'BPH'
-  - from: 'بزرگی خوش\u200cخیم پروستات'
-    to: 'BPH'
-  - from: 'فمور'
-    to: 'Femur'
-  - from: 'استخوان ران'
-    to: 'Femur'
-  - from: 'گردن فمور'
-    to: 'Femoral neck'
-  - from: 'شفت فمور'
-    to: 'Femoral shaft'
-  - from: 'تروکانتر بزرگ'
-    to: 'Greater trochanter'
-  - from: 'تیبیا'
-    to: 'Tibia'
-  - from: 'درشت\u200cنی'
-    to: 'Tibia'
-  - from: 'فیبولا'
-    to: 'Fibula'
-  - from: 'نازک\u200cنی'
-    to: 'Fibula'
-  - from: 'زانو'
-    to: 'Knee'
-  - from: 'کشکک'
-    to: 'Patella'
-  - from: 'پاتلا'
-    to: 'Patella'
-  - from: 'مینیسک'
-    to: 'Meniscus'
-  - from: 'مفصل ران'
-    to: 'Hip'
-  - from: 'مفصل هیپ'
-    to: 'Hip'
-  - from: 'هیپ'
-    to: 'Hip'
-  - from: 'استابولوم'
-    to: 'Acetabulum'
-  - from: 'شانه'
-    to: 'Shoulder'
-  - from: 'هومروس'
-    to: 'Humerus'
-  - from: 'استخوان بازو'
-    to: 'Humerus'
-  - from: 'روتاتور کاف'
-    to: 'Rotator cuff'
-  - from: 'تاندون بایسپس'
-    to: 'Biceps tendon'
-  - from: 'آرنج'
-    to: 'Elbow'
-  - from: 'رادیوس'
-    to: 'Radius'
-  - from: 'سر رادیوس'
-    to: 'Radial head'
-  - from: 'مچ دست'
-    to: 'Wrist'
-  - from: 'متاکارپ'
-    to: 'Metacarpal'
-  - from: 'شست دست'
-    to: 'Thumb'
-  - from: 'انگشت دست'
-    to: 'Finger'
-  - from: 'دست'
-    to: 'Hand'
-  - from: 'مچ پا'
-    to: 'Ankle'
-  - from: 'پا'
-    to: 'Foot'
-  - from: 'انگشت پا'
-    to: 'Toe'
-  - from: 'شست پا'
-    to: 'Hallux'
-  - from: 'تاندون آشیل'
-    to: 'Achilles tendon'
-  - from: 'اسکافوئید'
-    to: 'Scaphoid'
-  - from: 'تالوس'
-    to: 'Talus'
-  - from: 'کالکانئوس'
-    to: 'Calcaneus'
-  - from: 'مفصل گلنوهومرال'
-    to: 'Glenohumeral joint'
-  - from: 'آکرومیون'
-    to: 'Acromion'
-  - from: 'کوراکوئید'
-    to: 'Coracoid'
-  - from: 'دلتوئید'
-    to: 'Deltoid'
-  - from: 'مفصل کارپومتاکارپال'
-    to: 'CMC joint'
-  - from: 'اندام فوقانی'
-    to: 'Upper limb'
-  - from: 'اندام تحتانی'
-    to: 'Lower limb'
-  - from: 'بینی'
-    to: 'Nose'
-  - from: 'استخوان بینی'
-    to: 'Nasal bone'
-  - from: 'پوست'
-    to: 'Skin'
-  - from: 'بافت زیرجلدی'
-    to: 'Subcutaneous tissue'
-  - from: 'فاشیا'
-    to: 'Fascia'
-  - from: 'عضله'
-    to: 'Muscle'
-  - from: 'تاندون'
-    to: 'Tendon'
-  - from: 'لیگامان'
-    to: 'Ligament'
-  - from: 'استخوان'
-    to: 'Bone'
-  - from: 'مفصل'
-    to: 'Joint'
-  - from: 'بورس'
-    to: 'Bursa'
-  - from: 'ستون فقرات'
-    to: 'Spine'
-  - from: 'فقرات کمری'
-    to: 'Lumbar vertebrae'
-  - from: 'استخوان خاجی'
-    to: 'Sacrum'
-  - from: 'دیسک بین مهره\u200cای'
-    to: 'Intervertebral disc'
-  - from: 'مفصل فاست'
-    to: 'Facet joint'
-  - from: 'قفسه سینه'
-    to: 'Chest'
-  - from: 'ریه'
-    to: 'Lung'
-  - from: 'دیافراگم'
-    to: 'Diaphragm'
-  - from: 'مدیاستن'
-    to: 'Mediastinum'
-  - from: 'تراشه'
-    to: 'Trachea'
-  - from: 'قلب'
-    to: 'Heart'
-  - from: 'پستان'
-    to: 'Breast'
-  - from: 'غده لنفاوی'
-    to: 'Lymph node'
-  - from: 'کبد'
-    to: 'Liver'
-  - from: 'کیسه صفرا'
-    to: 'Gallbladder'
-  - from: 'صفرا'
-    to: 'Bile'
-  - from: 'پانکراس'
-    to: 'Pancreas'
-  - from: 'طحال'
-    to: 'Spleen'
-  - from: 'معده'
-    to: 'Stomach'
-  - from: 'اثنی عشر'
-    to: 'Duodenum'
-  - from: 'کولون'
-    to: 'Colon'
-  - from: 'کولون سیگموئید'
-    to: 'Sigmoid colon'
-  - from: 'رکتوم'
-    to: 'Rectum'
-  - from: 'مقعد'
-    to: 'Anus'
-  - from: 'پریتوئن'
-    to: 'Peritoneum'
-  - from: 'اومنتوم'
-    to: 'Omentum'
-  - from: 'جدار شکم'
-    to: 'Abdominal wall'
-  - from: 'کانال اینگوئینال'
-    to: 'Inguinal canal'
-  - from: 'کانال فمورال'
-    to: 'Femoral canal'
-  - from: 'ناف'
-    to: 'Umbilicus'
-  - from: 'تیروئید'
-    to: 'Thyroid'
-  - from: 'غده پاروتید'
-    to: 'Parotid gland'
-  - from: 'غده تحت فکی'
-    to: 'Submandibular gland'
-  - from: 'غده بزاقی'
-    to: 'Salivary gland'
-  - from: 'شریان'
-    to: 'Artery'
-  - from: 'ورید'
-    to: 'Vein'
-  - from: 'آئورت'
-    to: 'Aorta'
-  - from: 'ورید اجوف تحتانی'
-    to: 'IVC'
-  - from: 'ورید پورت'
-    to: 'Portal vein'
-  - from: 'شریان کلیوی'
-    to: 'Renal artery'
-  - from: 'ورید کلیوی'
-    to: 'Renal vein'
-  - from: 'ورید ژوگولار'
-    to: 'Jugular vein'
-  - from: 'شریان کاروتید'
-    to: 'Carotid artery'
-  - from: 'ورید طحالی'
-    to: 'Splenic vein'
-  - from: 'شریان ورتبرال'
-    to: 'Vertebral artery'
-  - from: 'شریان فمورال'
-    to: 'Femoral artery'
-  - from: 'شریان پوپلیته'
-    to: 'Popliteal artery'
-  - from: 'ورید صافن'
-    to: 'Saphenous vein'
-  - from: 'ورید سفالیک'
-    to: 'Cephalic vein'
-  - from: 'شریان رادیال'
-    to: 'Radial artery'
-  - from: 'فیستول شریانی وریدی'
-    to: 'AV fistula'
-  - from: 'فضای اشغال\u200cکننده'
-    to: 'SOL'
-  - from: 'مجرای صفراوی مشترک'
-    to: 'CBD'
-  - from: 'سی بی دی'
-    to: 'CBD'
-  - from: 'سی\u200cبی\u200cدی'
-    to: 'CBD'
-  - from: 'لنفادنوپاتی'
-    to: 'LAP'
-  - from: 'ال ای پی'
-    to: 'LAP'
-  - from: 'ال\u200cای\u200cپی'
-    to: 'LAP'
-  - from: 'رفلاکس معده به مری'
-    to: 'GER'
-  - from: 'جی ای آر'
-    to: 'GER'
-  - from: 'جی\u200cای\u200cآر'
-    to: 'GER'
-  - from: 'تنگی هیپرتروفیک پیلور'
-    to: 'HPS'
-  - from: 'اچ پی اس'
-    to: 'HPS'
-  - from: 'اچ\u200cپی\u200cاس'
-    to: 'HPS'
-  - from: 'آدنکس'
-    to: 'Adnexa'
-  - from: 'آدنکس راست'
-    to: 'right adnexa'
-
-  # ===== Devices / Materials =====
-  - from: 'کاتتر'
-    to: 'Catheter'
-  - from: 'کاتتر ورید مرکزی'
-    to: 'Central venous catheter'
-  - from: 'پورت زیرجلدی'
-    to: 'Subcutaneous port'
-  - from: 'گایدوایر'
-    to: 'Guidewire'
-  - from: 'استنت'
-    to: 'Stent'
-  - from: 'سوند فولی'
-    to: 'Foley'
-  - from: 'سوندفولی'
-    to: 'Foley'
-  - from: 'کات ترفولی'
-    to: 'Foley'
-  - from: 'کاتترفولی'
-    to: 'Foley'
-  - from: 'کاتتر فولی'
-    to: 'Foley'
-  - from: 'فولی'
-    to: 'Foley'
-  - from: 'سوند'
-    to: 'Catheter'
-  - from: 'پین'
-    to: 'Pin'
-  - from: 'پیچ'
-    to: 'Screw'
-  - from: 'پلاک'
-    to: 'Plate'
-  - from: 'پروتز'
-    to: 'Prosthesis'
-  - from: 'پروتز هینج'
-    to: 'Hinge prosthesis'
-  - from: 'پروتز سیمانی'
-    to: 'Cemented prosthesis'
-  - from: 'تورنیکه'
-    to: 'Tourniquet'
-  - from: 'انکور'
-    to: 'Anchor'
-  - from: 'نایلون'
-    to: 'Nylon'
-  - from: 'مونوکریل'
-    to: 'Monocryl'
-  - from: 'ویکریل'
-    to: 'Vicryl'
-  - from: 'پی\u200cدی\u200cاس'
-    to: 'PDS'
-  - from: 'استاپل'
-    to: 'Staple'
-  - from: 'استاپلر'
-    to: 'Stapler'
-  - from: 'مش'
-    to: 'Mesh'
-  - from: 'درن'
-    to: 'Drain'
-  - from: 'درن جکسون'
-    to: 'Jackson drain'
-  - from: 'میکروسکوپ'
-    to: 'Microscope'
-  - from: 'آرتروسکوپ'
-    to: 'Arthroscope'
-  - from: 'یورتروسکوپ'
-    to: 'Ureteroscope'
-  - from: 'رزکتوسکوپ'
-    to: 'Resectoscope'
-  - from: 'تروکار'
-    to: 'Trocar'
-  - from: 'اندوسکوپ'
-    to: 'Endoscope'
-  - from: 'رینگ فورسپس'
-    to: 'Ring forceps'
-  - from: 'تناکولوم'
-    to: 'Tenaculum'
-  - from: 'بوژی'
-    to: 'Bougie'
-  - from: 'بسکت'
-    to: 'Basket'
-  - from: 'لیتوکلاست'
-    to: 'Lithoclast'
-  - from: 'گرسپر'
-    to: 'Grasper'
-
-  # ===== Conditions / Findings =====
-  - from: 'دررفتگی'
-    to: 'Dislocation'
-  - from: 'جوش نخوردگی'
-    to: 'Nonunion'
-  - from: 'آرتروز'
-    to: 'Arthrosis'
-  - from: 'سینوویت'
-    to: 'Synovitis'
-  - from: 'دفرمیتی'
-    to: 'Deformity'
-  - from: 'والگوس'
-    to: 'Valgus'
-  - from: 'واروس'
-    to: 'Varus'
-  - from: 'رکورواتوم'
-    to: 'Recurvatum'
-  - from: 'شلی'
-    to: 'Laxity'
-  - from: 'لگزیتی'
-    to: 'Laxity'
-  - from: 'کنتراکچر'
-    to: 'Contracture'
-  - from: 'شانه منجمد'
-    to: 'Frozen shoulder'
-  - from: 'انگشت ماشه\u200cای'
-    to: 'Trigger finger'
-  - from: 'سینوس پایلونیدال'
-    to: 'Pilonidal sinus'
-  - from: 'آبسه'
-    to: 'Abscess'
-  - from: 'عفونت'
-    to: 'Infection'
-  - from: 'بافت نکروتیک'
-    to: 'Necrotic tissue'
-  - from: 'ترشحات چرکی'
-    to: 'Purulent discharge'
-  - from: 'زخم'
-    to: 'Wound'
-  - from: 'اسکار'
-    to: 'Scar'
-  - from: 'لیپوم'
-    to: 'Lipoma'
-  - from: 'خال'
-    to: 'Nevus'
-  - from: 'توده'
-    to: 'Mass'
-  - from: 'کیست'
-    to: 'Cyst'
-  - from: 'پولیپ'
-    to: 'Polyp'
-  - from: 'فیبروم'
-    to: 'Fibroma'
-  - from: 'آدنومیوز'
-    to: 'Adenomyosis'
-  - from: 'اندومتریوما'
-    to: 'Endometrioma'
-  - from: 'اندومتریوز'
-    to: 'Endometriosis'
-  - from: 'پرولاپس رکتوم'
-    to: 'Rectal prolapse'
-  - from: 'تومور'
-    to: 'Tumor'
-  - from: 'آسیت'
-    to: 'Ascites'
-  - from: 'سنگ'
-    to: 'Stone'
-  - from: 'اسلاج'
-    to: 'Sludge'
-  - from: 'تنگی'
-    to: 'Stricture'
-  - from: 'هیدرونفروز'
-    to: 'Hydronephrosis'
-  - from: 'بارداری'
-    to: 'Pregnancy'
-  - from: 'سقط'
-    to: 'Miscarriage'
-  - from: 'سقط ناقص'
-    to: 'Incomplete abortion'
-  - from: 'سقط فراموش شده'
-    to: 'Missed abortion'
-  - from: 'مرگ جنین'
-    to: 'Fetal demise'
-  - from: 'جفت چسبنده'
-    to: 'Placenta accreta'
-  - from: 'کبد چرب'
-    to: 'Fatty liver'
-  - from: 'اسپلنومگالی'
-    to: 'Splenomegaly'
-  - from: 'آپاندیسیت'
-    to: 'Appendicitis'
-  - from: 'واریس'
-    to: 'Varicose veins'
-  - from: 'ترومبوفلبیت'
-    to: 'Thrombophlebitis'
-  - from: 'کلسیفیکاسیون'
-    to: 'Calcification'
-  - from: 'ندول تیروئید'
-    to: 'Thyroid nodule'
-  - from: 'تیروئیدیت هاشیموتو'
-    to: 'Hashimoto thyroiditis'
-  - from: 'تغییرات فیبروکیستیک'
-    to: 'Fibrocystic change'
-  - from: 'فیبروآدنوما'
-    to: 'Fibroadenoma'
-  - from: 'کیست پستان'
-    to: 'Breast cyst'
-  - from: 'لنف نود راکتیو'
-    to: 'Reactive lymph node'
-  - from: 'خوش\u200cخیم'
-    to: 'Benign'
-  - from: 'بدخیم'
-    to: 'Malignant'
-  - from: 'مشکوک'
-    to: 'Suspicious'
-  - from: 'میکروکلسیفیکاسیون'
-    to: 'Microcalcification'
-  - from: 'هیپواکوئیک'
-    to: 'Hypoechoic'
-  - from: 'هیپراکوئیک'
-    to: 'Hyperechoic'
-  - from: 'آنکوئیک'
-    to: 'Anechoic'
-  - from: 'ایزواکوئیک'
-    to: 'Isoechoic'
-  - from: 'هتروژن'
-    to: 'Heterogeneous'
-  - from: 'هموژن'
-    to: 'Homogeneous'
-  - from: 'اکوژنیسیته'
-    to: 'Echogenicity'
-  - from: 'شکستگی'
-    to: 'Fx'
-  - from: 'هموروئید'
-    to: 'Hemorrhoid'
-  - from: 'فیستول'
-    to: 'Fistula'
-  - from: 'فتق'
-    to: 'Hernia'
-  - from: 'سرطان'
-    to: 'Cancer'
-  - from: 'دیابت ملیتوس'
-    to: 'diabetes mellitus'
-  - from: 'دیابت'
-    to: 'diabetes'
-  - from: 'تهوع و استفراغ'
-    to: 'N&V'
-  - from: 'عدم پیگیری'
-    to: 'DS'
-  - from: 'قطع پیگیری'
-    to: 'DS'
-  - from: 'بررسی دستگاه ها'
-    to: 'ROS'
-  - from: 'بررسی دستگاه\u200cها'
-    to: 'ROS'
-  - from: 'استراحت مطلق در بستر'
-    to: 'CBR'
-  - from: 'کم شدن'
-    to: 'DC'
-  - from: 'کاهش'
-    to: 'DC'
-  - from: 'زیر بغل'
-    to: 'Ax'
-  - from: 'وریدی'
-    to: 'IV'
-  - from: 'درون عضلانی'
-    to: 'IM'
-  - from: 'زیر جلدی'
-    to: 'SC'
-  - from: 'داخل جلدی'
-    to: 'ID'
-  - from: 'تنفس کنترل شده'
-    to: 'CR'
-  - from: 'قلبی تنفسی'
-    to: 'CR'
-  - from: 'لوله بینی - معده ای'
-    to: 'NG Tube'
-  - from: 'لوله بینی - معده\u200cای'
-    to: 'NG Tube'
-  - from: 'راه هوایی، تنفس و گردش خون'
-    to: 'ABC'
-  - from: 'میزان ضربان قلب جنین'
-    to: 'FHR'
-  - from: 'ضربان قلب جنین'
-    to: 'FHR'
-  - from: 'گوش، حلق و بینی'
-    to: 'ENT'
-  - from: 'تب روماتیسمی حاد'
-    to: 'ARF'
-  - from: 'خدمات فوریت های پزشکی'
-    to: 'EMS'
-  - from: 'خدمات فوریت\u200cهای پزشکی'
-    to: 'EMS'
-  - from: 'هموستاز'
-    to: 'Hemostasis'
-  - from: 'شستشو'
-    to: 'Irrigation'
-  - from: 'درناژ'
-    to: 'Drainage'
-  - from: 'نمونه'
-    to: 'Specimen'
-  - from: 'کشت'
-    to: 'Culture'
-  - from: 'سیتولوژی'
-    to: 'Cytology'
-  - from: 'ریکاوری'
-    to: 'Recovery'
-  - from: 'استریل'
-    to: 'Sterile'
-  - from: 'سوپاین'
-    to: 'Supine'
-  - from: 'پرون'
-    to: 'Prone'
-  - from: 'لترال'
-    to: 'Lateral'
-  - from: 'لیتوتومی'
-    to: 'Lithotomy'
-  - from: 'نیمه\u200cنشسته'
-    to: 'Semi-sitting'
-  - from: 'پاتولوژی'
-    to: 'Pathology'
-  - from: 'یورتروسکوپی'
-    to: 'Ureteroscopy'
-  - from: 'سیستوسکوپی'
-    to: 'Cystoscopy'
-  - from: 'سنگ\u200cشکنی'
-    to: 'Lithotripsy'
-
-  # ===== Extra common ASR / spelling variants =====
-  - from: 'پایدار'
-    to: 'stable'
-  - from: 'پايدار'
-    to: 'stable'
-  - from: 'V/S پایدار'
-    to: 'V/S stable'
-  - from: 'V/S فوتیدار'
-    to: 'V/S stable'
-  - from: 'مفصل حیف'
-    to: 'Hip'
-  - from: 'Joint حیف'
-    to: 'Hip'
-  - from: 'تعویض کامل Joint هیپ'
-    to: 'THA'
-  - from: 'تعویض کامل Joint حیف'
-    to: 'THA'
-  - from: 'آنزیمهای Heartی'
-    to: 'cardiac enzymes'
-  - from: 'C سی یو'
-    to: 'CCU'
-  - from: 'Cسی یو'
-    to: 'CCU'
-  - from: 'C سی\u200cیو'
-    to: 'CCU'
+- from: ناشتا
+  to: NPO
+  category: unsafe
+  confidence: low
+  requires_context: true
+  dangerous: true
+- from: کاهش
+  to: DC
+  category: unsafe
+  confidence: low
+  requires_context: true
+  dangerous: true
+- from: کم شدن
+  to: DC
+  category: unsafe
+  confidence: low
+  requires_context: true
+  dangerous: true
+- from: آئورت
+  to: Aorta
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: آرنج
+  to: Elbow
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: آمبولیریوی
+  to: PE
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: آمپول
+  to: Amp
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: اتاقعمل
+  to: OR
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: استخوان
+  to: Bone
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: اسکار
+  to: Scar
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: الکتروکاردیوگرام
+  to: ECG
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: امی
+  to: MI
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: انپو
+  to: NPO
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: بورس
+  to: Bursa
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: بینی
+  to: Nose
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: تالوس
+  to: Talus
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: تخمدان
+  to: Ovary
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: تزریقی
+  to: inj
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: تنفس
+  to: RR
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: توده
+  to: Mass
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: تومور
+  to: Tumor
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: تیبیا
+  to: Tibia
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: جنین
+  to: Fetus
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: خال
+  to: Nevus
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: دبلجی
+  to: DJ
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: درن
+  to: Drain
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: دست
+  to: Hand
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: دما
+  to: T
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: دیازپام
+  to: DZP
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: دیوسی
+  to: D&C
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: ریه
+  to: Lung
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: زانو
+  to: Knee
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: زخم
+  to: Wound
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: سدیم
+  to: Na
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: سنگ
+  to: Stone
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: سکتهقلبی
+  to: MI
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: سکتهمغزی
+  to: CVA
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: شربت
+  to: Syr
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: شلی
+  to: Laxity
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: شکستگی
+  to: Fx
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: صفرا
+  to: Bile
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: علائمحیاتی
+  to: V/S
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: فشار خون
+  to: BP
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: فشارخون
+  to: BP
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: فمور
+  to: Femur
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: قرص
+  to: Tab
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: قلب
+  to: Heart
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: قند خون
+  to: BS
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: قندخون
+  to: BS
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: قندخونناشتا
+  to: FBS
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: لنفادنوپاتی
+  to: LAP
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: مش
+  to: Mesh
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: مفصل
+  to: Joint
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: مقعد
+  to: Anus
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: منیزیم
+  to: Mg
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: ن.پ.و
+  to: NPO
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: نارساییاحتقانیقلب
+  to: CHF
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: نارساییقلبی
+  to: HF
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: نایلون
+  to: Nylon
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: نبض
+  to: HR
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: نوارقلب
+  to: ECG
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: نپو
+  to: NPO
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: هماتوکریت
+  to: Hct
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: هموگلوبین
+  to: Hb
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: هیپ
+  to: Hip
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: واروس
+  to: Varus
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: ورید
+  to: Vein
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: وریدی
+  to: IV
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: وی/اس
+  to: V/S
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: پا
+  to: Foot
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: پتاسیم
+  to: K
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: پرون
+  to: Prone
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: پلاک
+  to: Plate
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: پلاکت
+  to: PLT
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: پوست
+  to: Skin
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: پولیپ
+  to: Polyp
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: پیآرآن
+  to: PRN
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: پین
+  to: Pin
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: پیچ
+  to: Screw
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: کبد
+  to: Liver
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: کراتین
+  to: Cr
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: کراتینین
+  to: Cr
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: کلسیم
+  to: Ca
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: کولون
+  to: Colon
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: کیست
+  to: Cyst
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: گچ
+  to: Cast
+  category: context_dependent
+  confidence: medium
+  requires_context: true
+  dangerous: false
+- from: آبسه
+  to: Abscess
+  category: safe_lexical
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: آتل
+  to: Splint
+  category: safe_lexical
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: آدنکس
+  to: Adnexa
+  category: safe_lexical
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: آسیت
+  to: Ascites
+  category: safe_lexical
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: آپاچی
+  to: APACHE
+  category: safe_lexical
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: استنت
+  to: Stent
+  category: safe_lexical
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: اسلاج
+  to: Sludge
+  category: safe_lexical
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: انکور
+  to: Anchor
+  category: safe_lexical
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: بخیه
+  to: Suturing
+  category: safe_lexical
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: بدخیم
+  to: Malignant
+  category: safe_lexical
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: بریچ
+  to: Breech presentation
+  category: safe_lexical
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: بسکت
+  to: Basket
+  category: safe_lexical
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: بوژی
+  to: Bougie
+  category: safe_lexical
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: تراشه
+  to: Trachea
+  category: safe_lexical
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: تنودز
+  to: Tenodesis
+  category: safe_lexical
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: تنگی
+  to: Stricture
+  category: safe_lexical
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: جفت
+  to: Placenta
+  category: safe_lexical
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: حالب
+  to: Ureter
+  category: safe_lexical
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: درناژ
+  to: Drainage
+  category: safe_lexical
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: دیابت
+  to: diabetes
+  category: safe_lexical
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: رحم
+  to: Uterus
+  category: safe_lexical
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: رویان
+  to: Embryo
+  category: safe_lexical
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: رکتوم
+  to: Rectum
+  category: safe_lexical
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سرطان
+  to: Cancer
+  category: safe_lexical
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سقط
+  to: Miscarriage
+  category: safe_lexical
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سوند
+  to: Catheter
+  category: safe_lexical
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سوچور
+  to: Suturing
+  category: safe_lexical
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سیآرم
+  to: C-arm
+  category: safe_lexical
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: شانه
+  to: Shoulder
+  category: safe_lexical
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: شریان
+  to: Artery
+  category: safe_lexical
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: شستشو
+  to: Irrigation
+  category: safe_lexical
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: طحال
+  to: Spleen
+  category: safe_lexical
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: عضله
+  to: Muscle
+  category: safe_lexical
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: عفونت
+  to: Infection
+  category: safe_lexical
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: فاشیا
+  to: Fascia
+  category: safe_lexical
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: فتق
+  to: Hernia
+  category: safe_lexical
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: فولی
+  to: Foley
+  category: safe_lexical
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: لترال
+  to: Lateral
+  category: safe_lexical
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: لیپوم
+  to: Lipoma
+  category: safe_lexical
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: مثانه
+  to: Bladder
+  category: safe_lexical
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: مشکوک
+  to: Suspicious
+  category: safe_lexical
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: معده
+  to: Stomach
+  category: safe_lexical
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ناف
+  to: Umbilicus
+  category: safe_lexical
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: نمونه
+  to: Specimen
+  category: safe_lexical
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: هموژن
+  to: Homogeneous
+  category: safe_lexical
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: واریس
+  to: Varicose veins
+  category: safe_lexical
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: واژن
+  to: Vagina
+  category: safe_lexical
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: پاتلا
+  to: Patella
+  category: safe_lexical
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: پروتز
+  to: Prosthesis
+  category: safe_lexical
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: پستان
+  to: Breast
+  category: safe_lexical
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: کاتتر
+  to: Catheter
+  category: safe_lexical
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: کشت
+  to: Culture
+  category: safe_lexical
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: کشکک
+  to: Patella
+  category: safe_lexical
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: کلیه
+  to: Kidney
+  category: safe_lexical
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: گرسپر
+  to: Grasper
+  category: safe_lexical
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: آر آی
+  to: RI
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: آر پی او سی
+  to: RPOC
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: آر‌آی
+  to: RI
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: آر‌پی‌او‌سی
+  to: RPOC
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: آی ام
+  to: IM
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: آی ان آر
+  to: INR
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: آی سی یو
+  to: ICU
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: آی سیو
+  to: ICU
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: آی وی
+  to: IV
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: آی یو جی آر
+  to: IUGR
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: آی-سی-یو
+  to: ICU
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: آیام
+  to: IM
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: آیانآر
+  to: INR
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: آیسی یو
+  to: ICU
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: آیسیو
+  to: ICU
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: آیوی
+  to: IV
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: آی‌ام
+  to: IM
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: آی‌ان‌آر
+  to: INR
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: آی‌سیو
+  to: ICU
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: آی‌سی‌یو
+  to: ICU
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: آی‌وی
+  to: IV
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: آی‌یو‌جی‌آر
+  to: IUGR
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: اس او اف ای
+  to: SOFA
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: اس سی
+  to: SC
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: اسسی
+  to: SC
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: اس‌او‌اف‌ای
+  to: SOFA
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: اس‌سی
+  to: SC
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: اف ال
+  to: FL
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: اف بی اس
+  to: FBS
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: اف بیاس
+  to: FBS
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: افبیاس
+  to: FBS
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: اف‌ال
+  to: FL
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: اف‌بی‌اس
+  to: FBS
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ال ای پی
+  to: LAP
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ال‌ای‌پی
+  to: LAP
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ام آی
+  to: MI
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ام ای پی
+  to: MAP
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: امآی
+  to: MI
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ام‌آی
+  to: MI
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ام‌ای‌پی
+  to: MAP
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ان تی
+  to: NT
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ان پی او
+  to: NPO
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: انپیاو
+  to: NPO
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ان‌تی
+  to: NT
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ان‌پی‌او
+  to: NPO
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: او آر
+  to: OR
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: او آر آی اف
+  to: ORIF
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: اوآر
+  to: OR
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: اوآرایاف
+  to: ORIF
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: او‌آر
+  to: OR
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: او‌آر‌آی‌اف
+  to: ORIF
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: اچ تی ان
+  to: HTN
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: اچ تی‌ان
+  to: HTN
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: اچ سی
+  to: HC
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: اچ پی اس
+  to: HPS
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: اچتی‌ان
+  to: HTN
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: اچ‌تی‌ان
+  to: HTN
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: اچ‌سی
+  to: HC
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: اچ‌پی‌اس
+  to: HPS
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ای آر سی پی
+  to: ERCP
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ای اف
+  to: EF
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ای اف آی
+  to: AFI
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ای اف دبلیو
+  to: EFW
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ای بی جی
+  to: ABG
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ای تی تی
+  to: ETT
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ای جی اف آر
+  to: eGFR
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ای دی سی
+  to: EDC
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ای دی وی
+  to: EDV
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ای سی
+  to: AC
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ای سی ال
+  to: ACL
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ای سی جی
+  to: ECG
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ای سی یو
+  to: ICU
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ای سیجی
+  to: ECG
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ای کی جی
+  to: EKG
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ایآرسیپی
+  to: ERCP
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ایتی تی
+  to: ETT
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ایتی‌تی
+  to: ETT
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ایسیال
+  to: ACL
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ایسیجی
+  to: ECG
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ایسیو
+  to: ICU
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ایکیجی
+  to: EKG
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ای‌آر‌سی‌پی
+  to: ERCP
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ای‌اف
+  to: EF
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ای‌اف‌آی
+  to: AFI
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ای‌اف‌دبلیو
+  to: EFW
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ای‌بی‌جی
+  to: ABG
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ای‌تی‌تی
+  to: ETT
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ای‌جی‌اف‌آر
+  to: eGFR
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ای‌دی‌سی
+  to: EDC
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ای‌دی‌وی
+  to: EDV
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ای‌سی
+  to: AC
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ای‌سی‌ال
+  to: ACL
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ای‌سی‌جی
+  to: ECG
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ای‌سی‌یو
+  to: ICU
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ای‌کی‌جی
+  to: EKG
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: بی آی آر ای دی اس
+  to: BI-RADS
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: بی ان پی
+  to: BNP
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: بی پی
+  to: BP
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: بی پی اس
+  to: BPS
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: بی پی دی
+  to: BPD
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: بی یو ان
+  to: BUN
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: بیپی
+  to: BP
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: بی‌آی‌آر‌ای‌دی‌اس
+  to: BI-RADS
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: بی‌اس
+  to: BS
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: بی‌ان‌پی
+  to: BNP
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: بی‌پی
+  to: BP
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: بی‌پی‌اس
+  to: BPS
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: بی‌پی‌دی
+  to: BPD
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: بی‌یو‌ان
+  to: BUN
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: تی اچ ای
+  to: THA
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: تی کا
+  to: TKA
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: تی یو آر پی
+  to: TURP
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: تی یو ال
+  to: TUL
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: تیاچای
+  to: THA
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: تیکا
+  to: TKA
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: تییوآرپی
+  to: TURP
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: تی‌اچ‌ای
+  to: THA
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: تی‌کا
+  to: TKA
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: تی‌یو‌آر‌پی
+  to: TURP
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: تی‌یو‌ال
+  to: TUL
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: جی اف آر
+  to: GFR
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: جی ای آر
+  to: GER
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: جی سی اس
+  to: GCS
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: جی‌اف‌آر
+  to: GFR
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: جی‌ای‌آر
+  to: GER
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: جی‌سی‌اس
+  to: GCS
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: دی اند سی
+  to: D&C
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: دی جی
+  to: DJ
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: دی وی تی
+  to: DVT
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: دیاندسی
+  to: D&C
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: دیویتی
+  to: DVT
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: دیوی‌تی
+  to: DVT
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: دی‌اند‌سی
+  to: D&C
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: دی‌وی‌تی
+  to: DVT
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سی آر آی اف
+  to: CRIF
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سی آر ال
+  to: CRL
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سی آر پی
+  to: CRP
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سی او پی دی
+  to: COPD
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سی اچ اف
+  to: CHF
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سی ایکس آر
+  to: CXR
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سی بی دی
+  to: CBD
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سی بی سی
+  to: CBC
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سی بیسی
+  to: CBC
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سی تی اس
+  to: CTS
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سی سی یو
+  to: CCU
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سی سیو
+  to: CCU
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سی وی ای
+  to: CVA
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سی وی پی
+  to: CVP
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سی پی آر
+  to: CPR
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سی-سی-یو
+  to: CCU
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سیاوپی‌دی
+  to: COPD
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سیاچ‌اف
+  to: CHF
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سیایکسآر
+  to: CXR
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سیبیسی
+  to: CBC
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سیتیاس
+  to: CTS
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سیسی یو
+  to: CCU
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سیسیو
+  to: CCU
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سیوی‌ای
+  to: CVA
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سیپیآر
+  to: CPR
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سی‌آر‌آی‌اف
+  to: CRIF
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سی‌آر‌ال
+  to: CRL
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سی‌آر‌پی
+  to: CRP
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سی‌او‌پی‌دی
+  to: COPD
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سی‌اچ‌اف
+  to: CHF
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سی‌ایکس‌آر
+  to: CXR
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سی‌بی‌دی
+  to: CBD
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سی‌بی‌سی
+  to: CBC
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سی‌تی‌اس
+  to: CTS
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سی‌سیو
+  to: CCU
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سی‌سی‌یو
+  to: CCU
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سی‌وی‌ای
+  to: CVA
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سی‌وی‌پی
+  to: CVP
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سی‌پی‌آر
+  to: CPR
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: وی اس
+  to: V/S
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ویاس
+  to: V/S
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: وی‌اس
+  to: V/S
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: پی آر ان
+  to: PRN
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: پی آی
+  to: PI
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: پی اس وی
+  to: PSV
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: پی اف ان ای
+  to: PFNA
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: پی ای
+  to: PE
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: پی تی
+  to: PT
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: پی تی تی
+  to: PTT
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: پی سی ان ال
+  to: PCNL
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: پی سی دبلیو پی
+  to: PCWP
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: پیای
+  to: PE
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: پیسیانال
+  to: PCNL
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: پی‌آر‌ان
+  to: PRN
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: پی‌آی
+  to: PI
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: پی‌اس‌وی
+  to: PSV
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: پی‌اف‌ان‌ای
+  to: PFNA
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: پی‌ای
+  to: PE
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: پی‌تی
+  to: PT
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: پی‌تی‌تی
+  to: PTT
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: پی‌دی‌اس
+  to: PDS
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: پی‌سی‌ان‌ال
+  to: PCNL
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: پی‌سی‌دبلیو‌پی
+  to: PCWP
+  category: abbreviation_expansion
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: C سی یو
+  to: CCU
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: C سی‌یو
+  to: CCU
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: Cسی یو
+  to: CCU
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: Joint حیف
+  to: Hip
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: V/S فوتیدار
+  to: V/S stable
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: V/S پایدار
+  to: V/S stable
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: آب مقطر
+  to: DW
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: آدنومیوز
+  to: Adenomyosis
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: آدنکس راست
+  to: right adnexa
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: آرتروتومی
+  to: Arthrotomy
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: آرتروز
+  to: Arthrosis
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: آرتروسکوپ
+  to: Arthroscope
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: آرتروسکوپی
+  to: Arthroscopy
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: آرتروپلاستی
+  to: Arthroplasty
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: آزادسازی انگشت ماشه‌ای
+  to: Trigger finger release
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: آزادسازی تونل کارپ
+  to: Carpal tunnel release
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: آزادسازی لیگامان
+  to: Ligament release
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: آزادسازی چسبندگی روده
+  to: Enterolysis
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: آسپرین
+  to: Aspirin
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: آمبولی ریوی
+  to: PE
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: آناستوموز با استاپلر
+  to: Stapled anastomosis
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: آناستوموز کولورکتال
+  to: Colorectal anastomosis
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: آنتی بادی
+  to: Ab
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: آنتی ژن اختصاصی پروستات
+  to: PSA
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: آنتی‌بادی
+  to: Ab
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: آنتی‌ژن اختصاصی پروستات
+  to: PSA
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: آنزیمهای Heartی
+  to: cardiac enzymes
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: آنزیمهای قلبی
+  to: cardiac enzymes
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: آنزیم‌های قلبی
+  to: cardiac enzymes
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: آنکوئیک
+  to: Anechoic
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: آپاندیسیت
+  to: Appendicitis
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: آپاچی دو
+  to: APACHE II
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: آکرومیون
+  to: Acromion
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: آکرومیوپلاستی
+  to: Acromioplasty
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ابداکشن پیلو
+  to: Abduction pillow
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: اتاق عمل
+  to: OR
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: اثنی عشر
+  to: Duodenum
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: احیاء قلبی ریوی
+  to: CPR
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: احیای قلبی ریوی
+  to: CPR
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: از راه دهان چیزی نخورد
+  to: NPO
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: اس پی او دو
+  to: SpO2
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: استئوتومی کالکانئوس
+  to: Calcaneal osteotomy
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: استابولوم
+  to: Acetabulum
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: استاپل
+  to: Staple
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: استاپلر
+  to: Stapler
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: استخراج با بالون
+  to: Balloon extraction
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: استخوان بازو
+  to: Humerus
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: استخوان بینی
+  to: Nasal bone
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: استخوان خاجی
+  to: Sacrum
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: استخوان ران
+  to: Femur
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: استراحت مطلق در بستر
+  to: CBR
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: استریل
+  to: Sterile
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: استنت DJ
+  to: Double-J stent
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: استنت دبل جی
+  to: Double-J stent
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: اسفنکتروتومی
+  to: Sphincterotomy
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: اسلیو گاسترکتومی
+  to: Sleeve gastrectomy
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: اسپلنومگالی
+  to: Splenomegaly
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: اسپلینت
+  to: Splint
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: اسپلینت بینی
+  to: Nasal splint
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: اسپواوتو
+  to: SpO2
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: اسکاروتومی
+  to: Scar revision
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: اسکافوئید
+  to: Scaphoid
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: اس‌پی‌او‌دو
+  to: SpO2
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: اشباع اکسیژن
+  to: SpO2
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: افزایش فشار خون
+  to: HTN
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ان پ او
+  to: NPO
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ان پیو
+  to: NPO
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: اندام تحتانی
+  to: Lower limb
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: اندام فوقانی
+  to: Upper limb
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: اندوسکوپ
+  to: Endoscope
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: اندومتر
+  to: Endometrium
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: اندومتریوز
+  to: Endometriosis
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: اندومتریوما
+  to: Endometrioma
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: انفارکتوس میوکارد
+  to: MI
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: انکور سوچور
+  to: Anchor suture
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: انگشت دست
+  to: Finger
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: انگشت ماشه‌ای
+  to: Trigger finger
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: انگشت پا
+  to: Toe
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: اومنتوم
+  to: Omentum
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: اپی‌نفرین
+  to: Epinephrine
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: اچ بی ای وان سی
+  to: HbA1c
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: اچ‌بی‌ای‌وان‌سی
+  to: HbA1c
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: اکسزیون سینوس پایلونیدال
+  to: Pilonidal sinus excision
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: اکوژنیسیته
+  to: Echogenicity
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ایزواکوئیک
+  to: Isoechoic
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ایسکمیک
+  to: ischemic
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ایلئوستومی
+  to: Ileostomy
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: بارداری
+  to: Pregnancy
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: بارداری خارج رحمی
+  to: Ectopic pregnancy
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: بارداری خارج‌رحمی
+  to: Ectopic pregnancy
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: بازسازی لیگامان
+  to: Ligament reconstruction
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: بازسازی لیگامان صلیبی قدامی
+  to: ACL reconstruction
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: بافت زیرجلدی
+  to: Subcutaneous tissue
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: بافت نکروتیک
+  to: Necrotic tissue
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: بتادین
+  to: Betadine
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: برداشتن از راه مجرا
+  to: TUR
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: برداشتن خال
+  to: Nevus excision
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: برداشتن پروستات از راه مجرا
+  to: TURP
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: بررسی دستگاه ها
+  to: ROS
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: بررسی دستگاه‌ها
+  to: ROS
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: بزرگی خوش خیم پروستات
+  to: BPH
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: بزرگی خوش‌خیم پروستات
+  to: BPH
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: بعد از ظهر
+  to: PM
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: بقایای بارداری
+  to: RPOC
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: بلوک فاست
+  to: Facet block
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: بند ناف
+  to: Umbilical cord
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: به اندازه کافی
+  to: QS
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: به مقدار کافی
+  to: QS
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: بورسکتومی
+  to: Bursectomy
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: بیماری مزمن انسدادی ریوی
+  to: COPD
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: بیهوشی عمومی
+  to: GA
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: بیوپسی
+  to: Biopsy
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: بی‌حسی اسپاینال
+  to: SA
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: تاریخ احتمالی زایمان
+  to: EDC
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: تامپون بینی
+  to: Nasal packing
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: تاندون
+  to: Tendon
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: تاندون آشیل
+  to: Achilles tendon
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: تاندون بایسپس
+  to: Biceps tendon
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: تب روماتیسمی حاد
+  to: ARF
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: تجزیه ادرار
+  to: U/A
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ترشحات چرکی
+  to: Purulent discharge
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ترمیم اسکار
+  to: Scar revision
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ترمیم تاندون آشیل
+  to: Achilles tendon repair
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ترمیم روتاتور کاف
+  to: Rotator cuff repair
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ترمیم فتق
+  to: Hernia repair
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ترمیم فتق اینگوئینال
+  to: Inguinal hernia repair
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ترمیم فتق نافی
+  to: Umbilical hernia repair
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ترمیم لیگامان
+  to: Ligament repair
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ترومبوز وریدی عمقی
+  to: DVT
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ترومبوفلبیت
+  to: Thrombophlebitis
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: تروپونین
+  to: Troponin
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: تروکار
+  to: Trocar
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: تروکانتر بزرگ
+  to: Greater trochanter
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: تری گلیسرید
+  to: TG
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: تری یدوتیرونین
+  to: T3
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: تریامسینولون
+  to: Triamcinolone
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: تری‌گلیسرید
+  to: TG
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: تری‌یدوتیرونین
+  to: T3
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: تزریق داخل مفصلی
+  to: Intra-articular injection
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: تزریق دکستروز 10 درصد در آب
+  to: D10W
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: تزریق دکستروز 20 درصد در آب
+  to: D20W
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: تزریق دکستروز 5 درصد در آب
+  to: D5W
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: تزریق دکستروز 50 درصد در آب
+  to: D50W
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: تزریق فورامینال کورتون
+  to: Foraminal steroid injection
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: تست تحمل ورزش
+  to: ETT
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: تعبیه استنت دبل جی
+  to: Double-J stent insertion
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: تعبیه سوند فولی
+  to: Foley catheter insertion
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: تعبیه پورت
+  to: Port insertion
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: تعداد تنفس
+  to: RR
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: تعویض کامل Joint حیف
+  to: THA
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: تعویض کامل Joint هیپ
+  to: THA
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: تعویض کامل مفصل زانو
+  to: TKA
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: تعویض کامل مفصل هیپ
+  to: THA
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: تغییرات فیبروکیستیک
+  to: Fibrocystic change
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: تناکولوم
+  to: Tenaculum
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: تنفس کنترل شده
+  to: CR
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: تنودز بایسپس
+  to: Biceps tenodesis
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: تنگ کننده عروق ریوی هیپوکسیک
+  to: HPV
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: تنگی عروق ریوی هیپوکسیک
+  to: HPV
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: تنگی هیپرتروفیک پیلور
+  to: HPS
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: تهوع و استفراغ
+  to: N&V
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: تورنیکه
+  to: Tourniquet
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: تیروئید
+  to: Thyroid
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: تیروئیدیت هاشیموتو
+  to: Hashimoto thyroiditis
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: تیروکسین
+  to: T4
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: جااندازی باز
+  to: Open reduction
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: جااندازی بسته
+  to: Closed reduction
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: جااندازی دررفتگی شانه
+  to: Shoulder dislocation reduction
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: جااندازی شکستگی بینی
+  to: Nasal fracture reduction
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: جدار شکم
+  to: Abdominal wall
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: جراحی رویژن
+  to: Revision surgery
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: جفت چسبنده
+  to: Placenta accreta
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: جنتامایسین
+  to: Gentamicin
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: جوش نخوردگی
+  to: Nonunion
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: حادثه عروق مغزی
+  to: CVA
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: حداکثر سرعت سیستولیک
+  to: PSV
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: حفره اندومتر
+  to: Endometrial cavity
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: خدمات فوریت های پزشکی
+  to: EMS
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: خدمات فوریت‌های پزشکی
+  to: EMS
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: خروج پلاک و پیچ
+  to: Hardware removal
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: خوش‌خیم
+  to: Benign
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: خون در مدفوع
+  to: OB
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: خون مخفی در مدفوع
+  to: OB
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: داخل جلدی
+  to: ID
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: دبریدمان
+  to: Debridement
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: دبل جی
+  to: DJ
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: دبل‌جی
+  to: DJ
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: در صورت نیاز
+  to: PRN
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: درجه حرارت
+  to: T
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: دررفتگی
+  to: Dislocation
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: درشت‌نی
+  to: Tibia
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: درن جکسون
+  to: Jackson drain
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: درون عضلانی
+  to: IM
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: دفرمیتی
+  to: Deformity
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: دلتوئید
+  to: Deltoid
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: دهانه داخلی رحم
+  to: Internal os
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: دهانه رحم
+  to: Cervix
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: دو بار در روز
+  to: BD
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: دور سر
+  to: HC
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: دور شکم
+  to: AC
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: دپو مدرول
+  to: Depo-Medrol
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: دکستروز 5 درصد در آب
+  to: D5W
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: دکستروز 5 درصد در سالین
+  to: D5S
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: دکستروز 5% در آب
+  to: D5W
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: دکستروز 5% در سالین
+  to: D5S
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: دکستروز سالین
+  to: DS
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: دکمپریشن لیزری دیسک
+  to: Laser disc decompression
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: دی دایمر
+  to: D-dimer
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: دی و سی
+  to: D&C
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: دیابت ملیتوس
+  to: diabetes mellitus
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: دیافراگم
+  to: Diaphragm
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: دیسک بین مهره‌ای
+  to: Intervertebral disc
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: دیلاتاسیون
+  to: Dilation
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: دیلاتاسیون و کورتاژ
+  to: D&C
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: دی‌دایمر
+  to: D-dimer
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: رادیوس
+  to: Radius
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: رادیوگرافی
+  to: X-ray
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: رادیوگرافی قفسه سینه
+  to: CXR
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: راه هوایی، تنفس و گردش خون
+  to: ABC
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: رزکتوسکوپ
+  to: Resectoscope
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: رزکسیون ارتروپلاستی
+  to: Resection arthroplasty
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: رزکسیون پرولاپس رکتوم
+  to: Rectal prolapse resection
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: رفلاکس معده به مری
+  to: GER
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: رنج نرمال بین المللی
+  to: INR
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: رنج نرمال بین‌المللی
+  to: INR
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: روتاتور کاف
+  to: Rotator cuff
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: روزی سه بار خورده شود
+  to: TDS
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: رکورواتوم
+  to: Recurvatum
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: رینگ فورسپس
+  to: Ring forceps
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ریکاوری
+  to: Recovery
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: زمان نسبی ترومبوپلاستین
+  to: PTT
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: زمان پروترومبین
+  to: PT
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: زوال تهویه ای هیپوکسیک
+  to: HVD
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: زوال تهویه‌ای هیپوکسیک
+  to: HVD
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: زیر بغل
+  to: Ax
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: زیر جلدی
+  to: SC
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ساک بارداری
+  to: Gestational sac
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ستون فقرات
+  to: Spine
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سر رادیوس
+  to: Radial head
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سرعت دیاستولیک نهایی
+  to: EDV
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سرعت رسوب گلبول قرمز
+  to: ESR
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سرویکس
+  to: Cervix
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سزارین
+  to: Cesarean section
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سفازولین
+  to: Cefazolin
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سقط فراموش شده
+  to: Missed abortion
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سقط ناقص
+  to: Incomplete abortion
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سلول قرمز خون
+  to: RBC
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سن بارداری
+  to: Gestational age
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سنترالیزاسیون مینیسک
+  to: Meniscus centralization
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سندرم تونل کارپ
+  to: CTS
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سندرم دسترس تنفس بزرگسال
+  to: ARDS
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سندرم زجر تنفسی حاد
+  to: ARDS
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سنگ‌شکنی
+  to: Lithotripsy
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سه بار در روز
+  to: TDS
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سوند فولی
+  to: Foley
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سوندفولی
+  to: Foley
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سونوگرافی
+  to: Ultrasound
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سونوگرافی کالر داپلر
+  to: Color Doppler
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سوپاین
+  to: Supine
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سکته قلبی
+  to: MI
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سکته مغزی
+  to: CVA
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سی آرم
+  to: C-arm
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سی ایکسار
+  to: CXR
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سیتولوژی
+  to: Cytology
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سیستم گزارش‌دهی و داده‌های تصویربرداری پستان
+  to: BI-RADS
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سیستوسکوپی
+  to: Cystoscopy
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سینوس پایلونیدال
+  to: Pilonidal sinus
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سینووکتومی
+  to: Synovectomy
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سینوویت
+  to: Synovitis
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: سی‌آرم
+  to: C-arm
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: شاخص توده بدن
+  to: BMI
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: شاخص مایع آمنیوتیک
+  to: AFI
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: شاخص مقاومت
+  to: RI
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: شاخص پالس
+  to: PI
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: شانه منجمد
+  to: Frozen shoulder
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: شریان بند ناف
+  to: Umbilical artery
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: شریان رادیال
+  to: Radial artery
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: شریان رحمی
+  to: Uterine artery
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: شریان فمورال
+  to: Femoral artery
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: شریان مغزی میانی
+  to: Middle cerebral artery
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: شریان ورتبرال
+  to: Vertebral artery
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: شریان پوپلیته
+  to: Popliteal artery
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: شریان کاروتید
+  to: Carotid artery
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: شریان کلیوی
+  to: Renal artery
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: شست دست
+  to: Thumb
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: شست پا
+  to: Hallux
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: شفت فمور
+  to: Femoral shaft
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: شمارش سلولهای خون
+  to: CBC
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: شمارش سلول‌های خون
+  to: CBC
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: شمارش کامل سلولهای خونی
+  to: CBC
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: صبح و شب
+  to: M&N
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ضخامت پشت گردنی
+  to: NT
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ضربان قلب
+  to: HR
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ضربان قلب جنین
+  to: FHR
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: طول استخوان ران جنین
+  to: FL
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: طول سر تا باسن جنین
+  to: CRL
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: طول سرویکس
+  to: Cervical length
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: عدم پیگیری
+  to: DS
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: علائم حیاتی
+  to: V/S
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: عمل برداشتن از طریق پیشابراه
+  to: TUR
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: غده بزاقی
+  to: Salivary gland
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: غده تحت فکی
+  to: Submandibular gland
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: غده لنفاوی
+  to: Lymph node
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: غده پاروتید
+  to: Parotid gland
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: فشار خون دیاستولیک
+  to: DBP
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: فشار خون سیستولیک
+  to: SBP
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: فشار متوسط شریانی
+  to: MAP
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: فشار ورید مرکزی
+  to: CVP
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: فضای اشغال‌کننده
+  to: SOL
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: فقرات کمری
+  to: Lumbar vertebrae
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: فلوروسکوپی
+  to: Fluoroscopy
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: فلپ اومنتوم
+  to: Omental flap
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: فلپ پوستی
+  to: Skin flap
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: فیبروآدنوما
+  to: Fibroadenoma
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: فیبروم
+  to: Fibroma
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: فیبولا
+  to: Fibula
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: فیستول
+  to: Fistula
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: فیستول شریانی وریدی
+  to: AV fistula
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: فیستولوتومی
+  to: Fistulotomy
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: فیستولکتومی
+  to: Fistulectomy
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: فیکساسیون باز و تثبیت داخلی
+  to: ORIF
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: فیکساسیون داخلی
+  to: Internal fixation
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: فیکساسیون داخلی با جااندازی بسته
+  to: CRIF
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: قابل تزریق، تزریق کردن
+  to: inj
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: قبل از ظهر
+  to: AM
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: قطر دوپارییتال
+  to: BPD
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: قطع پیگیری
+  to: DS
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: قفسه سینه
+  to: Chest
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: قلبی تنفسی
+  to: CR
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: قند خون ناشتا
+  to: FBS
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: لاپاراتومی
+  to: Laparotomy
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: لاپاروتومی
+  to: Laparotomy
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: لاپروتومی
+  to: Laparotomy
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: لنف نود راکتیو
+  to: Reactive lymph node
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: لنفادنکتومی
+  to: Lymphadenectomy
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: لوله بینی - معده ای
+  to: NG Tube
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: لوله بینی - معده‌ای
+  to: NG Tube
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: لوله داخل نای
+  to: ETT
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: لگزیتی
+  to: Laxity
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: لگنچه کلیه
+  to: Renal pelvis
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: لیتوتومی
+  to: Lithotomy
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: لیتوکلاست
+  to: Lithoclast
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: لیدوکائین
+  to: Lidocaine
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: لیزر CO2
+  to: CO2 laser
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: لیپوپروتئین با چگالی زیاد
+  to: HDL
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: لیپوپروتئین با چگالی کم
+  to: LDL
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: لیگامان
+  to: Ligament
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: لیگامان تالوفیبولار قدامی
+  to: ATFL
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: لیگامان صلیبی قدامی
+  to: ACL
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: لیگامان کولترال مدیال
+  to: MCL
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ماموگرافی
+  to: Mammography
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: مانیپولاسیون
+  to: Manipulation
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: مایع آمنیوتیک
+  to: Amniotic fluid
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: متاکارپ
+  to: Metacarpal
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: مجرای ادراری
+  to: Urethra
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: مجرای صفراوی مشترک
+  to: CBD
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: محدودیت رشد داخل رحمی
+  to: IUGR
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: مدیاستن
+  to: Mediastinum
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: مراقبتهای ویژه
+  to: ICU
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: مراقبت‌های ویژه
+  to: ICU
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: مرگ جنین
+  to: Fetal demise
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: مفصل حیف
+  to: Hip
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: مفصل ران
+  to: Hip
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: مفصل فاست
+  to: Facet joint
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: مفصل هیپ
+  to: Hip
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: مفصل کارپومتاکارپال
+  to: CMC joint
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: مفصل گلنوهومرال
+  to: Glenohumeral joint
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: مقیاس کما گلاسکو
+  to: GCS
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: مونوکریل
+  to: Monocryl
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: مچ دست
+  to: Wrist
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: مچ پا
+  to: Ankle
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: میانه روز
+  to: MD
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: میانه شب
+  to: MN
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: میخ فمورال پروگزیمال ضد چرخش
+  to: PFNA
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: میزان رسوب گلبول قرمز
+  to: ESR
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: میزان ضربان قلب جنین
+  to: FHR
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: مینیسک
+  to: Meniscus
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: میومتر
+  to: Myometrium
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: میوکاردیال اینفارکشن
+  to: myocardial infarction
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: میوکاردیالاینفارکشن
+  to: myocardial infarction
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: میکروسکوپ
+  to: Microscope
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: میکروکلسیفیکاسیون
+  to: Microcalcification
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ن پ و
+  to: NPO
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: نارسایی احتقانی قلب
+  to: CHF
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: نارسایی احتقانی قلبی
+  to: CHF
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: نارسایی قلبی
+  to: HF
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: نازک‌نی
+  to: Fibula
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ندول تیروئید
+  to: Thyroid nodule
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: نرمال سالین
+  to: NS
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: نرمال سالین
+  to: Normal Saline
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: نرمال‌سالین
+  to: NS
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: نسبت سیستول به دیاستول
+  to: S/D
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: نفرولیتوتومی از طریق پوست
+  to: PCNL
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: نمونه‌برداری
+  to: Biopsy
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: نوار قلب
+  to: ECG
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: نورولیز
+  to: Neurolysis
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: نورکتومی
+  to: Neurectomy
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: نیتروژن اوره خون
+  to: BUN
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: نیمه‌نشسته
+  to: Semi-sitting
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: هایپر تمشن
+  to: hypertension
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: هایپر تنشن
+  to: hypertension
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: هایپرتمشن
+  to: hypertension
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: هایپرتنشن
+  to: hypertension
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: هتروژن
+  to: Heterogeneous
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: هر دو ساعت
+  to: Q2H
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: هر ساعت
+  to: QH
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: هر سه ساعت
+  to: Q3H
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: هموروئید
+  to: Hemorrhoid
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: هموروئیدکتومی
+  to: Hemorrhoidectomy
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: هموستاز
+  to: Hemostasis
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: هموگلوبین ای وان سی
+  to: HbA1c
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: هورمون محرک تیروئید
+  to: TSH
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: هومروس
+  to: Humerus
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: هپارین
+  to: Heparin
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: هپارین لاک
+  to: HL
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: هیدرونفروز
+  to: Hydronephrosis
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: هیستروسکوپی
+  to: Hysteroscopy
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: هیپراکوئیک
+  to: Hyperechoic
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: هیپواکوئیک
+  to: Hypoechoic
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: واحد مراقبت قلبی
+  to: CCU
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: واحد مراقبت های ویژه
+  to: ICU
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: واحد مراقبتهای ویژه
+  to: ICU
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: واحد مراقبت‌های ویژه
+  to: ICU
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: والگوس
+  to: Valgus
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ورید اجوف تحتانی
+  to: IVC
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ورید سفالیک
+  to: Cephalic vein
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ورید صافن
+  to: Saphenous vein
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ورید طحالی
+  to: Splenic vein
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ورید پورت
+  to: Portal vein
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ورید ژوگولار
+  to: Jugular vein
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ورید کلیوی
+  to: Renal vein
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: وزن تخمینی جنین
+  to: EFW
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: وضعیت ترندلنبرگ
+  to: Trendelenburg position
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: ویکریل
+  to: Vicryl
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: پاتولوژی
+  to: Pathology
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: پانسمان
+  to: Dressing
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: پانسمان استریل
+  to: Sterile dressing
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: پانکراس
+  to: Pancreas
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: پايدار
+  to: stable
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: پایدار
+  to: stable
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: پرزانتاسیون سفالیک
+  to: Cephalic presentation
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: پروتز سیمانی
+  to: Cemented prosthesis
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: پروتز هینج
+  to: Hinge prosthesis
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: پروستات
+  to: Prostate
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: پروفایل بیوفیزیکی
+  to: BPS
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: پرولاپس رکتوم
+  to: Rectal prolapse
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: پرپ و درپ
+  to: P&D
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: پریتوئن
+  to: Peritoneum
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: پلاسمای تازه منجمد شده
+  to: FFP
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: پنی سیلین
+  to: Pen
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: پنی‌سیلین
+  to: Pen
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: پورت زیرجلدی
+  to: Subcutaneous port
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: پولمونری امبولیسم
+  to: pulmonary embolism
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: پولمونریامبولیسم
+  to: pulmonary embolism
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: پولیپکتومی
+  to: Polypectomy
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: پی ار ان
+  to: PRN
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: چهار بار در روز
+  to: QID
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: کات ترفولی
+  to: Foley
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: کاتتر فولی
+  to: Foley
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: کاتتر ورید مرکزی
+  to: Central venous catheter
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: کاتترفولی
+  to: Foley
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: کاتتریزاسیون ورید مرکزی
+  to: Central venous catheterization
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: کارگذاری مش
+  to: Mesh placement
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: کالج رادیولوژی آمریکا
+  to: ACR
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: کالکانئوس
+  to: Calcaneus
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: کانال اینگوئینال
+  to: Inguinal canal
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: کانال فمورال
+  to: Femoral canal
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: کاندید دی اند سی
+  to: candidate for D&C
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: کاندید دی‌اند‌سی
+  to: candidate for D&C
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: کبد چرب
+  to: Fatty liver
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: کسر جهشی
+  to: EF
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: کشیدن ناخن
+  to: Nail avulsion
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: کلانژیوپانکراتوگرافی رتروگراد اندوسکوپیک
+  to: ERCP
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: کلسترول
+  to: Chol
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: کلسیفیکاسیون
+  to: Calcification
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: کنتراکچر
+  to: Contracture
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: کوراکوئید
+  to: Coracoid
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: کورتاژ
+  to: Curettage
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: کورتاژ تخلیه‌ای
+  to: Evacuation curettage
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: کوله سیستکتومی
+  to: Cholecystectomy
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: کولون سیگموئید
+  to: Sigmoid colon
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: کپسولورافی
+  to: Capsulorrhaphy
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: کیست پستان
+  to: Breast cyst
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: کیسه زرده
+  to: Yolk sac
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: کیسه صفرا
+  to: Gallbladder
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: گازهای خون شریانی
+  to: ABG
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: گایدوایر
+  to: Guidewire
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: گرافت استخوان
+  to: Bone graft
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: گرافت استخوان ایلیاک
+  to: Iliac bone graft
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: گردن فمور
+  to: Femoral neck
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: گرید جفت
+  to: Placental grade
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: گلبول سفید خون
+  to: WBC
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: گلبول قرمز خون
+  to: RBC
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: گوش، حلق و بینی
+  to: ENT
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: یورتروسکوپ
+  to: Ureteroscope
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: یورتروسکوپی
+  to: Ureteroscopy
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: یورتروسکوپی و سنگ‌شکنی
+  to: TUL
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
+- from: یورتروپلاستی
+  to: Urethroplasty
+  category: specialty_terminology
+  confidence: high
+  requires_context: false
+  dangerous: false
