@@ -2,25 +2,75 @@
 
 Real-time Persian + English medical dictation for Windows.
 
-**Microphone → Deepgram Nova-3 streaming → deterministic normalization →
-medical terminology processing → RTL/BiDi formatting → Windows text
-injection → floating overlay.**
+**Microphone → short-lived Deepgram session (minted by your own host) →
+deterministic normalization → medical terminology processing → RTL/BiDi
+formatting → Windows text injection → floating overlay + Start/Stop
+control.**
 
 This is a **deterministic, rule-based dictation aid**, not a clinical NLP
 system and not a medical device. See [Limitations](#limitations) before
 using it in any clinical workflow.
 
+---
+
+## Security model (non-negotiable)
+
+**The Deepgram API key lives only on a self-hosted server you control.**
+It is never placed in the executable, never logged, never stored on a
+clinician's machine.
+
+```
+                    ┌──────────────── your host (has DEEPGRAM_API_KEY) ───┐
+  MedicalSTT.exe ───┤  POST /v1/session   (shared secret, DPAPI-stored)  │
+  (no API key)      │        └──► Deepgram /v1/auth/grant ──► JWT (30s)  │
+        │           └────────────────────────────────────────────────────┘
+        │
+        └──── wss://api.deepgram.com/v1/listen  (Authorization: Bearer <JWT>)
+```
+
+The desktop app:
+
+- authenticates to the host with a **shared secret** you control;
+- receives a **short-lived session token** (30s by default — it only has
+  to be valid for the WebSocket handshake);
+- stores that shared secret locally **only** as a Windows DPAPI-protected
+  blob (`CryptProtectData`, user scope) in
+  `%APPDATA%\MedicalSTT\host_secret.dpapi`;
+- never writes a secret into `settings.yaml` (a plaintext secret there is
+  a hard configuration **error**, not a warning).
+
+This follows Deepgram's documented
+[token-based authentication](https://developers.deepgram.com/guides/fundamentals/token-based-authentication)
+pattern, so audio still streams directly to Deepgram with no proxy in the
+path.
+
+### What is explicitly *not* here
+
+- No Deepgram API key in the EXE, in the build stamp, or in any file it
+  writes. `Settings` has no `api_key` field at all.
+- No multi-provider routing, no key rotation, no account pooling.
+- No LLM anywhere in the transcription or correction path.
+- No demo expiry or time bomb.
+
+---
+
 ## Architecture
 
 ```
 medical_stt/
-├── app.py                 # wires the pipeline together; reconnect loop
-├── config.py              # settings + YAML loading & validation
+├── app.py                 # wires the pipeline; Start/Stop session controller
+├── paths.py               # %APPDATA%\MedicalSTT locations
+├── config.py              # settings + YAML loading & validation, first run
+├── host_client.py         # fetches a short-lived session from the host
+├── app_instance.py        # single-instance mutex
+├── security/
+│   ├── dpapi.py           # CryptProtectData / CryptUnprotectData via ctypes
+│   └── secret_store.py    # DPAPI-protected local secret storage
 ├── audio/
-│   └── queue.py           # bounded, instrumented audio queue
+│   └── queue.py           # bounded, instrumented audio queue (with drain)
 ├── stt/
 │   ├── base.py            # STTProvider interface + ErrorCategory taxonomy
-│   ├── deepgram_provider.py  # Deepgram implementation of STTProvider
+│   ├── deepgram_provider.py  # Deepgram via host-issued session tokens
 │   └── reconnect.py        # exponential backoff + retry/no-retry policy
 ├── processing/
 │   ├── normalize.py        # Unicode/digit/whitespace normalization
@@ -35,89 +85,221 @@ medical_stt/
 │   ├── _fallback_backend.py    # pyautogui/pyperclip (Linux/macOS)
 │   └── text_injector.py        # delta backspacing + paste orchestration
 └── ui/
-    └── overlay.py               # optional Tkinter floating overlay
+    ├── control.py              # floating Start/Stop window (primary UI)
+    └── overlay.py               # optional floating transcript overlay
+
+host/                       # the self-hosted service (has the API key)
+├── core.py                # env config, auth, rate limiting, Deepgram grant
+├── app.py                 # FastAPI wiring (HTTPS, /v1/session, /healthz)
+├── requirements.txt       # fastapi, uvicorn, httpx — no Deepgram SDK
+└── Dockerfile
 ```
 
 **Provider abstraction:** `STTProvider` (in `stt/base.py`) is the interface
-the rest of the pipeline depends on. `DeepgramProvider` is the only
-implementation today, but the processing/injection layers never import
-Deepgram directly — a future local (Whisper/Qwen) or alternative cloud
-provider can be added by implementing `STTProvider` without touching
-`processing/` or `injection/`.
+the rest of the pipeline depends on, and it is unchanged. Only
+`DeepgramProvider` implements it; the processing and injection layers never
+import Deepgram.
 
-**Injection abstraction:** `InjectionBackend` (in `injection/backend.py`)
-isolates every OS-specific call. `TextInjector`'s logic (streaming delta
-backspacing, clipboard-restore policy, BiDi-aware prefixing) is tested via
-`DryRunBackend` on any platform, without a real Windows GUI.
+**Injection abstraction:** `InjectionBackend` isolates every OS-specific
+call, so `TextInjector`'s logic is fully testable through `DryRunBackend`
+without a Windows GUI.
 
-## Install
+**Pipeline determinism:** the existing pipeline is unchanged —
+normalize → numbers protection → FST terminology → BiDi → injection.
+
+---
+
+## Deploying the host
+
+See **[`host/README.md`](host/README.md)** for the full guide. The short
+version:
 
 ```bash
-git clone <this-repo>
-cd deepgram-v6
-python -m venv .venv
-source .venv/bin/activate      # Linux/macOS
-# .venv\Scripts\activate       # Windows
+python -m venv .venv && . .venv/bin/activate
+pip install -r host/requirements.txt
 
-pip install -r requirements.txt
-cp .env.example .env           # then edit .env and set DEEPGRAM_API_KEY
+export DEEPGRAM_API_KEY='...'        # only ever here
+export HOST_SHARED_SECRET="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+export HOST_TLS_CERTFILE=/etc/letsencrypt/live/stt.example.com/fullchain.pem
+export HOST_TLS_KEYFILE=/etc/letsencrypt/live/stt.example.com/privkey.pem
+
+python -m host.app
 ```
 
-Dependency versions are pinned to explicitly tested ranges (see
-`requirements.txt`); `deepgram-sdk==7.9.0` is pinned exactly because the
-`listen.v1.connect(...)` call shape is version-sensitive.
-
-For development/testing:
+Verify:
 
 ```bash
+curl -s https://stt.example.com/healthz                       # {"status":"ok"}
+curl -s -X POST https://stt.example.com/v1/session \
+  -H "Authorization: Bearer $HOST_SHARED_SECRET" -d '{}'      # {"access_token":...}
+```
+
+Notes:
+
+- **HTTPS is enforced.** Plaintext requests are refused unless
+  `HOST_ALLOW_HTTP=1` (development only). Terminate TLS in the service or
+  in a reverse proxy that sets `X-Forwarded-Proto`.
+- **Rate limiting** is per client IP (30 requests / 60s by default,
+  configurable).
+- The Deepgram key needs at least **Member** permission to call
+  `/v1/auth/grant`.
+- Rotating the Deepgram key requires **no client change**. Rotating the
+  shared secret requires re-entering it in the app.
+
+---
+
+## Building the Windows application
+
+```powershell
+# On a Windows machine with Python 3.10-3.12
+powershell -ExecutionPolicy Bypass -File scripts\build_windows.ps1
+```
+
+This produces **`dist\MedicalSTT\`** — a complete folder that runs on a
+clean Windows 10/11 machine with **zero Python installed**.
+
+The script, in order:
+
+1. refuses to run with `--upx`;
+2. scans the source tree for anything matching a Deepgram key pattern and
+   **fails the build** if one is found;
+3. runs the test suite;
+4. compiles with **Nuitka standalone** (`--windows-console-mode=disable`,
+   `--enable-plugin=tk-inter`, `--include-data-dir=config/data`);
+5. verifies the bundle actually starts (`MedicalSTT.exe --version` → exit 0).
+
+Nuitka compiles to C rather than shipping a PyInstaller archive, which is
+harder to unpack and inspect. `--onefile` is deliberately **not** used: a
+folder build starts faster, avoids self-extraction to `%TEMP%`, and
+triggers far fewer antivirus false positives.
+
+### Installing on a clinician's machine
+
+1. Copy the whole `MedicalSTT\` folder anywhere (e.g. `C:\Program Files\MedicalSTT`).
+2. Run `MedicalSTT.exe` once. It creates
+   `%APPDATA%\MedicalSTT\` with a `settings.yaml` template and a log file.
+3. In the floating window, enter:
+   - **میزبان (host)** — e.g. `https://stt.example.com`
+   - **کلید مشترک (shared secret)** — the same value as
+     `HOST_SHARED_SECRET`
+
+   Press **ذخیره تنظیمات**. The secret is immediately protected with
+   Windows DPAPI and written to `host_secret.dpapi`; the field is then
+   cleared.
+4. Press **شروع** to dictate and **توقف** to stop.
+
+No Deepgram API key is ever entered, requested, or stored on that machine.
+
+### Code signing
+
+Code signing is intentionally **not** implemented here — it needs your own
+certificate. After building, sign the executable:
+
+```powershell
+signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 `
+  /f "C:\certs\medical-stt.pfx" /p $env:CERT_PASSWORD `
+  dist\MedicalSTT\MedicalSTT.exe
+
+# verify
+signtool verify /pa /v dist\MedicalSTT\MedicalSTT.exe
+```
+
+Use a standard (OV/EV) code-signing certificate. Signing after Nuitka has
+produced the final binary is correct; do not re-sign inside the build
+script, so the certificate never has to be present on a build machine that
+also runs CI.
+
+---
+
+## Development
+
+```bash
+git clone https://github.com/AmiraliGhamkhar/deepgram-fa-speech.git
+cd deepgram-fa-speech
+python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements-dev.txt
-pytest tests/ -v
-ruff check medical_stt tests scripts
-mypy medical_stt
-```
 
-## Run
+# Windows DPAPI is unavailable here, so point the dev client at the host
+# through the environment instead (development only -- never a real key):
+export MEDICALSTT_HOST_URL=https://stt.example.com
+export MEDICALSTT_HOST_SECRET='your-shared-secret'
 
-```bash
 python run.py
 ```
 
-Place the cursor in any text field (EMR, Word, browser form, etc.) and
-speak. Final utterances are normalized, safely rewritten, and pasted
-automatically. Stop with `Ctrl+C`.
+For development on Linux/macOS, `MEDICALSTT_HOST_SECRET` supplies the
+shared secret directly. On Windows, enter it in the app instead: it is
+stored with DPAPI. Neither variable is ever written to disk by the app.
+
+> **Note:** the checked-in `.env.example` still documents the old
+> `DEEPGRAM_API_KEY` variable and must be replaced with the
+> `MEDICALSTT_HOST_URL` / `MEDICALSTT_HOST_SECRET` form shown above. It
+> could not be edited in the environment where this change was made.
+
+```bash
+pytest tests/ -q          # 256 tests, no network, no Windows, no credentials
+ruff check medical_stt tests scripts host
+mypy medical_stt
+```
+
+---
 
 ## Configuration
 
 | File | Purpose |
 |------|---------|
-| `.env` | `DEEPGRAM_API_KEY` (required, never commit this file) |
-| `config/settings.yaml` | model, language, audio, specialty, confidence, injection, and reconnection settings |
-| `data/keyterms/*.yaml` | focused general and specialty-specific Deepgram Keyterms |
+| `%APPDATA%\MedicalSTT\settings.yaml` | user settings — **no secrets allowed** |
+| `%APPDATA%\MedicalSTT\host_secret.dpapi` | shared secret, DPAPI-protected |
+| `%APPDATA%\MedicalSTT\logs\app.log` | rotating log (1 MB × 3) |
+| `config/settings.yaml` | template copied to the user profile on first run |
+| `data/keyterms/*.yaml` | general and specialty Deepgram Keyterms |
 | `data/asr_replacements.yaml` | optional, explicit known ASR substitutions |
-| `data/corrections.yaml` | categorized terminology rules (see below) |
+| `data/corrections.yaml` | categorized terminology rules |
 
-All settings are validated at startup (`medical_stt/config.py`); invalid
-sample rate, channel count, block duration, endpointing, inject mode,
-reconnect settings, model, or language fail fast with a clear error instead
-of surfacing as a confusing runtime failure.
+Runtime environment overrides (development only): `MEDICALSTT_HOST_URL`,
+`MEDICALSTT_HOST_SECRET`, `MEDICALSTT_APP_DATA_DIR`, `DEEPGRAM_MODEL`,
+`DEEPGRAM_LANGUAGE`.
+
+All settings are validated at startup; invalid sample rate, channel count,
+block duration, endpointing, inject mode, reconnect settings, model,
+language, host URL (must be `https://`) or TTL fail fast with a clear
+error.
+
+### Session lifecycle
+
+`LiveMedicalSTT` is created **when the user presses Start**, so a
+configuration or credential problem surfaces at that moment instead of
+hiding at launch. Stop performs a full clean reset:
+
+1. discard buffered audio (it must not stream into the next session);
+2. clear the utterance accumulator;
+3. reset the injector's streaming delta (so the next session cannot
+   backspace text the user has since typed);
+4. finalize and close the WebSocket;
+5. release the microphone.
+
+The reconnect backoff sleeps on an interruptible event, so Stop is
+immediate rather than waiting out a 30-second backoff.
+
+`AUTH` and `CONFIG` are **never retried** — a wrong shared secret or an
+invalid configuration needs human action, and retrying forever would just
+look like a hang (`stt/reconnect.py`).
 
 ### Inject modes
 
-- `paste` (default) — clipboard + Ctrl+V. Best for Persian BiDi shaping in
-  most apps, because the target application's own Unicode Bidi Algorithm
-  handles the mixed text.
-- `type` — Unicode key events, still routed through the clipboard on
-  non-Windows platforms (PyAutoGUI cannot emit non-ASCII directly on
-  X11/macOS).
+- `paste` (default) — clipboard + Ctrl+V. Best for Persian BiDi shaping,
+  because the target application runs its own Unicode Bidi Algorithm.
+- `type` — Unicode key events (still clipboard-routed off Windows, since
+  PyAutoGUI cannot emit non-ASCII directly on X11/macOS).
 
 ### Reconnection
 
-`reconnect_delay`, `reconnect_backoff_max`, `reconnect_jitter`, and
+`reconnect_delay`, `reconnect_backoff_max`, `reconnect_jitter` and
 `max_reconnect_attempts` control exponential backoff with bounded jitter
 for **retryable** failures (network, timeout, rate limit, server
-disconnect, microphone). **Authentication and configuration errors are
-never retried** — see `medical_stt/stt/reconnect.py` and
-`tests/test_streaming.py`.
+disconnect, microphone).
+
+---
 
 ## Terminology philosophy
 
@@ -136,150 +318,133 @@ Every rule carries metadata:
 ```
 
 - **`safe_lexical` / `abbreviation_expansion` / `specialty_terminology`**
-  rules are applied by default (spelling normalization, spelled-out
-  abbreviations like "آی سی یو" = I-C-U, and unambiguous multi-word
-  specialty phrases).
-- **`context_dependent`** rules (e.g. a single common word like "نبض"
-  mapped to "HR") are **disabled by default**. They can be enabled with
-  `enable_context_dependent_terms: true` in `config/settings.yaml`, after
+  rules are applied by default.
+- **`context_dependent`** rules (e.g. "نبض" → "HR") are **disabled by
+  default**. Enable with `enable_context_dependent_terms: true` only after
   reviewing the risk for your dictation population.
-- **`unsafe` / `dangerous`** rules are never applied automatically. Two
-  concrete examples removed from the default behavior during this review:
-  `"ناشتا"` (fasting) → `"NPO"` and `"کاهش"` (decrease) → `"DC"`
-  (discontinue) — both can silently invert or over-specify clinical intent
-  when the source word appears in ordinary speech, not an explicit order.
+- **`unsafe` / `dangerous`** rules are **never** applied automatically.
+  Two examples kept out of the default behavior: `"ناشتا"` (fasting) →
+  `"NPO"` and `"کاهش"` (decrease) → `"DC"` (discontinue) — both can
+  silently invert or over-specify clinical intent.
 
 **Principle:** if uncertain, the system preserves the original transcript
-rather than inventing or forcing a medical abbreviation. This is a
-deterministic, rule-based system — no LLM is used anywhere in the
-transcription-correction path.
+rather than inventing a medical abbreviation. This model is unchanged by
+the host refactor.
 
 Numeric clinical expressions (`120/80 mmHg`, `98%`, `5 mg`, `500 mg IV`,
 date/time-like patterns, ranges) are protected by
-`medical_stt/processing/numbers.py` and can never be partially rewritten by
-a terminology rule. Recognized negation/fidelity phrases (`ندارد`, `وجود
-ندارد`, `مشاهده نشد`, `بدون`, `منفی است`, `رد می‌شود`) are protected by
-`medical_stt/processing/negation.py` for the same reason — see
-`tests/regression/test_medical_cases.py`.
+`medical_stt/processing/numbers.py`. Recognized negation/fidelity phrases
+(`ندارد`, `وجود ندارد`, `مشاهده نشد`, `بدون`, `منفی است`, `رد می‌شود`) are
+protected by `medical_stt/processing/negation.py` for the same reason —
+see `tests/regression/test_medical_cases.py`.
 
 ### The longest-match guarantee
 
 The terminology engine (`processing/fst.py`) uses `pyahocorasick`'s
 `iter_long()` to guarantee a **longest valid match at each position,
-left-to-right, independent of YAML rule order**. This is verified in
-`tests/test_fst.py` against the classic Aho-Corasick textbook case
+left-to-right, independent of YAML rule order**. Verified in
+`tests/test_fst.py` against the classic Aho-Corasick case
 (`{"he","her","here"}` on `"he here her"`) and against this repository's
-own overlap: with both `"آی" → X` and `"آی سی یو" → ICU` defined, the input
+own overlap: with both `"آی" → X` and `"آی سی یو" → ICU` defined,
 `"آی سی یو"` becomes `"ICU"`, never a partial `"X سی یو"`.
+
+---
 
 ## Mixed RTL/LTR text
 
 Three representations are kept explicitly distinct
 (`medical_stt/processing/bidi.py`):
 
-- **logical** — the transcript exactly as recognized/normalized. This is
-  the only representation used for terminology processing and the only one
-  that should ever be treated as "the transcript."
-- **display** — a visual-order string for the Tkinter overlay (which does
+- **logical** — the transcript exactly as recognized/normalized. The only
+  representation used for terminology processing.
+- **display** — visual-order string for the Tkinter overlay (which does
   not implement the Unicode Bidi Algorithm itself).
 - **injected** — the logical string plus **at most one** leading
-  directional mark. The system does **not** wrap an entire mixed sentence
-  in RLE…PDF: real target applications (Word, browsers, EMR forms) already
-  run the full Unicode Bidi Algorithm on pasted text, and forcing an
-  embedding around the whole string previously corrupted the visual order
-  of embedded numbers/units/Latin abbreviations in exactly the kind of
-  sentence this system needs to handle correctly, e.g. `فشار خون 120/80
-  mmHg`, `MI در ECG مشاهده شد`, `HbA1c برابر 7.2 درصد است`, `TKA سمت راست`.
+  directional mark. The system does **not** wrap a mixed sentence in
+  RLE…PDF: real target applications already run the full Unicode Bidi
+  Algorithm, and forcing an embedding previously corrupted the visual
+  order of embedded numbers/units/Latin abbreviations in exactly the kind
+  of sentence this system must handle, e.g. `فشار خون 120/80 mmHg`,
+  `MI در ECG مشاهده شد`, `HbA1c برابر 7.2 درصد است`, `TKA سمت راست`.
 
-This is **not a claim of universal BiDi correctness** for every possible
-target application — behavior still depends on how the receiving app
-implements its own bidi handling — but the logical content is always
-preserved exactly, and numeric/Latin runs are never reordered by this
-system itself.
+---
 
 ## Windows text injection
 
-The Windows backend (`medical_stt/injection/_windows_backend.py`) uses
-native `SendInput` and Win32 clipboard APIs directly via `ctypes` — no
-PyAutoGUI/PyWin32 dependency on Windows. Notable correctness properties,
-all covered by `tests/test_injection.py` via a `DryRunBackend`:
+`medical_stt/injection/_windows_backend.py` uses native `SendInput` and
+Win32 clipboard APIs directly via `ctypes` — no PyAutoGUI/PyWin32
+dependency on Windows:
 
-- Explicit 64-bit-safe `ctypes` prototypes for every Win32 call (a common
-  bug: unset `restype` truncates 64-bit handles/pointers to 32 bits).
-- UTF-16 code-unit-accurate backspacing (a surrogate pair, e.g. an emoji,
-  counts as 2, not 1).
-- ZWNJ/combining-mark-safe delta computation: streaming revisions never
-  split a Persian ZWNJ join or a combining diacritic.
-- Clipboard ownership handled correctly (`SetClipboardData` transfers
-  ownership; freed only on failure) and verified after write, with a retry
-  before falling back to reporting failure.
-- Modifier hygiene: stray Ctrl/Shift/Alt/Win keys are released before
-  synthesizing Ctrl+V and restored afterward.
-- Long text is batched into `SendInput` chunks and the accepted event count
-  is verified, since a single oversized call can be partially dropped by
-  the target thread's input queue.
+- explicit 64-bit-safe `ctypes` prototypes (unset `restype` truncates
+  64-bit handles to 32 bits);
+- UTF-16 code-unit-accurate backspacing (a surrogate pair counts as 2);
+- ZWNJ/combining-mark-safe delta computation;
+- correct clipboard ownership (`SetClipboardData` transfers ownership;
+  freed only on failure) with retry;
+- modifier hygiene: stray Ctrl/Shift/Alt/Win keys are released before
+  synthesizing Ctrl+V and restored afterwards;
+- long text batched into `SendInput` chunks with the accepted event count
+  verified.
 
-The overlay's shutdown lifecycle was also fixed: `close()` previously set
-its "closed" flag *before* scheduling the Tk `destroy()` callback, and the
-scheduler refused to run anything once that flag was set — so the window
-was silently never destroyed. `close()` now schedules destruction first
-(see `tests/test_overlay.py` for a regression test using a fake Tk root, no
-real display required).
+The DPAPI code in `medical_stt/security/dpapi.py` declares its prototypes
+the same way, for the same reason.
+
+---
 
 ## Deepgram / streaming
 
-- Persian uses `model: nova-3` with `language: fa`, interim results, smart
-  formatting, and punctuation. Do not use the English-oriented
-  `nova-3-medical` model for this workflow; a separate English Medical
-  configuration may be added later.
-- Interim results update only the overlay. `is_final` segments are buffered,
-  and only `speech_final` (or Deepgram `UtteranceEnd`) completes one logical
-  utterance for terminology, BiDi, and permanent injection. Repeated final
-  segments are deduplicated.
+- Persian uses `model: nova-3` with `language: fa`, interim results,
+  smart formatting and punctuation. Do not use the English-oriented
+  `nova-3-medical` model for this workflow.
+- Interim results update only the overlay. `is_final` segments are
+  buffered, and only `speech_final` (or Deepgram `UtteranceEnd`) completes
+  one logical utterance for terminology, BiDi and permanent injection.
+  Repeated final segments are deduplicated.
 - Final results retain provider-neutral word timestamps and confidence.
-  Low-confidence numbers, doses, abbreviations, drug-like words, procedures,
-  and diagnoses produce an in-memory warning; recognized text is preserved,
-  never guessed or automatically repaired.
-- `specialty` selects `general + specialty` terms from `data/keyterms/`, with
-  stable deduplication and a 100-term cap. Keyterms improve recognition;
-  `data/asr_replacements.yaml` is a separate optional list for a few known,
-  safe ASR errors; the terminology FST remains responsible for canonical
-  clinical output.
-- SDK pinned to `deepgram-sdk==7.9.0`, tested against the
-  `client.listen.v1.connect(...)` call shape used here. Keyterms and ASR
-  replacements are passed as separate values expected by the current API.
-- Configuration is validated (`STTProvider.validate_config()`) before any
-  connection is opened.
+  Low-confidence numbers, doses, abbreviations, drug-like words,
+  procedures and diagnoses produce an in-memory warning; recognized text
+  is preserved, never guessed.
+- `specialty` selects `general + specialty` terms from `data/keyterms/`,
+  deduplicated, capped at 100 terms.
+- SDK pinned to `deepgram-sdk==7.9.0`, and `access_token=` is used (not
+  `api_key=`) so the SDK sends `Authorization: Bearer <short-lived token>`
+  for the WebSocket handshake. A **fresh token is requested for every
+  connection**, so a reconnect never presents a stale one.
 - Errors are classified into `ErrorCategory` (`stt/base.py`): `AUTH`,
   `CONFIG`, `RATE_LIMIT`, `NETWORK`, `TIMEOUT`, `SERVER_DISCONNECT`,
   `MICROPHONE`, `SHUTDOWN`, `UNKNOWN`. **`AUTH` and `CONFIG` are never
-  retried** — see `stt/reconnect.py` and `tests/test_streaming.py`.
-  Everything else uses exponential backoff with bounded jitter
-  (`reconnect_backoff_max`, `reconnect_jitter`).
+  retried.**
+
+---
 
 ## Audio pipeline
 
-- The microphone callback (`app.py::_on_audio`) stays lightweight: it never
-  blocks, never does string/YAML work, and never raises into sounddevice's
-  real-time thread.
+- The microphone callback stays lightweight: it never blocks, never does
+  string/YAML work, and never raises into sounddevice's real-time thread.
 - `medical_stt/audio/queue.py` is a bounded queue with drop accounting:
-  `stats()` exposes `depth`, `max_depth`, `dropped_total`, `put_total`,
-  `get_total`. A dropped chunk is never silent — it's logged (rate-limited)
-  as a warning.
-- Latency instrumentation (`app.py::LatencyTracker`) measures audio to first
-  interim, audio to speech final, terminology, BiDi, injection, and total
-  utterance latency — **never** transcript content.
+  `stats()` exposes `depth`, `max_depth`, `dropped_total`, `drained_total`,
+  `put_total`, `get_total`. A dropped chunk is logged (rate-limited).
+- Latency instrumentation measures audio to first interim, audio to speech
+  final, terminology, BiDi, injection and total — **never** transcript
+  content.
+
+---
 
 ## Logging
 
-Standard `logging` is used throughout (`medical_stt.*` loggers). The
-application **never logs**:
+Standard `logging` throughout (`medical_stt.*` loggers). Since the packaged
+EXE has no console, logs go to `%APPDATA%\MedicalSTT\logs\app.log`
+(rotating, 1 MB × 3). The application **never logs**:
 
-- API keys (not even at DEBUG level — they are never passed to a log call
-  anywhere in the codebase),
-- clipboard contents,
+- the shared secret or any session token (the Deepgram SDK additionally
+  redacts the `Authorization` header from `websockets` debug logs);
+- clipboard contents;
 - full medical transcript text by default (only stage timings and
   event/error metadata).
+
+Host access logs contain method, path and status only.
+
+---
 
 ## Testing
 
@@ -295,66 +460,75 @@ tests/
 ├── test_numbers.py            # numeric-expression protection
 ├── test_negation.py            # negation/fidelity protection
 ├── test_bidi.py                  # logical/display/injected separation
-├── test_config.py                  # settings validation, malformed YAML
+├── test_config.py                  # settings validation, plaintext-secret rejection
 ├── test_streaming.py                 # error classification & backoff policy
-├── test_injection.py                   # TextInjector via DryRunBackend
-├── test_audio_queue.py                   # drop accounting
-├── test_overlay.py                         # shutdown lifecycle (no real GUI)
-├── test_app.py                               # end-to-end pipeline, fake provider
+├── test_host_client.py               # session fetch, error mapping, secret hygiene
+├── test_host_service.py              # host auth, rate limiting, TTL, grant
+├── test_secret_store.py              # DPAPI store behaviour (fake protector)
+├── test_session_lifecycle.py         # single instance + Start/Stop controller
+├── test_injection.py                 # TextInjector via DryRunBackend
+├── test_audio_queue.py               # drop accounting + drain-on-stop
+├── test_overlay.py                   # overlay shutdown lifecycle (no real GUI)
+├── test_app.py                       # end-to-end pipeline, fake provider
 ├── regression/
-│   └── test_medical_cases.py                   # semantic-preservation corpus
+│   └── test_medical_cases.py         # semantic-preservation corpus
 └── fixtures/
     └── medical_regression_corpus.yaml
 ```
 
-No test requires a real Deepgram API key, a real Windows GUI, or a real
-audio device — the provider, injection backend, and overlay are all
-exercised through fakes/mocks (`FakeProvider`, `DryRunBackend`,
-`enabled=False` overlay).
+No test requires a real Deepgram credential, a real host, a real Windows
+GUI, or a real audio device — the provider, host client, host service,
+secret store, injection backend and overlay are all exercised through
+fakes. DPAPI itself is Windows-only, so `tests/test_secret_store.py` uses
+a fake protector and asserts the real thing refuses to run off Windows.
+
+---
 
 ## Security
 
-See [`SECURITY.md`](SECURITY.md) for the full incident report. Summary:
+See [`SECURITY.md`](SECURITY.md) for the credential-incident report that
+started all this. Current state:
 
-- A real Deepgram API key was previously committed in `.env` and must be
-  treated as compromised — **revoke it in the Deepgram console and issue a
-  new one**; this repository does not (and will not) contain a replacement
-  credential.
-- `.env` is now git-ignored; `.env.example` contains placeholders only.
-- The exposed key was removed from git history.
-- No API keys, clipboard contents, or full transcripts are logged.
+- The Deepgram API key is **only** in the host's environment.
+- The client stores exactly one secret (the shared secret), DPAPI-protected
+  in user scope; it is not readable by other accounts on the machine.
+- `settings.yaml` rejects plaintext secrets.
+- `.env` is git-ignored; CI runs a gitleaks scan over the full history and
+  the build script refuses to run if a key pattern appears in the tree.
+
+---
 
 ## CI
 
-GitHub Actions (`.github/workflows/ci.yml`) runs on Python 3.10/3.11/3.12:
-dependency install, the full test suite (mocked provider/network, no real
-credentials), `ruff` lint, `mypy` type check, and a secret-scanning job
-(gitleaks) over the repository history.
+GitHub Actions runs on Python 3.10/3.11/3.12: dependency install, the
+full test suite (mocked everything, no credentials), `ruff` over
+`medical_stt tests scripts host`, `mypy`, and a gitleaks secret-scan job.
+
+The Windows build runs separately on a Windows runner (or your own
+machine) because Nuitka must produce a Windows binary.
+
+---
 
 ## Limitations
 
 - This is **not** a certified medical device and makes **no guarantee of
-  clinical accuracy**. It is a deterministic dictation aid; a human must
-  review the final text before it becomes part of a medical record.
+  clinical accuracy**. A human must review the final text before it
+  becomes part of a medical record.
 - The terminology engine's longest-match behavior is deterministic and
-  tested (see `tests/test_fst.py`), but the *correctness of individual
-  rules* in `data/corrections.yaml` depends on the rule's own
+  tested, but the *correctness of individual rules* in
+  `data/corrections.yaml` depends on each rule's own
   category/confidence — `context_dependent` and `unsafe` rules are
   intentionally not applied by default.
-- BiDi handling preserves logical content and avoids the previous
-  whole-string RLE/PDF corruption bug, but it is **not a universal
-  guarantee** that every target application will visually render every
-  possible mixed string identically; behavior depends on that
-  application's own bidi implementation.
-- Negation protection (`processing/negation.py`) is a small, fixed marker
-  list, not a clinical NLP negation-scope detector. It prevents the
-  terminology engine from rewriting *inside* a recognized negation phrase;
-  it does not understand negation scope beyond that phrase.
-- Windows-native injection (`ctypes` SendInput/clipboard) is the primary,
-  most-tested path. The Linux/macOS fallback (`pyautogui`/`pyperclip`) is
-  less exercised in real-world dictation and is provided for development
-  convenience.
-- No LLM is used in the transcription-correction path, by design; this
-  means the system will not "understand" novel phrasing outside its
-  explicit rule set — it will correctly leave it unchanged rather than
-  guess.
+- BiDi handling preserves logical content but is **not** a universal
+  guarantee that every target application renders every mixed string
+  identically.
+- Negation protection is a small, fixed marker list, not a clinical NLP
+  negation-scope detector.
+- Windows-native injection is the primary, most-tested path. The
+  Linux/macOS fallback (`pyautogui`/`pyperclip`) is provided for
+  development convenience.
+- The host's rate limiter is per worker process; with multiple workers,
+  also enforce limits in the reverse proxy.
+- No LLM is used in the transcription-correction path, by design; novel
+  phrasing outside the explicit rule set is left unchanged rather than
+  guessed.

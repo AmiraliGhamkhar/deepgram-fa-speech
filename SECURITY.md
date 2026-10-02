@@ -1,5 +1,35 @@
 # Security
 
+## Current credential model
+
+The Deepgram API key **exists only in the environment of the self-hosted
+service** (`host/`). No client machine, executable, build artifact or
+config file contains it.
+
+| Secret | Where it lives | How it is protected |
+|--------|----------------|---------------------|
+| Deepgram API key | `host/` environment only | Server-side only; never sent to a client. Used solely to mint short-lived session tokens. |
+| Host shared secret | The clinician's machine | Windows DPAPI (`CryptProtectData`, user scope) in `%APPDATA%\MedicalSTT\host_secret.dpapi`. |
+| Session token | In memory, for one WebSocket handshake | ~30s lifetime, never persisted, never logged. |
+
+Enforcement in the code:
+
+- `medical_stt/config.py` rejects any plaintext secret key in
+  `settings.yaml` (a hard `ConfigError`, not a warning).
+- `Settings` has no `api_key` field; `Settings.host_secret` uses
+  `field(repr=False)` so it cannot leak into a repr or traceback.
+- `medical_stt/host_client.py` never includes the shared secret in an
+  error message, and classifies `401`/`403` as `AUTH` so it is never
+  retried.
+- `scripts/build_windows.ps1` scans the tree for Deepgram key patterns
+  and fails the build if any are found.
+- Host logs record method, path and status only — never a presented
+  credential or an issued token.
+
+DPAPI scope is deliberately **user** scope (no
+`CRYPTPROTECT_LOCAL_MACHINE`): the blob is decryptable only by the same
+Windows account, on the same machine.
+
 ## Incident: committed Deepgram API key (ACTION STILL REQUIRED BY THE REPO OWNER)
 
 A real Deepgram API key was committed to this repository in `.env`
@@ -11,8 +41,8 @@ rewrite performed anywhere:
    (Dashboard → API Keys → delete/revoke the key that was in `.env`.)
    This is the only step that actually neutralizes the exposure — no git
    history change makes a previously-pushed secret safe to keep using.
-2. **Generate a new key** and put it only in a local, untracked `.env`
-   file (see `.env.example`).
+2. **Generate a new key** and put it only in the environment of your
+   self-hosted service (`host/`), never on a client machine.
 3. Assume the old key may already have been scraped by automated bots that
    crawl public GitHub pushes for secrets, even if this repository was
    briefly public/private-then-public, or forked.

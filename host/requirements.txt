@@ -1,0 +1,6 @@
+# Host service dependencies. Deliberately tiny: the client never needs any
+# of these, and the Deepgram SDK is NOT used here -- the token endpoint is
+# a single HTTPS POST, so `httpx` is enough.
+fastapi>=0.115,<1.0
+uvicorn>=0.30,<1.0
+httpx>=0.27,<1.0

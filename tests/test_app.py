@@ -40,10 +40,13 @@ class FakeProvider(STTProvider):
 
 
 @pytest.fixture(autouse=True)
-def _fake_api_key(monkeypatch):
-    monkeypatch.setenv("DEEPGRAM_API_KEY", "test-key-not-real")
+def _fake_host_credentials(monkeypatch):
+    """The client has no Deepgram key; it authenticates to the host."""
+    monkeypatch.setenv("MEDICALSTT_HOST_URL", "https://stt.example.com")
+    monkeypatch.setenv("MEDICALSTT_HOST_SECRET", "test-shared-secret-not-real")
     yield
-    monkeypatch.delenv("DEEPGRAM_API_KEY", raising=False)
+    monkeypatch.delenv("MEDICALSTT_HOST_URL", raising=False)
+    monkeypatch.delenv("MEDICALSTT_HOST_SECRET", raising=False)
 
 
 def test_final_transcript_flows_through_terminology_and_injection(monkeypatch):
@@ -125,10 +128,24 @@ def test_dangerous_term_not_injected(monkeypatch):
     assert "ناشتا" in backend.pasted[-1]
 
 
-def test_config_error_raised_when_api_key_missing(monkeypatch):
-    monkeypatch.delenv("DEEPGRAM_API_KEY", raising=False)
+def test_config_error_raised_when_host_secret_missing(monkeypatch):
+    monkeypatch.delenv("MEDICALSTT_HOST_SECRET", raising=False)
     from medical_stt import app as app_module
     from medical_stt.config import ConfigError
 
     with pytest.raises(ConfigError):
         app_module.LiveMedicalSTT(provider=FakeProvider([]))
+
+
+def test_default_provider_requests_a_session_token(monkeypatch):
+    """A token is fetched per connection and handed to the SDK."""
+    from medical_stt.config import Settings
+    from medical_stt.stt.deepgram_provider import DeepgramProvider
+
+    tokens = iter(["token-one", "token-two"])
+    provider = DeepgramProvider(
+        Settings(host_url="https://stt.example.com", host_secret="s"),
+        token_provider=lambda: next(tokens),
+    )
+    assert provider._request_session_token() == "token-one"
+    assert provider._request_session_token() == "token-two"

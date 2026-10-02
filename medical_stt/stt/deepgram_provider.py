@@ -5,18 +5,28 @@ Keeps the working streaming architecture (`listen.v1.connect`, Nova-3,
 Deepgram-specific error handling behind the generic `ErrorCategory`
 taxonomy so the reconnect loop never needs to know about Deepgram SDK
 exception types.
+
+**Credential path.** This client has no Deepgram API key. Before each
+connection it asks the self-hosted service for a *short-lived* session
+token (see `medical_stt/host_client.py`), which the SDK sends as
+`Authorization: Bearer <token>`. The token is used once for the
+WebSocket handshake, never stored, and never logged; the real API key
+stays in the host's environment.
 """
 from __future__ import annotations
 
 import logging
 import socket
 import threading
-from typing import Any, List, Optional
+from typing import Any, Callable, List, Optional
 
 from ..config import Settings
 from .base import ErrorCategory, OnError, OnTranscript, ProviderError, STTProvider, TranscriptEvent, WordInfo
 
 log = logging.getLogger("medical_stt.stt.deepgram")
+
+#: A callable that returns a fresh short-lived Deepgram session token.
+TokenProvider = Callable[[], str]
 
 
 def classify_deepgram_exception(exc: BaseException) -> ErrorCategory:
@@ -124,18 +134,44 @@ class DeepgramProvider(STTProvider):
         settings: Settings,
         keyterms: Optional[List[str]] = None,
         asr_replacements: Optional[List[str]] = None,
+        token_provider: Optional[TokenProvider] = None,
     ) -> None:
         self._settings = settings
         self._keyterms = keyterms or []
         self._asr_replacements = asr_replacements or []
+        self._token_provider = token_provider
         self._stop_event = threading.Event()
         self._connection: Any = None
         self._connection_lock = threading.Lock()
 
+    def _request_session_token(self) -> str:
+        """Get a short-lived Deepgram session token from the host.
+
+        Imported lazily: `host_client` depends on `stt.base`, so a
+        module-level import here would create an import cycle.
+        """
+        if self._token_provider is not None:
+            return self._token_provider()
+
+        from ..host_client import HostSessionClient
+
+        s = self._settings
+        client = HostSessionClient(
+            base_url=s.host_url,
+            secret=s.host_secret,
+            timeout=s.host_timeout_seconds,
+        )
+        log.info("requesting short-lived Deepgram session from host")
+        session = client.fetch_session(ttl_seconds=s.session_ttl_seconds)
+        # Intentionally not logged and not stored beyond this return value.
+        return session.access_token
+
     def validate_config(self) -> None:
         s = self._settings
-        if not s.api_key:
-            raise ProviderError(ErrorCategory.CONFIG, "DEEPGRAM_API_KEY is not set")
+        if not s.host_url:
+            raise ProviderError(ErrorCategory.CONFIG, "host_url is not set")
+        if not s.host_secret and self._token_provider is None:
+            raise ProviderError(ErrorCategory.CONFIG, "no host shared secret is available")
         if not s.model:
             raise ProviderError(ErrorCategory.CONFIG, "model must not be empty")
         if not s.language:
@@ -156,8 +192,17 @@ class DeepgramProvider(STTProvider):
         s = self._settings
         self._stop_event.clear()
 
+        # A fresh short-lived token per connection. It is only valid for the
+        # handshake, which is exactly why it is requested here and not at
+        # construction time (a reconnect would otherwise present a stale
+        # token and fail with an auth error).
+        session_token = self._request_session_token()
+
         try:
-            client = DeepgramClient(api_key=s.api_key)
+            # `access_token` makes the SDK send `Authorization: Bearer ...`
+            # instead of a long-lived API key, for both the websocket
+            # handshake and any HTTP request.
+            client = DeepgramClient(access_token=session_token)
             with client.listen.v1.connect(
                 model=s.model,
                 language=s.language,
@@ -211,6 +256,9 @@ class DeepgramProvider(STTProvider):
         finally:
             with self._connection_lock:
                 self._connection = None
+            # Do not keep the session credential alive in this frame any
+            # longer than the connection needed it.
+            session_token = ""
 
     def send_audio(self, chunk: bytes) -> None:
         with self._connection_lock:
