@@ -28,7 +28,8 @@ def _valid_settings(**overrides) -> Settings:
         max_reconnect_attempts=0,
         reconnect_backoff_max=30.0,
         reconnect_jitter=0.5,
-        api_key="fake-key-for-tests",
+        host_url="https://stt.example.com",
+        host_secret="shared-secret-for-tests-not-real",
     )
     base.update(overrides)
     return Settings(**base)
@@ -38,9 +39,51 @@ def test_valid_settings_pass_validation():
     assert validate_settings(_valid_settings()) == []
 
 
-def test_missing_api_key_is_reported():
-    errors = validate_settings(_valid_settings(api_key=""))
-    assert any("DEEPGRAM_API_KEY" in e for e in errors)
+def test_missing_host_secret_is_reported():
+    errors = validate_settings(_valid_settings(host_secret=""))
+    assert any("shared secret" in e for e in errors)
+
+
+def test_missing_host_url_is_reported():
+    errors = validate_settings(_valid_settings(host_url=""))
+    assert any("host_url" in e for e in errors)
+
+
+def test_plain_http_host_is_rejected():
+    errors = validate_settings(_valid_settings(host_url="http://stt.example.com"))
+    assert any("https" in e for e in errors)
+
+
+def test_http_is_allowed_for_localhost_development():
+    assert validate_settings(_valid_settings(host_url="http://localhost:8443")) == []
+
+
+def test_invalid_session_ttl_is_rejected():
+    errors = validate_settings(_valid_settings(session_ttl_seconds=100_000))
+    assert any("session_ttl_seconds" in e for e in errors)
+
+
+def test_plaintext_secret_in_settings_yaml_is_rejected(tmp_path):
+    from medical_stt import config as config_module
+
+    settings_file = tmp_path / "settings.yaml"
+    settings_file.write_text("host_url: https://x.example.com\nhost_secret: oops\n", encoding="utf-8")
+    with pytest.raises(ConfigError) as excinfo:
+        config_module._reject_plaintext_secrets(
+            config_module._load_yaml(settings_file), settings_file
+        )
+    assert "host_secret" in str(excinfo.value)
+
+
+def test_api_key_in_settings_yaml_is_rejected(tmp_path):
+    from medical_stt import config as config_module
+
+    settings_file = tmp_path / "settings.yaml"
+    settings_file.write_text("api_key: dg_abc123\n", encoding="utf-8")
+    with pytest.raises(ConfigError):
+        config_module._reject_plaintext_secrets(
+            config_module._load_yaml(settings_file), settings_file
+        )
 
 
 def test_invalid_sample_rate_rejected():
@@ -98,6 +141,16 @@ def test_new_settings_defaults_are_backward_compatible():
     assert settings.specialty == "general"
     assert settings.medical_confidence_threshold == 0.65
     assert settings.use_asr_replacements is True
+    assert settings.session_ttl_seconds == 30
+
+
+def test_settings_never_expose_a_deepgram_key():
+    """The client must have no provider credential at all."""
+    settings = _valid_settings()
+    assert not hasattr(settings, "api_key")
+    assert "api_key" not in settings.as_dict()
+    # repr must not leak the shared secret either.
+    assert settings.host_secret not in repr(settings)
 
 
 def test_settings_dict_like_access_backward_compatible():

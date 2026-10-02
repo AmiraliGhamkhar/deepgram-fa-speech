@@ -44,3 +44,30 @@ def test_qsize_reflects_current_depth():
     q.put_nowait(b"a")
     q.put_nowait(b"b")
     assert q.qsize() == 2
+
+
+def test_drain_discards_buffered_audio_on_stop():
+    """Audio captured before Stop must not be streamed into the next session."""
+    q = BoundedAudioQueue(maxsize=10)
+    for i in range(5):
+        q.put_nowait(str(i).encode())
+
+    assert q.drain() == 5
+    assert q.qsize() == 0
+    assert q.stats().drained_total == 5
+
+
+def test_drain_on_an_empty_queue_is_a_noop():
+    q = BoundedAudioQueue(maxsize=4)
+    assert q.drain() == 0
+    assert q.stats().drained_total == 0
+
+
+def test_drain_accumulates_across_sessions():
+    q = BoundedAudioQueue(maxsize=10)
+    q.put_nowait(b"a")
+    q.put_nowait(b"b")
+    q.drain()
+    q.put_nowait(b"c")
+    q.drain()
+    assert q.stats().drained_total == 3

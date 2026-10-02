@@ -18,6 +18,7 @@ class QueueStats:
     depth: int
     max_depth: int
     dropped_total: int
+    drained_total: int
     put_total: int
     get_total: int
     last_drop_at: float
@@ -31,6 +32,7 @@ class BoundedAudioQueue:
         self._q: "queue.Queue[bytes]" = queue.Queue(maxsize=maxsize)
         self._lock = threading.Lock()
         self._dropped_total = 0
+        self._drained_total = 0
         self._put_total = 0
         self._get_total = 0
         self._max_depth_seen = 0
@@ -70,10 +72,31 @@ class BoundedAudioQueue:
                 depth=self._q.qsize(),
                 max_depth=self._max_depth_seen,
                 dropped_total=self._dropped_total,
+                drained_total=self._drained_total,
                 put_total=self._put_total,
                 get_total=self._get_total,
                 last_drop_at=self._last_drop_at,
             )
+
+    def drain(self) -> int:
+        """Discard every buffered chunk and return how many were dropped.
+
+        Called when a session stops. Audio captured before the stop but
+        not yet sent would otherwise be streamed into the *next* session,
+        producing a burst of stale transcript at its start.
+        """
+        drained = 0
+        while True:
+            try:
+                self._q.get_nowait()
+            except queue.Empty:
+                break
+            drained += 1
+            self._q.task_done()
+        if drained:
+            with self._lock:
+                self._drained_total += drained
+        return drained
 
     def qsize(self) -> int:
         return self._q.qsize()

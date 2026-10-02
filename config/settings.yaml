@@ -8,6 +8,19 @@ block_duration: 0.08
 endpointing: 400
 utterance_end_ms: 1200
 
+# --- Host (the only place the Deepgram API key exists) -------------------
+# The desktop app has NO Deepgram API key. It authenticates to your
+# self-hosted service with a shared secret (entered in the app, stored
+# with Windows DPAPI) and receives a short-lived session token.
+#
+# host_url must be https://. Plain http:// is accepted only for localhost
+# development.
+host_url: "https://stt.example.com"
+host_timeout_seconds: 10.0
+# The session token only has to outlive the WebSocket handshake; 30s is
+# Deepgram's own default.
+session_ttl_seconds: 30
+
 # paste = clipboard + Ctrl+V (best for RTL/Persian shaping)
 # type  = Unicode key events character-by-character
 inject_mode: paste

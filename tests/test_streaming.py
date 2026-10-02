@@ -108,3 +108,110 @@ def test_backoff_jitter_bounded():
 def test_provider_error_message_never_includes_none_cause_leak():
     error = ProviderError(ErrorCategory.NETWORK, "connection reset")
     assert "connection reset" in str(error)
+
+
+# -- credential path -----------------------------------------------------
+#
+# These guard the core security claim: the provider authenticates with a
+# short-lived host-issued session token and never with a Deepgram API key.
+
+
+class _FakeConnection:
+    def __init__(self):
+        self.handlers = {}
+        self.listening = False
+        self.finalized = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+    def on(self, event, handler):
+        self.handlers[event] = handler
+
+    def start_listening(self):
+        self.listening = True
+
+    def send_finalize(self):
+        self.finalized = True
+
+    def send_close_stream(self):
+        pass
+
+
+def test_provider_authenticates_with_a_session_token_not_an_api_key(monkeypatch):
+    import deepgram
+
+    from medical_stt.config import Settings
+    from medical_stt.stt.deepgram_provider import DeepgramProvider
+
+    captured = {}
+    connection = _FakeConnection()
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        @property
+        def listen(self):
+            class V1:
+                def connect(self, **params):
+                    captured["connect"] = params
+                    return connection
+
+            class V2:
+                v1 = V1()
+
+            return V2()
+
+    monkeypatch.setattr(deepgram, "DeepgramClient", FakeClient)
+
+    provider = DeepgramProvider(
+        Settings(host_url="https://stt.example.com", host_secret="secret"),
+        token_provider=lambda: "short-lived-token",
+    )
+    provider.start(lambda _e: None, lambda _e: None)
+
+    assert captured["access_token"] == "short-lived-token"
+    assert "api_key" not in captured, "the provider must never authenticate with an API key"
+    assert connection.listening is True
+
+
+def test_a_fresh_token_is_fetched_for_every_connection(monkeypatch):
+    """A reconnect must not present a token that has already expired."""
+    import deepgram
+
+    from medical_stt.config import Settings
+    from medical_stt.stt.deepgram_provider import DeepgramProvider
+
+    issued = []
+    connection = _FakeConnection()
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            issued.append(kwargs.get("access_token"))
+
+        @property
+        def listen(self):
+            class V1:
+                def connect(self, **params):
+                    return connection
+
+            class V2:
+                v1 = V1()
+
+            return V2()
+
+    monkeypatch.setattr(deepgram, "DeepgramClient", FakeClient)
+
+    tokens = iter(["token-1", "token-2"])
+    provider = DeepgramProvider(
+        Settings(host_url="https://stt.example.com", host_secret="secret"),
+        token_provider=lambda: next(tokens),
+    )
+    provider.start(lambda _e: None, lambda _e: None)
+    provider.start(lambda _e: None, lambda _e: None)
+
+    assert issued == ["token-1", "token-2"]

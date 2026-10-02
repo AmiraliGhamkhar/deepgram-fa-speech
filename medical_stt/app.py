@@ -1,25 +1,36 @@
 """Medical STT – real-time Persian + English medical dictation.
 
-Pipeline: microphone -> STTProvider (Deepgram) -> normalization ->
-terminology engine -> BiDi formatting -> text injection -> overlay.
+Pipeline: microphone -> STTProvider (Deepgram, via the self-hosted
+session service) -> normalization -> terminology engine -> BiDi
+formatting -> text injection -> overlay.
 
 Only this module wires the concrete pieces together; every other module is
 independently testable (see tests/).
+
+Entry point: `main()` shows the floating Start/Stop control window
+(`ui/control.py`), which drives one `SessionController` around
+`LiveMedicalSTT`. The microphone is opened and released per Start/Stop,
+never held open in the background.
 """
 from __future__ import annotations
 
+import enum
 import logging
+import logging.handlers
 import queue
 import sys
 import threading
 import time
-from typing import Any, List, Optional
+from typing import Any, Callable, List, Optional
 
+from . import paths
+from .app_instance import SingleInstance
 from .audio import BoundedAudioQueue, QueueStats
 from .config import (
     ConfigError,
     Settings,
     get_settings,
+    initialize_user_config,
     load_asr_replacements,
     load_correction_rules_raw,
     load_keyterms,
@@ -101,8 +112,8 @@ class LiveMedicalSTT:
     def __init__(self, provider: Optional[STTProvider] = None) -> None:
         self.settings: Settings = get_settings()
         errors = validate_settings(self.settings)
-        # DEEPGRAM_API_KEY missing is reported as a normal validation error
-        # so it's never accidentally logged with its value anywhere.
+        # A missing/unusable host configuration is reported as a normal
+        # validation error so no credential value is ever logged with it.
         if errors:
             raise ConfigError("; ".join(errors))
 
@@ -116,7 +127,9 @@ class LiveMedicalSTT:
 
         self.keyterms = load_keyterms(self.settings.specialty)
         asr_replacements = load_asr_replacements() if self.settings.use_asr_replacements else []
-        self.provider: STTProvider = provider or DeepgramProvider(self.settings, self.keyterms, asr_replacements)
+        self.provider: STTProvider = provider or DeepgramProvider(
+            self.settings, self.keyterms, asr_replacements
+        )
 
         self.injector = TextInjector(
             dry_run=False,
@@ -130,10 +143,26 @@ class LiveMedicalSTT:
         self._utterance = UtteranceAccumulator()
 
         self._audio_q = BoundedAudioQueue(maxsize=40)
+        #: Set to end the current session (error, endpoint, or Stop).
         self._stop = threading.Event()
+        #: Set by `request_stop()` to end `run()` itself.
+        self._shutdown = threading.Event()
         self._errors: List[ProviderError] = []
         self._reconnect_count = 0
         self._last_drop_logged = 0
+
+    def request_stop(self) -> None:
+        """Ask the current (or next) session to shut down cleanly.
+
+        Safe to call from another thread, including before `run()` starts
+        and while the reconnect loop is sleeping.
+        """
+        self._shutdown.set()
+        self._stop.set()
+
+    @property
+    def is_stopping(self) -> bool:
+        return self._shutdown.is_set()
 
     @property
     def audio_queue_stats(self) -> QueueStats:
@@ -211,6 +240,26 @@ class LiveMedicalSTT:
 
     # -- session lifecycle -------------------------------------------------
 
+    def _reset_session_state(self) -> None:
+        """Drop everything that belongs to the previous session.
+
+        * Buffered audio is discarded: it was captured before Stop and
+          must not be streamed into the next session (which would produce
+          a burst of stale transcript when it starts).
+        * The utterance accumulator is cleared so a half-finished
+          utterance cannot leak into the next one.
+        * The injector's streaming delta is reset. This is the injection
+          queue equivalent: injection itself is synchronous, but the
+          injector's partial-hypothesis bookkeeping is what a later
+          revision would try to backspace. Leaving it set would make the
+          next session delete characters the user has since typed.
+        """
+        drained = self._audio_q.drain()
+        if drained:
+            log.info("discarded %d buffered audio chunk(s) on session reset", drained)
+        self._utterance.reset()
+        self.injector.reset_partial()
+
     def _run_session(self) -> None:
         sounddevice = load_sounddevice()
         s = self.settings
@@ -218,12 +267,14 @@ class LiveMedicalSTT:
 
         self.provider.validate_config()
 
-        self._stop.clear()
+        # A stop requested before the session started must not be cleared
+        # here, otherwise it would be lost.
+        if not self._shutdown.is_set():
+            self._stop.clear()
         self._errors.clear()
         self._utterance.reset()
+        self._reset_session_state()
         self.latency.mark_utterance_start()
-
-        session_stopped = threading.Event()
 
         def run_provider() -> None:
             try:
@@ -231,7 +282,6 @@ class LiveMedicalSTT:
             except ProviderError as exc:
                 self._on_provider_error(exc)
             finally:
-                session_stopped.set()
                 self._stop.set()
 
         provider_thread = threading.Thread(target=run_provider, daemon=True, name="stt-provider")
@@ -261,19 +311,22 @@ class LiveMedicalSTT:
                 dtype="int16",
                 callback=self._on_audio,
             ):
-                while not self._stop.wait(0.1):
+                while not self._stop.wait(0.1) and not self._shutdown.is_set():
                     pass
         except KeyboardInterrupt:
             log.info("shutdown requested by user")
-            self._stop.set()
-            raise
+            self.request_stop()
         except OSError as exc:
+            # The `with` block above releases the microphone on the way out.
             self._errors.append(ProviderError(ErrorCategory.MICROPHONE, str(exc), cause=exc))
         finally:
             self._stop.set()
+            # Closing order matters: stop feeding audio, finalize and close
+            # the websocket, then release the microphone.
             self.provider.stop()
             sender.join(timeout=2.0)
             provider_thread.join(timeout=4.0)
+            self._reset_session_state()
 
         if self._errors:
             raise self._errors[0]
@@ -281,6 +334,7 @@ class LiveMedicalSTT:
     def run(self) -> int:
         s = self.settings
         log.info("Medical STT starting: model=%s language=%s", s.model, s.language)
+        log.info("Host: %s (short-lived sessions; no Deepgram key on this machine)", s.host_url)
         log.info("Correction rules active: %d / %d total", self.terminology.rule_count, self.terminology.total_rule_count)
         log.info("Keyterms loaded: %d", len(self.keyterms))
 
@@ -295,13 +349,17 @@ class LiveMedicalSTT:
         exit_code = 0
 
         try:
-            while True:
+            while not self._shutdown.is_set():
                 try:
                     self._run_session()
                     break
                 except KeyboardInterrupt:
                     break
                 except ProviderError as exc:
+                    if self._shutdown.is_set():
+                        # The user pressed Stop while the failure was being
+                        # classified: that is a normal stop, not an error.
+                        break
                     self._reconnect_count += 1
                     decision = decide(policy, exc, self._reconnect_count)
                     if not decision.should_retry:
@@ -312,31 +370,180 @@ class LiveMedicalSTT:
                         "reconnecting: %s — retry in %.1fs (attempt %d)",
                         decision.reason, decision.delay_seconds, self._reconnect_count,
                     )
-                    time.sleep(decision.delay_seconds)
+                    # Interruptible sleep: Stop must not wait out the backoff.
+                    if self._shutdown.wait(decision.delay_seconds):
+                        break
         finally:
             self.overlay.close()
             log.info("session ended")
         return exit_code
 
 
+class ControllerState(enum.Enum):
+    IDLE = "idle"
+    RUNNING = "running"
+    FAILED = "failed"
+
+
+class SessionController:
+    """Start/Stop lifecycle around `LiveMedicalSTT`, without any GUI.
+
+    The UI owns one of these. `start()` is deliberately strict: a
+    configuration or credential problem raises instead of silently
+    retrying, because AUTH and CONFIG are never retryable by design.
+    """
+
+    def __init__(
+        self,
+        stt_factory: Callable[[], LiveMedicalSTT] = LiveMedicalSTT,
+    ) -> None:
+        self._stt_factory = stt_factory
+        self._stt: Optional[LiveMedicalSTT] = None
+        self._thread: Optional[threading.Thread] = None
+        self._lock = threading.Lock()
+        self._state = ControllerState.IDLE
+        self.last_error: Optional[str] = None
+
+    @property
+    def state(self) -> ControllerState:
+        return self._state
+
+    @property
+    def is_running(self) -> bool:
+        return self._state is ControllerState.RUNNING
+
+    def start(self) -> None:
+        """Start a dictation session. Raises on unusable configuration."""
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return
+            # Built here (not in __init__) so a settings change is picked
+            # up on the next Start, and so errors surface to the user at
+            # the moment they press the button.
+            stt = self._stt_factory()
+            self._stt = stt
+            self.last_error = None
+            self._state = ControllerState.RUNNING
+
+            def run() -> None:
+                try:
+                    code = stt.run()
+                    self._state = ControllerState.IDLE if code == 0 else ControllerState.FAILED
+                    if code != 0 and self.last_error is None:
+                        self.last_error = "session ended with an error"
+                except Exception as exc:  # noqa: BLE001 - surfaced in the UI
+                    log.error("session failed: %s", exc)
+                    self.last_error = str(exc)
+                    self._state = ControllerState.FAILED
+                finally:
+                    with self._lock:
+                        self._thread = None
+
+            self._thread = threading.Thread(target=run, daemon=True, name="stt-session")
+            self._thread.start()
+
+    def stop(self, timeout: float = 8.0) -> bool:
+        """Stop the session and wait for a full clean shutdown.
+
+        Returns True if the session thread finished within `timeout`.
+        """
+        stt = self._stt
+        thread = self._thread
+        if stt is not None:
+            stt.request_stop()
+        if thread is None:
+            return True
+        thread.join(timeout=timeout)
+        finished = not thread.is_alive()
+        if not finished:
+            log.warning("session did not stop within %.1fs", timeout)
+        return finished
+
+
 def _configure_logging() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        stream=sys.stderr,
-    )
+    """Log to a rotating file; stderr only when a console is attached.
 
+    The packaged EXE runs without a console window, so the file in
+    `%APPDATA%\\MedicalSTT\\logs\\app.log` is the only place a user can
+    look for diagnostics. Nothing sensitive is ever logged (see
+    README > Logging).
+    """
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
 
-def main() -> int:
-    _configure_logging()
+    file_handler: Optional[logging.Handler] = None
     try:
-        return LiveMedicalSTT().run()
+        paths.ensure_app_data_dir()
+        file_handler = logging.handlers.RotatingFileHandler(
+            paths.log_path(), maxBytes=1_000_000, backupCount=3, encoding="utf-8"
+        )
+    except OSError as exc:  # pragma: no cover - unwritable profile
+        root.warning("file logging unavailable: %s", exc)
+    if file_handler is not None:
+        file_handler.setFormatter(formatter)
+        root.addHandler(file_handler)
+
+    if sys.stderr is not None and getattr(sys.stderr, "isatty", lambda: False)():
+        console = logging.StreamHandler(sys.stderr)
+        console.setFormatter(formatter)
+        root.addHandler(console)
+
+
+def _print_version() -> None:
+    from . import __version__
+
+    version = f"Medical STT {__version__}"
+    # The packaged EXE is built with --windows-console-mode=disable, where
+    # sys.stdout is None. The build script verifies the bundle by exit code,
+    # so this must never raise.
+    if sys.stdout is not None:
+        try:
+            print(version)
+        except (OSError, ValueError):  # pragma: no cover - detached handle
+            pass
+    try:
+        paths.ensure_app_data_dir()
+        with paths.log_path().open("a", encoding="utf-8") as fh:
+            fh.write(f"{version}\n")
+    except OSError:  # pragma: no cover - unwritable profile
+        pass
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    """Start the floating Start/Stop control window.
+
+    The window is the primary interface; a session only begins when the
+    user presses Start, which is also what loads and validates
+    configuration.
+    """
+    args = list(sys.argv[1:] if argv is None else argv)
+    if "--version" in args:
+        _print_version()
+        return 0
+
+    _configure_logging()
+
+    instance = SingleInstance()
+    if not instance.acquire():
+        log.info("another instance is already running; exiting")
+        return 0
+
+    try:
+        initialize_user_config()
+        from .ui.control import ControlWindow
+
+        window = ControlWindow(SessionController())
+        window.run()
+        return 0
     except ConfigError as exc:
         log.error("configuration error: %s", exc)
         return 2
     except RuntimeError as exc:
         log.error("startup error: %s", exc)
         return 2
+    finally:
+        instance.release()
 
 
 if __name__ == "__main__":

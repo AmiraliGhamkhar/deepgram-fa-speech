@@ -1,26 +1,53 @@
-"""Load and validate settings and medical rules from environment + YAML.
+"""Load and validate settings and medical rules from YAML + local secrets.
 
 Configuration is validated eagerly (see `validate_settings`) so invalid
 values fail fast with a clear message instead of surfacing as a confusing
 runtime error deep inside the audio or network stack.
+
+**Security model (non-negotiable):** this application has no Deepgram API
+key. The key lives only in the environment of the self-hosted service.
+The client authenticates to that host with a *shared secret*, which is
+stored locally only as a Windows DPAPI-protected blob (see
+`medical_stt/security/`). `Settings` therefore carries a host URL and the
+shared secret -- never a provider credential -- and a plaintext secret in
+`settings.yaml` is treated as a configuration *error*.
 """
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
+from urllib.parse import urlparse
 
 import yaml
 from dotenv import load_dotenv
 
+from . import paths
+from .security import SecretStore, SecretStoreError
+
+log = logging.getLogger("medical_stt.config")
+
 _PKG_DIR = Path(__file__).resolve().parent
 _ROOT = _PKG_DIR.parent
+#: Settings shipped with the build; copied to the user's profile on first
+#: run and used as the fallback when running from a source checkout.
 _CONFIG_DIR = _ROOT / "config"
 _DATA_DIR = _ROOT / "data"
 
 _VALID_INJECT_MODES = frozenset({"paste", "type"})
 _SUPPORTED_MODELS = frozenset({"nova-3", "nova-2", "nova", "enhanced", "base"})
+
+#: Deepgram's maximum temporary-token TTL. See
+#: https://developers.deepgram.com/guides/fundamentals/token-based-authentication
+_MAX_SESSION_TTL_SECONDS = 3600
+
+#: Plaintext hosts for which http:// is tolerated (development only).
+_LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+#: Keys that must never appear in a YAML settings file.
+_FORBIDDEN_SECRET_KEYS = ("api_key", "apikey", "deepgram_api_key", "host_secret", "secret")
 
 
 def _valid_specialty_name(value: str) -> bool:
@@ -56,7 +83,16 @@ class Settings:
     specialty: str = "general"
     medical_confidence_threshold: float = 0.65
     use_asr_replacements: bool = True
-    api_key: str = field(default="", repr=False)
+    #: Base URL of the self-hosted service that mints short-lived
+    #: Deepgram sessions. Must be https:// (http:// only for localhost).
+    host_url: str = ""
+    #: Shared secret for that host. Loaded from the DPAPI-protected store;
+    #: never written to settings.yaml and never logged.
+    host_secret: str = field(default="", repr=False)
+    host_timeout_seconds: float = 10.0
+    #: Requested lifetime of the short-lived session token. Only needs to
+    #: cover the WebSocket handshake (default 30s, Deepgram's own default).
+    session_ttl_seconds: int = 30
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -79,7 +115,10 @@ class Settings:
             "specialty": self.specialty,
             "medical_confidence_threshold": self.medical_confidence_threshold,
             "use_asr_replacements": self.use_asr_replacements,
-            "api_key": self.api_key,
+            "host_url": self.host_url,
+            "host_secret": self.host_secret,
+            "host_timeout_seconds": self.host_timeout_seconds,
+            "session_ttl_seconds": self.session_ttl_seconds,
         }
 
     def __getitem__(self, key: str) -> Any:
@@ -96,6 +135,118 @@ def _load_yaml(path: Path) -> Any:
             return yaml.safe_load(f) or {}
         except yaml.YAMLError as exc:
             raise ConfigError(f"Malformed YAML in {path}: {exc}") from exc
+
+
+def _reject_plaintext_secrets(cfg: Dict[str, Any], source: Path) -> None:
+    """Fail fast if a settings file contains a secret.
+
+    A plaintext secret in YAML would defeat the DPAPI protection silently
+    (and would very likely end up committed or synced), so it is a hard
+    error rather than a warning.
+    """
+    for key in _FORBIDDEN_SECRET_KEYS:
+        if key in cfg and cfg[key] not in (None, ""):
+            raise ConfigError(
+                f"{source} contains a '{key}' entry. Secrets must not be stored "
+                "in settings.yaml; set them in the app's settings panel so they "
+                "are protected with Windows DPAPI."
+            )
+
+
+def user_settings_path() -> Path:
+    """Path of the per-user settings file."""
+    return paths.settings_path()
+
+
+def bundled_settings_path() -> Path:
+    """Path of the settings file shipped with the build."""
+    return _CONFIG_DIR / "settings.yaml"
+
+
+def initialize_user_config() -> Path:
+    """First run: create the per-user data directory and config template.
+
+    Never writes a secret. The template is the shipped `settings.yaml`
+    plus a short header explaining where the host secret goes. An existing
+    user file is left untouched so local edits survive upgrades.
+    """
+    paths.ensure_app_data_dir()
+    target = user_settings_path()
+    if target.is_file():
+        return target
+
+    bundled = bundled_settings_path()
+    header = (
+        "# Medical STT user settings.\n"
+        "#\n"
+        "# This file is created on first run and may contain no secrets.\n"
+        "# Set host_url below to your self-hosted service.\n"
+        "# The shared secret is NOT stored here: enter it in the app's\n"
+        "# settings panel, where it is protected with Windows DPAPI and kept\n"
+        "# in %APPDATA%\\MedicalSTT\\host_secret.dpapi.\n"
+        "# The Deepgram API key is never configured on this machine.\n\n"
+    )
+    if bundled.is_file():
+        body = bundled.read_text(encoding="utf-8")
+    else:  # pragma: no cover - only if the build dropped config/
+        body = (
+            "model: nova-3\n"
+            "language: fa\n"
+            "specialty: general\n"
+            "host_url: https://stt.example.com\n"
+        )
+    target.write_text(header + body, encoding="utf-8")
+    log.info("created user settings template at %s", target)
+    return target
+
+
+def load_host_secret() -> str:
+    """Read the shared secret from the DPAPI store.
+
+    `MEDICALSTT_HOST_SECRET` overrides it. That override exists purely for
+    development/CI on platforms without DPAPI; it is never written to
+    disk and never logged.
+    """
+    override = os.getenv("MEDICALSTT_HOST_SECRET")
+    if override:
+        return override
+    try:
+        secret = SecretStore(paths.secret_path()).load()
+    except SecretStoreError as exc:
+        # A stale/corrupt blob must not crash startup with a traceback --
+        # it becomes a normal configuration error instead.
+        log.warning("stored host secret is unusable: %s", exc)
+        return ""
+    return secret or ""
+
+
+def save_host_credentials(host_url: str, host_secret: str) -> None:
+    """Persist the host URL in settings.yaml and the secret via DPAPI."""
+    initialize_user_config()
+    if host_secret:
+        SecretStore(paths.secret_path()).save(host_secret)
+
+    target = user_settings_path()
+    cfg = _load_yaml(target)
+    if not isinstance(cfg, dict):
+        raise ConfigError(f"{target} must contain a mapping at the top level")
+    cfg["host_url"] = host_url.strip()
+    with target.open("w", encoding="utf-8") as fh:
+        yaml.safe_dump(cfg, fh, allow_unicode=True, sort_keys=False)
+
+
+def _valid_host_url(url: str) -> Tuple[bool, str]:
+    parsed = urlparse(url)
+    if parsed.scheme == "https" and parsed.netloc:
+        return True, ""
+    if parsed.scheme == "http" and parsed.hostname in _LOCAL_HOSTS:
+        # Loopback only: never relax this for a real host name.
+        return True, ""
+    if parsed.scheme not in ("http", "https"):
+        return False, f"host_url must start with https:// (got {url!r})"
+    if not parsed.netloc:
+        return False, f"host_url is missing a host name ({url!r})"
+    return False, "host_url must use https:// (plain http is only allowed for localhost)"
 
 
 def validate_settings(settings: Settings) -> List[str]:
@@ -137,16 +288,41 @@ def validate_settings(settings: Settings) -> List[str]:
         errors.append("specialty must contain only letters, numbers, '_' or '-'")
     if not (0.0 <= settings.medical_confidence_threshold <= 1.0):
         errors.append("medical_confidence_threshold must be between 0 and 1")
-    if not settings.api_key:
-        errors.append("DEEPGRAM_API_KEY is not set (put it in .env or the environment)")
+
+    # -- host / credential checks -------------------------------------
+    if not settings.host_url:
+        errors.append(
+            "host_url is not set (run the app once and enter your host URL, "
+            "or set it in settings.yaml)"
+        )
+    else:
+        ok, message = _valid_host_url(settings.host_url)
+        if not ok:
+            errors.append(message)
+    if not settings.host_secret:
+        errors.append(
+            "no host shared secret available: enter it in the app's settings "
+            "panel so it can be stored with Windows DPAPI"
+        )
+    if not (1.0 <= settings.host_timeout_seconds <= 60.0):
+        errors.append("host_timeout_seconds must be between 1 and 60")
+    if not (5 <= settings.session_ttl_seconds <= _MAX_SESSION_TTL_SECONDS):
+        errors.append(
+            f"session_ttl_seconds must be between 5 and {_MAX_SESSION_TTL_SECONDS} "
+            "(the token only has to outlive the WebSocket handshake)"
+        )
 
     return errors
 
 
 def get_settings() -> Settings:
-    cfg = _load_yaml(_CONFIG_DIR / "settings.yaml")
+    """Load settings from the user profile, falling back to the build's copy."""
+    user_file = user_settings_path()
+    source = user_file if user_file.is_file() else bundled_settings_path()
+    cfg = _load_yaml(source)
     if not isinstance(cfg, dict):
-        raise ConfigError("config/settings.yaml must contain a mapping at the top level")
+        raise ConfigError(f"{source} must contain a mapping at the top level")
+    _reject_plaintext_secrets(cfg, source)
 
     return Settings(
         model=os.getenv("DEEPGRAM_MODEL", cfg.get("model", "nova-3")),
@@ -168,7 +344,10 @@ def get_settings() -> Settings:
         specialty=str(cfg.get("specialty", "general")),
         medical_confidence_threshold=float(cfg.get("medical_confidence_threshold", 0.65)),
         use_asr_replacements=bool(cfg.get("use_asr_replacements", True)),
-        api_key=os.getenv("DEEPGRAM_API_KEY", ""),
+        host_url=os.getenv("MEDICALSTT_HOST_URL", str(cfg.get("host_url", "") or "")),
+        host_secret=load_host_secret(),
+        host_timeout_seconds=float(cfg.get("host_timeout_seconds", 10.0)),
+        session_ttl_seconds=int(cfg.get("session_ttl_seconds", 30)),
     )
 
 
@@ -182,6 +361,7 @@ def _terms_from_file(path: Path) -> List[str]:
         return []
     if not isinstance(terms, list):
         raise ConfigError(f"{path} must contain a 'keyterms' list")
+
     return [str(term).strip() for term in terms if term is not None and str(term).strip()]
 
 
@@ -195,19 +375,19 @@ def load_keyterms(specialty: str = "general", max_count: int = MAX_KEYTERMS) -> 
         return []
     keyterm_dir = _DATA_DIR / "keyterms"
     if keyterm_dir.is_dir():
-        paths = [keyterm_dir / "general.yaml"]
+        paths_to_load = [keyterm_dir / "general.yaml"]
         if specialty != "general":
             selected = keyterm_dir / f"{specialty}.yaml"
             if not selected.is_file():
                 raise ConfigError(f"unknown keyterm specialty: {specialty!r}")
-            paths.append(selected)
+            paths_to_load.append(selected)
     else:
         # Existing deployments with only the original file continue to work.
-        paths = [_DATA_DIR / "keyterms.yaml"]
+        paths_to_load = [_DATA_DIR / "keyterms.yaml"]
 
     result: List[str] = []
     seen = set()
-    for path in paths:
+    for path in paths_to_load:
         for term in _terms_from_file(path):
             if term not in seen:
                 seen.add(term)
