@@ -26,12 +26,21 @@ desktop app ──HTTPS POST /v1/session (shared secret)──▶ host ──HTT
 | `core.py` | env config, constant-time auth, rate limiter, Deepgram grant. No web framework. |
 | `app.py` | FastAPI wiring: HTTPS enforcement, `POST /v1/session`, `GET /healthz`. |
 | `requirements.txt` | `fastapi`, `uvicorn`, `httpx`. The Deepgram SDK is **not** used here. |
+| `.env.example` | template for all of the variables below; empty placeholders only. |
 
 ## Environment variables
 
-The platform blocks edits to `*.env*` files in this workspace, so set
-these directly in your process manager or secret store (systemd
-`EnvironmentFile`, Docker `--env-file`, Kubernetes Secret, etc.).
+The variables below are read from the **process environment**;
+[`host/.env.example`](.env.example) is a ready-to-copy template for your
+process manager or secret store (systemd `EnvironmentFile`, Docker
+`--env-file`, Kubernetes Secret, ...). The service does not parse an env
+file itself, so `host/.env` is only read if you load it, e.g.:
+
+```bash
+set -a; . host/.env; set +a
+```
+
+`host/.env` is git-ignored — never commit a filled-in copy.
 
 | Variable | Required | Default | Meaning |
 |----------|----------|---------|---------|

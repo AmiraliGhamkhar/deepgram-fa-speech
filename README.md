@@ -166,7 +166,30 @@ The script, in order:
 3. runs the test suite;
 4. compiles with **Nuitka standalone** (`--windows-console-mode=disable`,
    `--enable-plugin=tk-inter`, `--include-data-dir=config/data`);
-5. verifies the bundle actually starts (`MedicalSTT.exe --version` → exit 0).
+5. verifies the bundle actually starts (`MedicalSTT.exe --version` → exit 0)
+   and that PortAudio was bundled (`libportaudio*.dll` is present — without
+   it the app still launches and fails only when a microphone is opened).
+
+### PortAudio in the bundle
+
+`sounddevice` imports the CFFI module `_sounddevice` and, on Windows, loads
+`libportaudio<arch>.dll` from `_sounddevice_data/portaudio-binaries/`.
+That data package only ships in the Windows/macOS wheels, and Nuitka
+classifies a `.dll` as code rather than data, so it is not picked up as
+ordinary package data. The build therefore passes
+`--include-module=_sounddevice` together with the `_sounddevice_data`
+package/data directives, and Nuitka's built-in `sounddevice` package
+configuration (present since Nuitka 1.4.1) supplies the platform DLL. The
+build script then **fails fast** if no `libportaudio*.dll` is in the
+output, because the symptom is otherwise delayed and misleading: the app
+starts fine and fails only when the user presses Start. Verify after any
+change to the build script:
+
+```powershell
+Get-ChildItem -Recurse dist\MedicalSTT -Filter "libportaudio*.dll"
+```
+
+Zero results means the microphone will fail on a clean machine.
 
 Nuitka compiles to C rather than shipping a PyInstaller archive, which is
 harder to unpack and inspect. `--onefile` is deliberately **not** used: a
@@ -231,15 +254,15 @@ For development on Linux/macOS, `MEDICALSTT_HOST_SECRET` supplies the
 shared secret directly. On Windows, enter it in the app instead: it is
 stored with DPAPI. Neither variable is ever written to disk by the app.
 
-> **Note:** the checked-in `.env.example` still documents the old
-> `DEEPGRAM_API_KEY` variable and must be replaced with the
-> `MEDICALSTT_HOST_URL` / `MEDICALSTT_HOST_SECRET` form shown above. It
-> could not be edited in the environment where this change was made.
+The checked-in `.env.example` documents the same variables
+(`MEDICALSTT_HOST_URL`, `MEDICALSTT_HOST_SECRET`,
+`MEDICALSTT_APP_DATA_DIR`); copy it to `.env` for a source checkout.
+`host/.env.example` is the equivalent template for the host service.
 
 ```bash
-pytest tests/ -q          # 256 tests, no network, no Windows, no credentials
+pytest tests/ -q          # 258 tests, no network, no Windows, no credentials
 ruff check medical_stt tests scripts host
-mypy medical_stt
+mypy medical_stt host/core.py
 ```
 
 ---
