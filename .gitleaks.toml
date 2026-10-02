@@ -1,10 +1,31 @@
 title = "gitleaks config for deepgram-v6"
 
+# Allowlist policy: keep it as narrow as possible.
+#
+# The Deepgram API key must never exist in this repository -- it lives only
+# in the host service's environment -- and the client's shared secret lives
+# in a DPAPI-protected file on the user's machine. So there is very little
+# to exempt here:
+#
+#   * Only the two documented .env *templates* are exempt, and only by
+#     exact path. Anchoring means a stray `deploy/.env.example` elsewhere
+#     is still scanned, unlike the previous suffix match.
+#   * Placeholder strings are matched individually instead of trusting a
+#     whole file.
+#
+# The templates ship with empty values. If someone fills one in, these
+# patterns stop matching the line and any real credential is reported.
 [allowlist]
-description = "Allow documented placeholders"
-regexes = [
-  '''your_deepgram_api_key_here''',
-]
+description = "Empty, documented placeholders in the .env templates"
 paths = [
-  '''\.env\.example$''',
+  '''^\.env\.example$''',
+  '''^host/\.env\.example$''',
+]
+regexes = [
+  # `VAR=` with nothing after it -- the only shape the templates use for
+  # secrets. The obsolete `your_deepgram_api_key_here` placeholder (and its
+  # regex) was removed along with the DEEPGRAM_API_KEY client variable.
+  '''(?m)^\s*(DEEPGRAM_API_KEY|HOST_SHARED_SECRET|MEDICALSTT_HOST_SECRET|MEDICALSTT_HOST_URL|MEDICALSTT_APP_DATA_DIR|HOST_TLS_CERTFILE|HOST_TLS_KEYFILE)\s*=\s*$''',
+  # The documented command that *generates* a secret is not a secret.
+  '''secrets\.token_urlsafe\(32\)''',
 ]
