@@ -83,14 +83,35 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
 
+      # Windows runners cannot be debugged from a Linux checkout, so both
+      # steps below surface their failure lines as GitHub annotations: the
+      # reason is visible in the PR's Checks tab, not buried in a log.
       - name: Platform tests (mutex, secret store, injection, selftest script)
-        run: >
-          pytest tests/test_session_lifecycle.py tests/test_secret_store.py
-          tests/test_injection.py tests/test_windows_selftest.py
-          tests/test_shutdown_flow.py -q
+        shell: pwsh
+        run: |
+          python -m pytest tests/test_session_lifecycle.py tests/test_secret_store.py `
+            tests/test_injection.py tests/test_windows_selftest.py `
+            tests/test_shutdown_flow.py -q --tb=line > pytest-windows.log 2>&1
+          $code = $LASTEXITCODE
+          Get-Content pytest-windows.log | Write-Host
+          if ($code -ne 0) {
+            Select-String -Path pytest-windows.log -Pattern '^(FAILED|ERROR|.*Error:)' |
+              Select-Object -First 10 |
+              ForEach-Object { Write-Host "::error title=Windows tests::$($_.Line)" }
+          }
+          exit $code
 
       - name: Windows component self-test (DPAPI + mutex + SendInput)
-        run: python scripts/windows_selftest.py
+        shell: pwsh
+        run: |
+          python scripts/windows_selftest.py > windows-selftest.log 2>&1
+          $code = $LASTEXITCODE
+          Get-Content windows-selftest.log | Write-Host
+          if ($code -ne 0) {
+            Get-Content windows-selftest.log | Select-Object -First 10 |
+              ForEach-Object { Write-Host "::error title=Windows self-test::$($_)" }
+          }
+          exit $code
 
   secret-scan:
     name: Secret scan
