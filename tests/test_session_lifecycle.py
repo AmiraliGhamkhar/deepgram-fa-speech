@@ -54,20 +54,50 @@ def test_windows_mutex_name_is_per_session_and_app_specific():
 def test_unavailable_windows_mutex_does_not_block_startup(monkeypatch, caplog):
     """If the Win32 mutex cannot be created, the app must still start.
 
-    Off Windows `ctypes.WinDLL` does not exist, which exercises exactly the
-    failure path that used to raise out of `acquire()`.
+    The failure is forced by making `ctypes.WinDLL` raise, so the path is
+    exercised identically on Windows and off it (on Windows the mutex would
+    otherwise be created successfully and no warning would be logged).
     """
+    import ctypes
     import logging
 
     from medical_stt import app_instance
 
+    def exploding_windll(*_args, **_kwargs):
+        raise OSError("simulated CreateMutexW failure")
+
     instance = app_instance.SingleInstance()
     monkeypatch.setattr(app_instance.sys, "platform", "win32")
+    monkeypatch.setattr(ctypes, "WinDLL", exploding_windll, raising=False)
     with caplog.at_level(logging.WARNING):
         assert instance.acquire() is True
     assert instance.acquired is True
     assert any("mutex" in record.getMessage() for record in caplog.records)
     instance.release()
+
+
+def test_windows_mutex_failure_is_reported_not_swallowed(monkeypatch, caplog):
+    """A failed CreateMutexW handle (not an exception) must also degrade safely."""
+    import ctypes
+    import logging
+
+    from medical_stt import app_instance
+
+    class FakeKernel32:
+        def __getattr__(self, name):  # pragma: no cover - attribute plumbing
+            def _setter(*_args, **_kwargs):
+                return None
+
+            return _setter
+
+        def CreateMutexW(self, *_args):  # noqa: N802 - Win32 name
+            return 0  # failure: no handle
+
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *a, **k: FakeKernel32(), raising=False)
+    instance = app_instance.SingleInstance()
+    with caplog.at_level(logging.WARNING):
+        assert instance._acquire_windows() is True  # noqa: SLF001 - the path under test
+    assert any("mutex" in record.getMessage() for record in caplog.records)
 
 
 # -- session controller --------------------------------------------------
