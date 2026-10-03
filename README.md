@@ -643,10 +643,10 @@ to guess from a green badge:
 | Streaming protocol, error classification, reconnect policy, keyterm/keywords selection | fake SDK, no network | verified by the test suite |
 | Host service (auth, rate limits, TTL, grant error mapping, proxy trust) | `tests/test_host_service.py`, `tests/test_host_app.py` | verified by the test suite |
 | Shutdown/finalize ordering, audio queue draining, accumulator dedupe | fake provider + fake sounddevice | verified by the test suite |
-| DPAPI secret store, named mutex, `SendInput` injection | Windows runner only (`windows-check` CI job, `scripts/windows_selftest.py`, and `scripts/build_windows.ps1` before packaging) | **not verified in this Linux environment**; runs on Windows |
+| DPAPI secret store, named mutex, `SendInput` injection | `windows-check` CI job on `windows-latest` (real `CryptProtectData` round-trip, real mutex acquisition/refusal/release, backend load) plus `scripts/windows_selftest.py`, which `scripts/build_windows.ps1` runs before packaging | verified on Windows CI; **not** verifiable in a Linux development environment |
 | Live Deepgram streaming | `tests/test_live_deepgram.py`, opt-in via `MEDICAL_STT_LIVE_TEST=1` | **not run here** (needs real credentials) |
 | Transcription accuracy / WER | `benchmarks/run_benchmark.py` with your audio | **no numbers measured here** |
-| Windows installer / signed EXE | `scripts/build_windows.ps1` on a Windows machine | **not run here** |
+| Windows installer / signed EXE | `scripts/build_windows.ps1` on a Windows machine | **not run here** (the script is not executed by CI; only its Windows checks are) |
 
 ---
 
