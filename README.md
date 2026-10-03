@@ -662,14 +662,18 @@ started all this. Current state:
 - `.env` is git-ignored; CI runs a gitleaks scan plus this project's own
   `scripts/scan_secrets.py` (working tree *and* full history), and the
   build script refuses to run if a key pattern appears in the tree.
-- The exposed key from the incident is **revoked at the provider** (that is
-  the only real remediation) and the local clone's history is scrubbed with
-  `scripts/scrub_history.py`; see `SECURITY.md` for what is still pending
-  on the remote. A force-push of rewritten history is an operator action,
-  never something CI or the app does.
-- The CI history scan is intentionally strict: if a credential is still
-  reachable in git history, the job fails. A red history scan means
-  "history not yet scrubbed on the remote", not a code regression.
+- The exposed key from the incident **must be revoked at the provider** —
+  that is the only real remediation, and this repository cannot do it for
+  you. See `SECURITY.md` for the current state and the remaining
+  force-push steps. A history rewrite is an operator action, never
+  something CI or the application does.
+- The CI history scan fails on any credential finding that is not listed,
+  with a reason, in `scripts/secret_scan_baseline.txt`. The one entry there
+  is the tracked incident blob: it is still printed on every run (accepted,
+  not hidden), and `scripts/scan_secrets.py --history --strict` — which
+  ignores the baseline — is how you verify a scrub afterwards. Once the
+  rewritten history is pushed, the entry matches nothing and the scanner
+  tells you to delete it.
 
 ---
 

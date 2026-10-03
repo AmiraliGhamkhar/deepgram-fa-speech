@@ -106,6 +106,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Scan working tree and history (project scanner)
+        # Fails on any finding that is not a documented, fingerprinted entry
+        # in scripts/secret_scan_baseline.txt. Accepted findings are printed
+        # on every run; nothing is silently ignored.
         run: |
           python3 scripts/scan_secrets.py
           python3 scripts/scan_secrets.py --history

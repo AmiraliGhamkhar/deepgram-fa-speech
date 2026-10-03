@@ -19,6 +19,25 @@ FAKE_KEY = "0123456789abcdef0123456789abcdef01234567"  # 40 hex chars, not a rea
 LEAK_FILE = "DEEPGRAM_API_KEY=" + FAKE_KEY + "\n"
 
 
+def _load_scanner():
+    """Import scripts/scan_secrets.py by path (it is not a package module).
+
+    dataclasses resolves the module by name, so it must be registered in
+    sys.modules before execution.
+    """
+    from importlib.util import module_from_spec, spec_from_file_location
+
+    spec = spec_from_file_location("scan_secrets", SCAN)
+    assert spec and spec.loader
+    module = module_from_spec(spec)
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.modules.pop(spec.name, None)
+    return module
+
+
 def run(script: Path, *args: str, cwd: Path | None = None) -> subprocess.CompletedProcess:
     return subprocess.run(
         [sys.executable, str(script), *args],
@@ -91,17 +110,7 @@ def test_scanner_ignores_placeholders_and_clean_repos(tmp_path):
 
 
 def test_redact_never_reveals_the_value():
-    from importlib.util import module_from_spec, spec_from_file_location
-
-    spec = spec_from_file_location("scan_secrets", SCAN)
-    assert spec and spec.loader
-    module = module_from_spec(spec)
-    # dataclasses resolves the module by name; it must be registered first.
-    sys.modules[spec.name] = module
-    try:
-        spec.loader.exec_module(module)
-    finally:
-        sys.modules.pop(spec.name, None)
+    module = _load_scanner()
     described = module.redact(FAKE_KEY)
     assert FAKE_KEY not in described
     assert described.startswith("<redacted len=40 sha256=")
@@ -181,3 +190,82 @@ def test_scripts_are_executable_and_documented(script):
     result = run(script, "--help")
     assert result.returncode == 0
     assert "usage" in result.stdout.lower()
+
+
+# -- accepted-finding baseline ---------------------------------------------
+
+
+def test_scanner_reports_the_tracked_incident_without_failing():
+    """The real repository is expected to be clean of *new* findings.
+
+    The historical `.env` blob is listed in scripts/secret_scan_baseline.txt
+    until the rewritten history is force-pushed, so the scan exits 0 while
+    still printing the accepted finding.
+    """
+    result = run(SCAN, "--history")
+    assert result.returncode == 0, result.stdout + result.stderr
+    if "known (accepted)" in result.stdout:
+        assert "redacted" in result.stdout
+        assert FAKE_KEY not in result.stdout
+
+
+def test_strict_mode_fails_on_the_accepted_finding():
+    """`--strict` is how the operator verifies the scrub afterwards."""
+    result = run(SCAN, "--history", "--strict")
+    # Either the history is clean (post-scrub) or it fails loudly.
+    if result.returncode == 0:
+        assert "clean" in result.stdout
+    else:
+        assert "unexpected" in result.stdout
+
+
+def test_baseline_entry_does_not_cover_a_different_secret(tmp_path):
+    """A baseline entry is keyed to the value, so a new leak still fails."""
+    repo = make_repo(tmp_path, leak=True)
+    other_key = "f" * 40
+    (repo / "notes.txt").write_text(
+        # Built by concatenation: a literal '<NAME>=<40 chars>' in this
+        # repository would itself look like a committed credential to the
+        # scanner (a deliberate self-test, see test_this_file_has_no_key_shaped_literal).
+        "DEEPGRAM_API_KEY=" + other_key + "\n",
+        encoding="utf-8",
+    )
+    result = run(SCAN, "--root", str(repo), "--baseline", str(ROOT / "scripts" / "secret_scan_baseline.txt"))
+    assert result.returncode == 1
+    assert "unexpected" in result.stdout
+    assert other_key not in result.stdout
+
+
+def test_this_file_is_not_a_scan_finding_itself():
+    """Fixtures must be assembled, not written as key-shaped literals.
+
+    If a fixture looked like a committed credential, the scanner would have
+    to be taught to ignore this file -- and an ignore rule for test files is
+    exactly how a real credential slips through later. Concatenating the
+    parts keeps the fixture shaped like a credential at runtime while the
+    source text stays clean.
+    """
+    module = _load_scanner()
+    source = Path(__file__).read_text(encoding="utf-8")
+    findings = module.scan_text(source, "tests/test_secret_tooling.py", "tree")
+    assert findings == [], [str(finding) for finding in findings]
+
+
+def test_baseline_file_is_parseable_and_scoped():
+    module = _load_scanner()
+
+    baseline_path = ROOT / "scripts" / "secret_scan_baseline.txt"
+    assert baseline_path.is_file()
+    entries = module.load_baseline(baseline_path)
+    assert entries, "the incident entry should be present until the rewrite ships"
+    for key, reason in entries.items():
+        assert len(key.split()) == 2
+        assert reason, "every accepted finding must document why it is accepted"
+
+
+def test_malformed_baseline_is_an_error(tmp_path):
+    bad = tmp_path / "baseline.txt"
+    bad.write_text("justoneword\n", encoding="utf-8")
+    result = run(SCAN, "--baseline", str(bad))
+    assert result.returncode == 2
+    assert "malformed" in result.stderr

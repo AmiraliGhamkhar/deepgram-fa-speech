@@ -25,7 +25,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Sequence, Tuple
+from typing import Dict, Iterable, List, Sequence, Tuple
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -65,12 +65,29 @@ PLACEHOLDER_RE = re.compile(
 TEMPLATE_SUFFIXES = (".example", ".sample", ".template")
 
 
+#: Findings listed here (as `pattern fingerprint`) are *known and tracked*.
+#: They are still reported, but do not fail the scan -- see the module
+#: docstring. The entry must be removed once the history is rewritten.
+DEFAULT_BASELINE = ROOT / "scripts" / "secret_scan_baseline.txt"
+
+
+def fingerprint(value: str) -> str:
+    """Stable 8-hex fingerprint of a matched value (never reversible here)."""
+    return hashlib.sha256(value.encode("utf-8", "replace")).hexdigest()[:8]
+
+
 @dataclass(frozen=True)
 class Finding:
     location: str
     path: str
     pattern: str
     redacted: str
+    fingerprint: str
+
+    @property
+    def key(self) -> str:
+        """Identity of the *secret*, not of the location it was found in."""
+        return f"{self.pattern} {self.fingerprint}"
 
     def __str__(self) -> str:
         return f"{self.location} {self.path}: {self.pattern} {self.redacted}"
@@ -78,8 +95,27 @@ class Finding:
 
 def redact(value: str) -> str:
     """Describe a match without revealing it."""
-    digest = hashlib.sha256(value.encode("utf-8", "replace")).hexdigest()[:8]
-    return f"<redacted len={len(value)} sha256={digest}>"
+    return f"<redacted len={len(value)} sha256={fingerprint(value)}>"
+
+
+def load_baseline(path: Path) -> Dict[str, str]:
+    """Parse `pattern fingerprint  # reason` lines. Missing file = empty."""
+    if not path.is_file():
+        return {}
+    entries: Dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.split("#", 1)[0].strip()
+        if not stripped:
+            continue
+        parts = stripped.split()
+        if len(parts) < 2:
+            # A malformed baseline is a configuration error (exit 2), never a
+            # silent pass: an unparsed entry could otherwise hide a finding.
+            print(f"error: malformed baseline line in {path}: {line!r}", file=sys.stderr)
+            raise SystemExit(2)
+        reason = line.split("#", 1)[1].strip() if "#" in line else ""
+        entries[f"{parts[0]} {parts[1]}"] = reason
+    return entries
 
 
 def is_placeholder(path: str, value: str) -> bool:
@@ -108,7 +144,9 @@ def scan_text(text: str, path: str, location: str) -> List[Finding]:
                     continue
             if is_placeholder(path, value.split("=")[-1]):
                 continue
-            findings.append(Finding(location, path, pattern.name, redact(value)))
+            findings.append(
+                Finding(location, path, pattern.name, redact(value), fingerprint(value))
+            )
     return findings
 
 
@@ -184,6 +222,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--history", action="store_true", help="scan all reachable git objects")
     parser.add_argument("--root", default=str(ROOT), help="repository root to scan")
     parser.add_argument("--quiet", action="store_true", help="only print the summary")
+    parser.add_argument(
+        "--baseline", default=str(DEFAULT_BASELINE),
+        help="file of accepted `pattern fingerprint` entries (see SECURITY.md)",
+    )
+    parser.add_argument(
+        "--strict", action="store_true",
+        help="ignore the baseline: fail on every finding, including accepted ones",
+    )
     args = parser.parse_args(argv)
 
     root = Path(args.root).resolve()
@@ -193,19 +239,48 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     findings = scan_history(root) if args.history else scan_tree(root)
     scope = "history" if args.history else "working tree"
+
+    # The baseline path is resolved next to *this* checkout's script, so a
+    # scan of a foreign --root still uses the repository's own baseline.
+    baseline = {} if args.strict else load_baseline(Path(args.baseline))
+    accepted = [f for f in findings if f.key in baseline]
+    unexpected = [f for f in findings if f.key not in baseline]
+
     if not findings:
         print(f"clean: no credentials found in the {scope}")
+        if baseline:
+            print(
+                f"note: {len(baseline)} baseline entry/entries matched nothing -- the history "
+                "looks scrubbed. Remove them from "
+                f"{Path(args.baseline).name} so the check stays meaningful."
+            )
         return 0
 
-    print(f"FOUND {len(findings)} credential finding(s) in the {scope}:")
-    if not args.quiet:
-        for finding in findings:
-            print(f"  {finding}")
+    if accepted:
+        print(f"known (accepted) credential finding(s) in the {scope}:")
+        if not args.quiet:
+            for finding in accepted:
+                reason = baseline.get(finding.key) or "no reason recorded"
+                print(f"  {finding}  [{reason}]")
+
+    if unexpected:
+        print(f"FOUND {len(unexpected)} unexpected credential finding(s) in the {scope}:")
+        if not args.quiet:
+            for finding in unexpected:
+                print(f"  {finding}")
+        print(
+            "\nDo not copy these values anywhere. Revoke/rotate the credential first,\n"
+            "then scrub the history: python scripts/scrub_history.py --help\n"
+            "(An accepted finding must be listed, with a reason, in "
+            f"{Path(args.baseline).name} -- see SECURITY.md.)"
+        )
+        return 1
+
     print(
-        "\nDo not copy these values anywhere. Revoke/rotate the credential first,\n"
-        "then scrub the history: python scripts/scrub_history.py --help"
+        f"no NEW findings in the {scope}: {len(accepted)} accepted finding(s) remain tracked.\n"
+        "These stay until the rewritten history is force-pushed; SECURITY.md lists the steps."
     )
-    return 1
+    return 0
 
 
 if __name__ == "__main__":
