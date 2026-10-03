@@ -20,7 +20,16 @@ non-credential test string.
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 from typing import Callable, List, Tuple
+
+#: Make `medical_stt` importable regardless of the working directory the
+#: script is invoked from (CI runs it from the repo root, a build script
+#: from anywhere). Without this the checks fail with ModuleNotFoundError
+#: and look like platform failures.
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 #: Not a credential; only proves the DPAPI call sequence works.
 ROUNDTRIP_VALUE = b"medical-stt-windows-selftest"

@@ -51,3 +51,20 @@ def test_registers_the_windows_only_checks():
     assert any("mutex" in name for name in names)
     assert any("SendInput" in name for name in names)
     assert module.ROUNDTRIP_VALUE and b"medical-stt" in module.ROUNDTRIP_VALUE
+
+
+def test_script_works_from_any_working_directory(tmp_path):
+    """CI, the build script and a developer all invoke it differently.
+
+    Running it with a foreign CWD used to fail with ModuleNotFoundError,
+    which is indistinguishable from a real platform failure in CI.
+    """
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT)], cwd=str(tmp_path),
+        capture_output=True, text=True, timeout=120,
+    )
+    if sys.platform == "win32":  # pragma: no cover - Windows only
+        assert "No module named" not in (result.stdout + result.stderr)
+    else:
+        assert result.returncode == 2
+        assert "No module named" not in (result.stdout + result.stderr)
