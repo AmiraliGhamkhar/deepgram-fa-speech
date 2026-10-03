@@ -17,8 +17,14 @@ from typing import Any, Optional
 
 log = logging.getLogger("medical_stt.instance")
 
-#: Must be stable and app-specific; the mutex is machine-wide per session.
-_WINDOWS_MUTEX_NAME = r"Global\MedicalSTT-SingleInstance"
+#: Stable, app-specific mutex name in the *local* (per-session) namespace.
+#: Deliberately not `Global\...`: creating an object in the global
+#: namespace requires SeCreateGlobalPrivilege, which a standard user
+#: account does not hold, so `Global\` could fail with ERROR_ACCESS_DENIED
+#: and stop the application from starting at all. One instance per session
+#: is all this application needs -- each Windows account has its own
+#: %APPDATA% and its own microphone.
+_WINDOWS_MUTEX_NAME = r"MedicalSTT-SingleInstance"
 
 _ERROR_ALREADY_EXISTS = 183
 
@@ -46,23 +52,30 @@ class SingleInstance:
         return self._acquire_file()
 
     def _acquire_windows(self) -> bool:
-        import ctypes
-        from ctypes import wintypes
+        try:
+            import ctypes
+            from ctypes import wintypes
 
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
-        kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
-        kernel32.CreateMutexW.restype = wintypes.HANDLE
-        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-        kernel32.CloseHandle.restype = wintypes.BOOL
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+            kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
+            kernel32.CreateMutexW.restype = wintypes.HANDLE
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+            kernel32.CloseHandle.restype = wintypes.BOOL
 
-        handle = kernel32.CreateMutexW(None, True, self._name)
-        if not handle:
-            raise OSError(
-                f"CreateMutexW failed (Win32 error {_last_error()})"
-            )
-        if _last_error() == _ERROR_ALREADY_EXISTS:
-            kernel32.CloseHandle(handle)
-            return False
+            handle = kernel32.CreateMutexW(None, True, self._name)
+            if not handle:
+                raise OSError(f"CreateMutexW failed (Win32 error {_last_error()})")
+            if _last_error() == _ERROR_ALREADY_EXISTS:
+                kernel32.CloseHandle(handle)
+                return False
+        except (OSError, AttributeError) as exc:
+            # The mutex prevents a second copy from fighting over the
+            # microphone; it is not a security boundary. If it cannot be
+            # created (unexpected Win32 error, API unavailable), the
+            # application must still start rather than refuse to run.
+            log.warning("single-instance mutex unavailable (%s); continuing", exc)
+            self.acquired = True
+            return True
         self._handle = int(handle)
         self.acquired = True
         return True

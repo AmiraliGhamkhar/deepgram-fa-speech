@@ -1,0 +1,175 @@
+# Reference corpus for the STT benchmark (benchmarks/run_benchmark.py).
+#
+# These are GROUND-TRUTH transcripts only: what a speaker is expected to
+# have said, per category. No accuracy numbers are stored here or anywhere
+# else in the repository -- WER/CER/recall values are produced by running
+# real audio (or an operator-supplied hypothesis file) through the harness.
+# Inventing "baseline accuracy" numbers is explicitly out of scope; see
+# README > Benchmarking.
+#
+# Fields:
+#   id            unique case id (also the audio file stem in --live mode)
+#   category      one of the categories the benchmark reports on
+#   reference     the intended dictation content
+#   medical_terms terms that must survive (recall); optional
+#   notes         why the case exists
+categories:
+  - normal_dictation
+  - terminology
+  - medications
+  - numbers
+  - blood_pressure
+  - spo2
+  - dosage
+  - fast_noisy_speech
+  - mixed_language
+  - repeated_phrases
+  - long_dictation
+
+cases:
+  - id: normal_visit_summary
+    category: normal_dictation
+    reference: "بیمار امروز ویزیت شد و حال عمومی خوب است"
+    notes: "Plain sentence; punctuation may differ, wording must not."
+
+  - id: normal_discharge
+    category: normal_dictation
+    reference: "بیمار با دستور دارو ترخیص شد و پیگیری یک هفته بعد"
+    notes: "Everyday clinical phrasing with no rare terminology."
+
+  - id: term_icu_admission
+    category: terminology
+    reference: "بیمار در آی سی یو بستری شد"
+    expected_substitutions:
+      "آی سی یو": "ICU"
+    medical_terms: ["ICU"]
+    notes: "Spelled-out abbreviation must map to ICU."
+  - id: term_hypertension
+    category: terminology
+    reference: "سابقه هایپرتنشن کنترل شده دارد"
+    expected_substitutions:
+      "هایپرتنشن": "hypertension"
+    medical_terms: ["hypertension"]
+    notes: "Common Persian-English hybrid term."
+  - id: term_radiology_birads
+    category: terminology
+    reference: "گزارش ماموگرافی BIRADS سه است"
+    expected_substitutions:
+      "ماموگرافی": "Mammography"
+    medical_terms: ["BIRADS"]
+    notes: "Specialty term spoken as a Latin abbreviation."
+
+  - id: med_metformin
+    category: medications
+    reference: "متفورمین 500 میلی گرم دو بار در روز"
+    expected_substitutions:
+      "دو بار در روز": "BD"
+    medical_terms: ["متفورمین", "500"]
+    notes: "Drug name plus dose; both must survive."
+
+  - id: med_amoxicillin
+    category: medications
+    reference: "آموکسی سیلین تجویز شد"
+    medical_terms: ["آموکسی سیلین"]
+    notes: "Recognizable drug stem used by the confidence classifier."
+
+  - id: num_lab_values
+    category: numbers
+    reference: "قند خون ناشتا 126 و HbA1c برابر 7.2 درصد"
+    expected_substitutions:
+      "قند خون ناشتا": "FBS"
+    medical_terms: ["126", "7.2"]
+    notes: "Two decimals; no rounding or unit invention allowed."
+
+  - id: num_platelet_count
+    category: numbers
+    reference: "تعداد پلاکت 250000 بود"
+    medical_terms: ["250000"]
+    notes: "Large integer; digit grouping must not be invented locally."
+
+  - id: bp_standard
+    category: blood_pressure
+    reference: "فشار خون 120/80 میلی متر جیوه"
+    medical_terms: ["120/80"]
+    notes: "Classic BP; the slash pair is the protected span."
+  - id: bp_elevated_with_range
+    category: blood_pressure
+    reference: "فشار خون بین 140/90 تا 150/95 نوسان داشت"
+    medical_terms: ["140/90", "150/95"]
+    notes: "Two BP readings with a Persian range word."
+
+  - id: spo2_normal
+    category: spo2
+    reference: "اشباع اکسیژن 98 درصد است"
+    expected_substitutions:
+      "اشباع اکسیژن": "SpO2"
+    medical_terms: ["98"]
+    notes: "Persian percent word rather than the % glyph."
+  - id: spo2_low
+    category: spo2
+    reference: "SpO2 88 درصد و نیاز به اکسیژن"
+    medical_terms: ["SpO2", "88"]
+    notes: "Latin abbreviation plus a low value; both matter."
+
+  - id: dose_iv_antibiotic
+    category: dosage
+    reference: "سفتریاکسون یک گرم وریدی هر 12 ساعت"
+    medical_terms: ["یک گرم", "12"]
+    notes: "Dose + interval; the unit words must not be dropped."
+
+  - id: dose_weight_based
+    category: dosage
+    reference: "دوز 15 mg/kg/day محاسبه شد"
+    medical_terms: ["15 mg/kg/day"]
+    notes: "Weight-based dose with a compound unit."
+
+  - id: fast_speech_runon
+    category: fast_noisy_speech
+    reference: "بیمار بدحال با تب و لرز و تنگی نفس مراجعه کرد"
+    notes: "Long unpunctuated clause, typical of rushed dictation."
+
+  - id: fast_speech_noise
+    category: fast_noisy_speech
+    reference: "صدای ریه دو طرفه بدون کراکل و ویز ویز شدید"
+    notes: "Short clinical phrases under noisy conditions."
+
+  - id: mixed_english_finding
+    category: mixed_language
+    reference: "در ECG تغییرات ST مشاهده شد"
+    medical_terms: ["ECG", "ST"]
+    notes: "Latin terms inside a Persian sentence must stay Latin."
+
+  - id: mixed_latin_drug_and_vitals
+    category: mixed_language
+    reference: "BP 130/85 و HR 92 و SpO2 96 درصد"
+    medical_terms: ["BP", "HR", "SpO2", "130/85", "92", "96"]
+    notes: "English abbreviations dictating a vitals block."
+  - id: repeated_phrase_legit
+    category: repeated_phrases
+    reference: "درد دارد درد دارد"
+    notes: >-
+      A genuinely repeated phrase. The accumulator must NOT deduplicate it
+      away (Phase 9): identical text is only dropped when it is the same
+      acoustic segment re-sent.
+
+  - id: repeated_instruction
+    category: repeated_phrases
+    reference: "مایعات زیاد بنوشد مایعات زیاد بنوشد"
+    notes: "Repeated instruction; long enough to be a full utterance each."
+
+  - id: long_dictation_paragraph
+    category: long_dictation
+    reference: >-
+      بیمار مرد 62 ساله با سابقه هایپرتنشن و دیابت نوع دو که با شکایت درد قفسه سینه
+      از سه ساعت قبل مراجعه کرده است فشار خون 150/95 و نبض 98 و اشباع اکسیژن 94 درصد
+      در ECG تغییرات ST مشاهده شد و با تشخیص سندرم کرونری حاد بستری شد
+    medical_terms: ["150/95", "98", "94", "ECG", "ST"]
+    expected_substitutions:
+      "هایپرتنشن": "hypertension"
+      "دیابت": "diabetes"
+      "قفسه سینه": "Chest"
+      "اشباع اکسیژن": "SpO2"
+    notes: >-
+      Multi-clause dictation with vitals, a diagnosis and English
+      abbreviations; measures drift across a long utterance, not just
+      short-phrase accuracy.

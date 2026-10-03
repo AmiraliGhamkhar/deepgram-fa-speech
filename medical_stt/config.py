@@ -16,9 +16,10 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, FrozenSet, List, Tuple
 from urllib.parse import urlparse
 
 import yaml
@@ -37,7 +38,34 @@ _CONFIG_DIR = _ROOT / "config"
 _DATA_DIR = _ROOT / "data"
 
 _VALID_INJECT_MODES = frozenset({"paste", "type"})
-_SUPPORTED_MODELS = frozenset({"nova-3", "nova-2", "nova", "enhanced", "base"})
+
+#: Recognition-assistance parameter per model. Keyterm Prompting is a
+#: Nova-3 feature; Nova-2 and the older models use the legacy `keywords`
+#: parameter instead (Deepgram rejects `keyterm` on those models).
+#: See https://developers.deepgram.com/docs/keyterm
+_KEYTERM_PARAMETER_BY_MODEL: Dict[str, str] = {
+    "nova-3": "keyterm",
+    "nova-2": "keywords",
+    "nova": "keywords",
+    "enhanced": "keywords",
+    "base": "keywords",
+}
+
+#: Models this project knows how to configure. `nova-3` is the model the
+#: Persian medical workflow is validated against.
+_SUPPORTED_MODELS = frozenset(_KEYTERM_PARAMETER_BY_MODEL)
+
+#: Languages this project validates, mapped to the models Deepgram
+#: documents for them. Persian (`fa`) is a monolingual Nova-3 model: it is
+#: not available on Nova-2 or the older models, so that combination is
+#: rejected instead of being sent upstream to fail at the handshake.
+_LANGUAGE_MODEL_SUPPORT: Dict[str, FrozenSet[str]] = {"fa": frozenset({"nova-3"})}
+
+#: BCP-47-ish check ("fa", "en-US", ...), applied to every configured tag.
+_LANGUAGE_TAG_RE = re.compile(r"^[a-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$")
+
+#: Name of the validated Persian configuration, used in error messages.
+_VALIDATED_CONFIGURATION = "model: nova-3 with language: fa"
 
 #: Deepgram's maximum temporary-token TTL. See
 #: https://developers.deepgram.com/guides/fundamentals/token-based-authentication
@@ -52,6 +80,49 @@ _FORBIDDEN_SECRET_KEYS = ("api_key", "apikey", "deepgram_api_key", "host_secret"
 
 def _valid_specialty_name(value: str) -> bool:
     return bool(value) and value.replace("_", "").replace("-", "").isalnum()
+
+
+def keyterm_parameter(model: str) -> str:
+    """Return the recognition-assistance parameter for `model`.
+
+    `"keyterm"` for Nova-3 (Keyterm Prompting), `"keywords"` for the
+    legacy models, `""` for a model we do not know.
+    """
+    return _KEYTERM_PARAMETER_BY_MODEL.get(model, "")
+
+
+def validate_model_language(model: str, language: str) -> List[str]:
+    """Return configuration errors for a (model, language) pair.
+
+    Called both when settings are validated (so the error appears the
+    moment the user presses Start) and by the provider before it opens the
+    WebSocket, so an unsupported combination can never reach Deepgram.
+    """
+    errors: List[str] = []
+    if not model:
+        errors.append("model must not be empty")
+    elif model not in _SUPPORTED_MODELS:
+        errors.append(
+            f"model {model!r} is not supported; supported models are "
+            f"{sorted(_SUPPORTED_MODELS)} ({_VALIDATED_CONFIGURATION} is the "
+            "validated configuration for this application)"
+        )
+    if not language:
+        errors.append("language must not be empty")
+    elif not _LANGUAGE_TAG_RE.match(language):
+        errors.append(
+            f"language {language!r} is not a valid language tag "
+            "(expected a BCP-47 tag such as 'fa' or 'en-US')"
+        )
+    else:
+        supported_models = _LANGUAGE_MODEL_SUPPORT.get(language)
+        if supported_models is not None and model and model not in supported_models:
+            errors.append(
+                f"language {language!r} requires model "
+                f"{sorted(supported_models)[0]!r}; model {model!r} does not "
+                "support it"
+            )
+    return errors
 
 
 load_dotenv(_ROOT / ".env")
@@ -273,17 +344,10 @@ def validate_settings(settings: Settings) -> List[str]:
         errors.append("reconnect_backoff_max must be >= reconnect_delay")
     if not (0 <= settings.reconnect_jitter <= 1):
         errors.append("reconnect_jitter must be between 0 and 1 (fraction of delay)")
-    if not settings.model:
-        errors.append("model must not be empty")
-    elif settings.model not in _SUPPORTED_MODELS:
-        # Not fatal: Deepgram may add models we don't know about yet, but
-        # warn loudly since this is the #1 cause of "silently wrong" runs.
-        errors.append(
-            f"model {settings.model!r} is not in the explicitly tested set "
-            f"{sorted(_SUPPORTED_MODELS)}; proceeding is allowed but unverified"
-        )
-    if not settings.language:
-        errors.append("language must not be empty")
+    # Model and language are validated together: the combination decides
+    # which recognition-assistance parameter is legal (`keyterm` is Nova-3
+    # only) and whether the language is supported by that model at all.
+    errors.extend(validate_model_language(settings.model, settings.language))
     if not _valid_specialty_name(settings.specialty):
         errors.append("specialty must contain only letters, numbers, '_' or '-'")
     if not (0.0 <= settings.medical_confidence_threshold <= 1.0):
@@ -398,21 +462,47 @@ def load_keyterms(specialty: str = "general", max_count: int = MAX_KEYTERMS) -> 
 
 
 def load_asr_replacements() -> List[str]:
-    """Load safe Deepgram `from:to` replacement parameters."""
+    """Load safe Deepgram ``find:replace`` parameters (``replace`` feature).
+
+    Ownership: this is the *only* provider-side text rewrite the project
+    uses. It exists for acoustically confusable Persian spellings that the
+    provider itself must fix, and its output then flows through the local
+    pipeline (normalization -> terminology) like any other transcript. It
+    must never carry clinical numbers, units or a Latin/English term that
+    would bypass the locally-reviewed terminology rules -- Deepgram's own
+    docs note that ``replace`` is applied verbatim and the find term must
+    be lowercase. Violations are configuration errors, not warnings.
+    """
     data = _load_yaml(_DATA_DIR / "asr_replacements.yaml")
     replacements = data.get("replacements", []) if isinstance(data, dict) else []
     if not isinstance(replacements, list):
         raise ConfigError("data/asr_replacements.yaml 'replacements' must be a list")
 
     result: List[str] = []
+    seen: Dict[str, str] = {}
     for item in replacements:
         if not isinstance(item, dict) or not item.get("from") or item.get("to") is None:
             continue
         source, target = str(item["from"]).strip(), str(item["to"]).strip()
+        if not source or not target:
+            raise ConfigError("ASR replacements must have a non-empty from and to")
+        # Deepgram advertises the find term as lowercase-only; an uppercase
+        # source silently never fires, which would look like an ASR bug.
+        if source != source.lower():
+            raise ConfigError(
+                f"ASR replacement source {source!r} must be lowercase (Deepgram requirement)"
+            )
         # Keep provider-side replacement away from clinical numbers; those
         # remain protected locally during all terminology operations.
         if any(ch.isdigit() for ch in source + target) or ":" in source + target:
             raise ConfigError("ASR replacements cannot contain digits or ':'")
+        if source in seen and seen[source] != target:
+            raise ConfigError(
+                f"ASR replacement conflict: {source!r} maps to both {seen[source]!r} and {target!r}"
+            )
+        if source in seen:
+            continue  # identical duplicate: harmless, keep one
+        seen[source] = target
         result.append(f"{source}:{target}")
     return result
 

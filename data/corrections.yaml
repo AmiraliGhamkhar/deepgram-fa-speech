@@ -32,6 +32,19 @@
 # heuristics and rationale). Manual review is still recommended before
 # adding new "specialty_terminology" or "context_dependent" entries.
 #
+# --- Ambiguous-source policy (safety review) -----------------------------
+# A rule may be applied by default only if its source cannot reasonably be
+# ordinary speech in another sense. Rules whose source is an everyday
+# Persian word that happens to have a medical reading (نمونه = "sample",
+# کلیه = "all", جفت = "pair", کشت = "cultivation", شانه = "comb",
+# تراشه = "chip", رحم = "mercy", تنگی = "narrowness", شستشو = "washing", ...)
+# or an everyday phrase mapped to a chart abbreviation (به مقدار کافی ->
+# QS, عدم پیگیری -> DS, خون در مدفوع -> OB) are kept as
+# "context_dependent" (requires_context: true) and disabled by default.
+# They are NOT deleted: setting enable_context_dependent_terms: true in
+# settings.yaml turns them back on after review. See
+# tests/test_data_safety.py for the cases that pin this behavior.
+#
 rules:
 - from: ناشتا
   to: NPO
@@ -575,9 +588,9 @@ rules:
   dangerous: false
 - from: آپاچی
   to: APACHE
-  category: safe_lexical
-  confidence: high
-  requires_context: false
+  category: context_dependent
+  confidence: medium
+  requires_context: true
   dangerous: false
 - from: استنت
   to: Stent
@@ -629,9 +642,9 @@ rules:
   dangerous: false
 - from: تراشه
   to: Trachea
-  category: safe_lexical
-  confidence: high
-  requires_context: false
+  category: context_dependent
+  confidence: medium
+  requires_context: true
   dangerous: false
 - from: تنودز
   to: Tenodesis
@@ -641,15 +654,15 @@ rules:
   dangerous: false
 - from: تنگی
   to: Stricture
-  category: safe_lexical
-  confidence: high
-  requires_context: false
+  category: context_dependent
+  confidence: medium
+  requires_context: true
   dangerous: false
 - from: جفت
   to: Placenta
-  category: safe_lexical
-  confidence: high
-  requires_context: false
+  category: context_dependent
+  confidence: medium
+  requires_context: true
   dangerous: false
 - from: حالب
   to: Ureter
@@ -671,9 +684,9 @@ rules:
   dangerous: false
 - from: رحم
   to: Uterus
-  category: safe_lexical
-  confidence: high
-  requires_context: false
+  category: context_dependent
+  confidence: medium
+  requires_context: true
   dangerous: false
 - from: رویان
   to: Embryo
@@ -719,9 +732,9 @@ rules:
   dangerous: false
 - from: شانه
   to: Shoulder
-  category: safe_lexical
-  confidence: high
-  requires_context: false
+  category: context_dependent
+  confidence: medium
+  requires_context: true
   dangerous: false
 - from: شریان
   to: Artery
@@ -731,9 +744,9 @@ rules:
   dangerous: false
 - from: شستشو
   to: Irrigation
-  category: safe_lexical
-  confidence: high
-  requires_context: false
+  category: context_dependent
+  confidence: medium
+  requires_context: true
   dangerous: false
 - from: طحال
   to: Spleen
@@ -791,9 +804,9 @@ rules:
   dangerous: false
 - from: مشکوک
   to: Suspicious
-  category: safe_lexical
-  confidence: high
-  requires_context: false
+  category: context_dependent
+  confidence: medium
+  requires_context: true
   dangerous: false
 - from: معده
   to: Stomach
@@ -809,9 +822,9 @@ rules:
   dangerous: false
 - from: نمونه
   to: Specimen
-  category: safe_lexical
-  confidence: high
-  requires_context: false
+  category: context_dependent
+  confidence: medium
+  requires_context: true
   dangerous: false
 - from: هموژن
   to: Homogeneous
@@ -857,9 +870,9 @@ rules:
   dangerous: false
 - from: کشت
   to: Culture
-  category: safe_lexical
-  confidence: high
-  requires_context: false
+  category: context_dependent
+  confidence: medium
+  requires_context: true
   dangerous: false
 - from: کشکک
   to: Patella
@@ -869,9 +882,9 @@ rules:
   dangerous: false
 - from: کلیه
   to: Kidney
-  category: safe_lexical
-  confidence: high
-  requires_context: false
+  category: context_dependent
+  confidence: medium
+  requires_context: true
   dangerous: false
 - from: گرسپر
   to: Grasper
@@ -2699,15 +2712,15 @@ rules:
   dangerous: false
 - from: به اندازه کافی
   to: QS
-  category: specialty_terminology
-  confidence: high
-  requires_context: false
+  category: context_dependent
+  confidence: medium
+  requires_context: true
   dangerous: false
 - from: به مقدار کافی
   to: QS
-  category: specialty_terminology
-  confidence: high
-  requires_context: false
+  category: context_dependent
+  confidence: medium
+  requires_context: true
   dangerous: false
 - from: بورسکتومی
   to: Bursectomy
@@ -3149,9 +3162,9 @@ rules:
   dangerous: false
 - from: خون در مدفوع
   to: OB
-  category: specialty_terminology
-  confidence: high
-  requires_context: false
+  category: context_dependent
+  confidence: medium
+  requires_context: true
   dangerous: false
 - from: خون مخفی در مدفوع
   to: OB
@@ -3437,9 +3450,9 @@ rules:
   dangerous: false
 - from: ریکاوری
   to: Recovery
-  category: specialty_terminology
-  confidence: high
-  requires_context: false
+  category: context_dependent
+  confidence: medium
+  requires_context: true
   dangerous: false
 - from: زمان نسبی ترومبوپلاستین
   to: PTT
@@ -3845,9 +3858,9 @@ rules:
   dangerous: false
 - from: عدم پیگیری
   to: DS
-  category: specialty_terminology
-  confidence: high
-  requires_context: false
+  category: context_dependent
+  confidence: medium
+  requires_context: true
   dangerous: false
 - from: علائم حیاتی
   to: V/S
@@ -4019,9 +4032,9 @@ rules:
   dangerous: false
 - from: قطع پیگیری
   to: DS
-  category: specialty_terminology
-  confidence: high
-  requires_context: false
+  category: context_dependent
+  confidence: medium
+  requires_context: true
   dangerous: false
 - from: قفسه سینه
   to: Chest
@@ -4390,12 +4403,6 @@ rules:
   requires_context: false
   dangerous: false
 - from: نرمال سالین
-  to: NS
-  category: specialty_terminology
-  confidence: high
-  requires_context: false
-  dangerous: false
-- from: نرمال سالین
   to: Normal Saline
   category: specialty_terminology
   confidence: high
@@ -4691,15 +4698,15 @@ rules:
   dangerous: false
 - from: پايدار
   to: stable
-  category: specialty_terminology
-  confidence: high
-  requires_context: false
+  category: context_dependent
+  confidence: medium
+  requires_context: true
   dangerous: false
 - from: پایدار
   to: stable
-  category: specialty_terminology
-  confidence: high
-  requires_context: false
+  category: context_dependent
+  confidence: medium
+  requires_context: true
   dangerous: false
 - from: پرزانتاسیون سفالیک
   to: Cephalic presentation
@@ -4757,15 +4764,15 @@ rules:
   dangerous: false
 - from: پنی سیلین
   to: Pen
-  category: specialty_terminology
-  confidence: high
-  requires_context: false
+  category: context_dependent
+  confidence: medium
+  requires_context: true
   dangerous: false
 - from: پنی‌سیلین
   to: Pen
-  category: specialty_terminology
-  confidence: high
-  requires_context: false
+  category: context_dependent
+  confidence: medium
+  requires_context: true
   dangerous: false
 - from: پورت زیرجلدی
   to: Subcutaneous port
@@ -4901,9 +4908,9 @@ rules:
   dangerous: false
 - from: کلسترول
   to: Chol
-  category: specialty_terminology
-  confidence: high
-  requires_context: false
+  category: context_dependent
+  confidence: medium
+  requires_context: true
   dangerous: false
 - from: کلسیفیکاسیون
   to: Calcification

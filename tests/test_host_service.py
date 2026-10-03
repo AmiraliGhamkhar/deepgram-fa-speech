@@ -142,6 +142,114 @@ def test_invalid_ttl_falls_back_to_the_default():
     assert core.normalize_ttl("nonsense", _settings()) == 30
 
 
+def test_stale_limiter_entries_are_reclaimed():
+    """Inactive client keys must not accumulate forever."""
+    clock = [1000.0]
+    limiter = core.RateLimiter(
+        limit=5, window_seconds=60, clock=lambda: clock[0], purge_interval_calls=8
+    )
+    for index in range(50):
+        limiter.allow(f"client-{index}")
+    assert limiter.tracked_clients == 50
+
+    clock[0] += 61  # every previous window is now expired
+    for _ in range(8):
+        limiter.allow("client-0")
+    assert limiter.tracked_clients < 50, "expired client keys were not reclaimed"
+
+
+def test_limiter_table_is_capped_even_for_active_clients():
+    limiter = core.RateLimiter(
+        limit=5,
+        window_seconds=60,
+        clock=lambda: 1000.0,
+        max_tracked_clients=10,
+        purge_interval_calls=1,
+    )
+    for index in range(200):
+        limiter.allow(f"client-{index}")
+    assert limiter.tracked_clients <= 10
+
+
+def test_limiter_still_limits_after_a_purge():
+    clock = [1000.0]
+    limiter = core.RateLimiter(
+        limit=2, window_seconds=60, clock=lambda: clock[0], purge_interval_calls=1
+    )
+    assert limiter.allow("ip")[0] is True
+    assert limiter.allow("ip")[0] is True
+    clock[0] += 120
+    assert limiter.allow("ip")[0] is True
+
+
+# -- HTTPS enforcement (trusted proxy handling) --------------------------
+
+
+def test_direct_http_request_is_rejected():
+    settings = _settings()
+    assert core.request_is_secure("http", "203.0.113.9", None, settings) is False
+
+
+def test_direct_http_with_forged_forwarded_proto_is_rejected():
+    settings = _settings()
+    assert core.request_is_secure("http", "203.0.113.9", "https", settings) is False
+    # Even a forged header that lists several protocols is not trusted.
+    assert core.request_is_secure("http", "203.0.113.9", "https, http", settings) is False
+
+
+def test_direct_https_is_allowed():
+    settings = _settings()
+    assert core.request_is_secure("https", "203.0.113.9", None, settings) is True
+
+
+def test_trusted_proxy_with_forwarded_proto_https_is_allowed():
+    settings = _settings()
+    assert core.request_is_secure("http", "127.0.0.1", "https", settings) is True
+    assert core.request_is_secure("http", "127.0.0.1", "HTTPS", settings) is True
+    # A proxy may append to the header; the first value is the client-facing one.
+    assert core.request_is_secure("http", "::1", "https, http", settings) is True
+
+
+def test_trusted_proxy_without_the_header_is_still_plaintext():
+    settings = _settings()
+    assert core.request_is_secure("http", "127.0.0.1", None, settings) is False
+    assert core.request_is_secure("http", "127.0.0.1", "http", settings) is False
+
+
+def test_forwarded_allow_ips_is_configurable_and_defaults_to_loopback():
+    settings = core.HostSettings.from_env(
+        {
+            "DEEPGRAM_API_KEY": API_KEY,
+            "HOST_SHARED_SECRET": SHARED_SECRET,
+            "HOST_FORWARDED_ALLOW_IPS": "10.0.0.7, 10.0.0.8",
+        }
+    )
+    assert settings.forwarded_allow_ips == ("10.0.0.7", "10.0.0.8")
+    assert core.request_is_secure("http", "10.0.0.7", "https", settings) is True
+    assert core.request_is_secure("http", "10.0.0.9", "https", settings) is False
+
+    default = core.HostSettings.from_env(
+        {"DEEPGRAM_API_KEY": API_KEY, "HOST_SHARED_SECRET": SHARED_SECRET}
+    )
+    assert default.forwarded_allow_ips == core.DEFAULT_FORWARDED_ALLOW_IPS
+    # An empty override must not silently trust everything.
+    empty = core.HostSettings.from_env(
+        {
+            "DEEPGRAM_API_KEY": API_KEY,
+            "HOST_SHARED_SECRET": SHARED_SECRET,
+            "HOST_FORWARDED_ALLOW_IPS": "",
+        }
+    )
+    assert empty.forwarded_allow_ips == core.DEFAULT_FORWARDED_ALLOW_IPS
+
+
+def test_unknown_peer_is_never_a_trusted_proxy():
+    settings = _settings()
+    assert core.peer_is_trusted_proxy(None, settings) is False
+    assert core.peer_is_trusted_proxy("", settings) is False
+    assert core.peer_is_trusted_proxy("127.0.0.1", settings) is True
+
+
 # -- Deepgram grant ------------------------------------------------------
 
 
@@ -180,3 +288,97 @@ def test_grant_response_with_bad_expiry_is_rejected():
 
 def test_grant_hits_deepgram_over_https_only():
     assert core.DEEPGRAM_GRANT_URL.startswith("https://")
+
+
+# -- Deepgram grant transport failures -----------------------------------
+#
+# These exercise the default httpx transport with a stubbed httpx.post, so
+# every network failure mode is proven to become a controlled GrantError
+# (and therefore a 502/503/504 response) instead of an unhandled 500.
+
+
+class _FakeResponse:
+    def __init__(self, status_code=200, payload=None, json_error=False):
+        self.status_code = status_code
+        self._payload = payload
+        self._json_error = json_error
+
+    def json(self):
+        if self._json_error:
+            raise ValueError("not json")
+        return self._payload
+
+
+def _patch_httpx(monkeypatch, behaviour):
+    import httpx
+
+    if isinstance(behaviour, BaseException):
+        def post(*_args, **_kwargs):
+            raise behaviour
+
+        monkeypatch.setattr(httpx, "post", post)
+    else:
+        monkeypatch.setattr(httpx, "post", lambda *a, **k: behaviour)
+
+
+def test_grant_timeout_becomes_504(monkeypatch):
+    import httpx
+
+    _patch_httpx(monkeypatch, httpx.TimeoutException("timed out"))
+    with pytest.raises(core.GrantError) as excinfo:
+        core.grant_session(_settings(), 30)
+    assert excinfo.value.status == 504
+    assert API_KEY not in str(excinfo.value)
+
+
+def test_grant_connection_failure_becomes_503(monkeypatch):
+    import httpx
+
+    _patch_httpx(monkeypatch, httpx.ConnectError("connection refused"))
+    with pytest.raises(core.GrantError) as excinfo:
+        core.grant_session(_settings(), 30)
+    assert excinfo.value.status == 503
+    assert API_KEY not in str(excinfo.value)
+
+
+def test_grant_generic_request_error_becomes_503(monkeypatch):
+    import httpx
+
+    _patch_httpx(monkeypatch, httpx.RequestError("boom"))
+    with pytest.raises(core.GrantError) as excinfo:
+        core.grant_session(_settings(), 30)
+    assert excinfo.value.status == 503
+
+
+def test_grant_non_success_response_is_mapped(monkeypatch):
+    _patch_httpx(monkeypatch, _FakeResponse(status_code=500))
+    with pytest.raises(core.GrantError) as excinfo:
+        core.grant_session(_settings(), 30)
+    assert excinfo.value.status == 503
+
+    _patch_httpx(monkeypatch, _FakeResponse(status_code=403))
+    with pytest.raises(core.GrantError) as excinfo:
+        core.grant_session(_settings(), 30)
+    assert excinfo.value.status == 502
+
+
+def test_grant_malformed_json_becomes_502(monkeypatch):
+    _patch_httpx(monkeypatch, _FakeResponse(status_code=200, json_error=True))
+    with pytest.raises(core.GrantError) as excinfo:
+        core.grant_session(_settings(), 30)
+    assert excinfo.value.status == 502
+
+
+def test_grant_malformed_payload_becomes_502(monkeypatch):
+    _patch_httpx(monkeypatch, _FakeResponse(status_code=200, payload={"nope": True}))
+    with pytest.raises(core.GrantError) as excinfo:
+        core.grant_session(_settings(), 30)
+    assert excinfo.value.status == 502
+
+
+def test_grant_success_through_the_default_transport(monkeypatch):
+    _patch_httpx(
+        monkeypatch,
+        _FakeResponse(status_code=200, payload={"access_token": "issued", "expires_in": 30}),
+    )
+    assert core.grant_session(_settings(), 30) == ("issued", 30)

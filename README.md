@@ -138,9 +138,13 @@ Notes:
 
 - **HTTPS is enforced.** Plaintext requests are refused unless
   `HOST_ALLOW_HTTP=1` (development only). Terminate TLS in the service or
-  in a reverse proxy that sets `X-Forwarded-Proto`.
+  in a reverse proxy that sets `X-Forwarded-Proto`. That header is only
+  trusted when the peer is listed in `HOST_FORWARDED_ALLOW_IPS` (default
+  `127.0.0.1`) and the **last** hop's value is used, so a direct request
+  with a forged header is still rejected as plaintext.
 - **Rate limiting** is per client IP (30 requests / 60s by default,
-  configurable).
+  configurable) with bounded memory: inactive clients are reclaimed, so a
+  spawn of source IPs cannot grow the limiter without limit.
 - The Deepgram key needs at least **Member** permission to call
   `/v1/auth/grant`.
 - Rotating the Deepgram key requires **no client change**. Rotating the
@@ -345,6 +349,16 @@ Every rule carries metadata:
 - **`context_dependent`** rules (e.g. "نبض" → "HR") are **disabled by
   default**. Enable with `enable_context_dependent_terms: true` only after
   reviewing the risk for your dictation population.
+- Rules whose **source is everyday Persian** that merely *has* a medical
+  reading are always `context_dependent`, never active by default:
+  `کلیه` ("all") ≠ Kidney, `نمونه` ("sample") ≠ Specimen, `جفت` ("pair")
+  ≠ Placenta, `کشت` ("cultivation") ≠ Culture, `شانه` ("comb") ≠ Shoulder,
+  `تراشه` ("chip") ≠ Trachea, `رحم` ("mercy") ≠ Uterus. They are kept (not
+  deleted) so a reviewed deployment can switch them on, and
+  `tests/test_data_safety.py` pins both halves: ordinary sentences must
+  not be "medicalized", and unambiguous medical mappings must still fire.
+  Everyday phrases mapped to chart abbreviations (`به مقدار کافی` → `QS`,
+  `عدم پیگیری` → `DS`, `خون در مدفوع` → `OB`) are treated the same way.
 - **`unsafe` / `dangerous`** rules are **never** applied automatically.
   Two examples kept out of the default behavior: `"ناشتا"` (fasting) →
   `"NPO"` and `"کاهش"` (decrease) → `"DC"` (discontinue) — both can
@@ -438,6 +452,60 @@ the same way, for the same reason.
   `MICROPHONE`, `SHUTDOWN`, `UNKNOWN`. **`AUTH` and `CONFIG` are never
   retried.**
 
+### Language scope: Persian ASR + English *terminology*, not code-switching
+
+The session runs in **one language**, Persian (`language: fa`, Nova-3).
+English support is *lexical*, not acoustic: keyterm prompting plus the
+terminology rules turn well-known spoken forms and English medical terms
+into their written equivalents (`آی سی یو` → `ICU`, `هایپرتنشن` →
+`hypertension`). This is deliberately **not** unrestricted
+Persian↔English code-switching or automatic language detection:
+
+- no `detect_language`/multilingual parameter is sent (pinned by
+  `tests/test_streaming.py`);
+- a speaker who dictates a full English sentence may get Persian-shaped
+  recognition of it, because the acoustic model is Persian;
+- the deterministic local layers can only normalize terms they know and
+  never guess the language of a sentence.
+
+If your dictation population needs true bilingual transcription, that is a
+different configuration (and a different accuracy review) — it is not what
+this project claims or tests.
+
+### Who owns what: Deepgram vs. local post-processing
+
+Two layers touch the text, and the split is deliberate:
+
+| Concern | Owner | Why there |
+| --- | --- | --- |
+| Acoustic decoding, punctuation, smart formatting, endpointing | Deepgram (`smart_format`, `punctuate`, `endpointing`, `utterance_end_ms`) | it has the audio model; re-doing it locally would guess |
+| Confusable *spelling* corrections (`replace`) | Deepgram, driven by `data/asr_replacements.yaml` | the provider sees the wrong form first; the list is validated to contain no digits/units/English targets (see `load_asr_replacements()`) |
+| Number/unit/BP protection, terminology, negation, bidi, line structure | Local pipeline | deterministic, reviewable, and the provider has no access to the rule metadata (`requires_context`, `dangerous`) |
+
+The local pipeline never re-does Deepgram's punctuation/formatting work,
+and `data/asr_replacements.yaml` never carries a correction that the local
+terminology layer owns. A rule that appears in both places is a bug: the
+provider copy would bypass the local category/context guards.
+
+### Formatting ownership (one owner per concern)
+
+| Responsibility | Single owner |
+| --- | --- |
+| Unicode form, Arabic→Persian letterforms, digit/separator glyphs, whitespace runs, ZWNJ, punctuation spacing | `processing/normalize.py` |
+| Which spans are clinical numbers/units (protected from rewriting) | `processing/numbers.py` |
+| Terminology and abbreviation substitution (longest match, left to right) | `processing/terminology.py` + `processing/fst.py` |
+| Negation/fidelity markers that must survive untouched | `processing/negation.py` |
+| Low-confidence clinical token warnings (text is preserved, never guessed) | `processing/confidence.py` |
+| Directional marks and visual order (logical/display/injected views) | `processing/bidi.py` — the only module allowed to emit U+200E/U+200F |
+| Line breaks and transport whitespace for clipboard/keystroke injection | `injection/text_injector.normalize_injected_whitespace()` |
+| Provider-side spelling fixes | `data/asr_replacements.yaml` |
+
+`tests/test_formatting_ownership.py` pins this map: it fails if another
+module starts emitting directional marks, collapses newlines into spaces,
+expands terminology during normalization, or if a clinical number/unit is
+altered by any stage. Line breaks are preserved end to end — a dictated
+line break (`\n`) survives normalization, terminology and injection.
+
 ---
 
 ## Audio pipeline
@@ -477,22 +545,31 @@ pytest tests/ -v
 
 ```
 tests/
-├── test_normalize.py       # Unicode/digit/ZWNJ/whitespace normalization
-├── test_terminology.py      # safety categorization & guardrails
-├── test_fst.py               # longest-match correctness
-├── test_numbers.py            # numeric-expression protection
-├── test_negation.py            # negation/fidelity protection
-├── test_bidi.py                  # logical/display/injected separation
-├── test_config.py                  # settings validation, plaintext-secret rejection
-├── test_streaming.py                 # error classification & backoff policy
-├── test_host_client.py               # session fetch, error mapping, secret hygiene
-├── test_host_service.py              # host auth, rate limiting, TTL, grant
-├── test_secret_store.py              # DPAPI store behaviour (fake protector)
-├── test_session_lifecycle.py         # single instance + Start/Stop controller
-├── test_injection.py                 # TextInjector via DryRunBackend
-├── test_audio_queue.py               # drop accounting + drain-on-stop
-├── test_overlay.py                   # overlay shutdown lifecycle (no real GUI)
-├── test_app.py                       # end-to-end pipeline, fake provider
+├── test_normalize.py          # Unicode/digit/ZWNJ/whitespace normalization
+├── test_terminology.py         # safety categorization & guardrails
+├── test_fst.py                  # longest-match correctness
+├── test_numbers.py               # numeric-expression protection
+├── test_negation.py               # negation/fidelity protection
+├── test_bidi.py                    # logical/display/injected separation
+├── test_config.py                   # settings validation, plaintext-secret rejection
+├── test_streaming.py                 # error classification, backoff, keyterm/keywords
+├── test_utterance_accumulator.py      # final-segment dedupe (timing/identity based)
+├── test_shutdown_flow.py               # ordered stop/finalize/drain lifecycle
+├── test_audio_callback.py               # real-time-safety of the mic callback
+├── test_host_client.py                   # session fetch, error mapping, secret hygiene
+├── test_host_service.py                  # host auth, rate limiting, TTL, grant
+├── test_secret_store.py                  # DPAPI store behaviour (fake protector)
+├── test_session_lifecycle.py             # single instance + Start/Stop controller
+├── test_injection.py                     # TextInjector via DryRunBackend (line structure)
+├── test_data_safety.py                   # ambiguous terminology rules stay opt-in
+├── test_formatting_ownership.py          # one owner per formatting concern
+├── test_audio_queue.py                   # drop accounting + drain-on-stop
+├── test_overlay.py                       # overlay shutdown lifecycle (no real GUI)
+├── test_app.py                           # end-to-end pipeline, fake provider
+├── test_benchmark.py                      # metric math + harness honesty
+├── test_windows_selftest.py                # Windows-only checks refuse to fake success
+├── test_secret_tooling.py                   # scanner + history-scrub tooling
+├── test_live_deepgram.py                     # opt-in live test (skipped by default)
 ├── regression/
 │   └── test_medical_cases.py         # semantic-preservation corpus
 └── fixtures/
@@ -504,6 +581,72 @@ GUI, or a real audio device — the provider, host client, host service,
 secret store, injection backend and overlay are all exercised through
 fakes. DPAPI itself is Windows-only, so `tests/test_secret_store.py` uses
 a fake protector and asserts the real thing refuses to run off Windows.
+`tests/test_live_deepgram.py` is the only test that talks to the real
+service; it is skipped unless `MEDICAL_STT_LIVE_TEST=1` and host
+credentials are set.
+
+---
+
+## Benchmarking
+
+`benchmarks/run_benchmark.py` is a small, reproducible harness for
+transcript accuracy. It ships **no accuracy numbers**: the repository
+contains no measured baseline, and none is implied — measured WER/CER
+depend on your microphone, your speakers and your audio. Run it against
+your own recordings.
+
+Offline scoring (no network, no credentials):
+
+```bash
+# hypotheses.json maps corpus case ids to the transcript a system produced
+python benchmarks/run_benchmark.py --hypotheses hypotheses.json --out report.json
+python benchmarks/run_benchmark.py --hypotheses hypotheses.json --apply-processing
+```
+
+`--apply-processing` runs the local pipeline (normalize → terminology →
+injection whitespace) over each hypothesis, so you can see what the
+deterministic layer adds. Terminology rewrites declared in
+`benchmarks/corpus.yaml` are then treated as expected, not as errors
+(`--spoken-reference` disables that if you want to see them as edits).
+
+Metrics: word error rate, character error rate, numeric/unit/BP accuracy
+(each clinical expression must survive verbatim), negation preservation,
+English/Latin term recall and medical-term recall. Categories:
+normal dictation, terminology, medications, numbers, blood pressure, SpO2,
+dosage, fast/noisy speech, mixed language, repeated phrases, long
+dictation. `tests/test_benchmark.py` checks the metric math against
+hand-computed values, so a harness regression cannot quietly inflate
+results.
+
+Live measurement (opt-in; real network, real cost):
+
+```bash
+MEDICAL_STT_BENCHMARK_LIVE=1 \
+MEDICALSTT_HOST_URL=https://host.example.com MEDICALSTT_HOST_SECRET=... \
+python benchmarks/run_benchmark.py --live --audio-dir recordings/ \
+  --out report.json
+```
+
+Recordings are `<case-id>.wav` (16 kHz, mono, 16-bit PCM). Without the
+opt-in environment the harness exits 3 and measures nothing.
+
+---
+
+## Verification status
+
+What is verified, where, and what is not — stated explicitly so no one has
+to guess from a green badge:
+
+| Area | How it is verified | Status |
+| --- | --- | --- |
+| Text pipeline (normalize/numbers/terminology/negation/bidi/injection) | unit + regression tests on any OS | verified by the test suite |
+| Streaming protocol, error classification, reconnect policy, keyterm/keywords selection | fake SDK, no network | verified by the test suite |
+| Host service (auth, rate limits, TTL, grant error mapping, proxy trust) | `tests/test_host_service.py`, `tests/test_host_app.py` | verified by the test suite |
+| Shutdown/finalize ordering, audio queue draining, accumulator dedupe | fake provider + fake sounddevice | verified by the test suite |
+| DPAPI secret store, named mutex, `SendInput` injection | `windows-check` CI job on `windows-latest` (real `CryptProtectData` round-trip, real mutex acquisition/refusal/release, backend load) plus `scripts/windows_selftest.py`, which `scripts/build_windows.ps1` runs before packaging | verified on Windows CI; **not** verifiable in a Linux development environment |
+| Live Deepgram streaming | `tests/test_live_deepgram.py`, opt-in via `MEDICAL_STT_LIVE_TEST=1` | **not run here** (needs real credentials) |
+| Transcription accuracy / WER | `benchmarks/run_benchmark.py` with your audio | **no numbers measured here** |
+| Windows installer / signed EXE | `scripts/build_windows.ps1` on a Windows machine | **not run here** (the script is not executed by CI; only its Windows checks are) |
 
 ---
 
@@ -516,19 +659,44 @@ started all this. Current state:
 - The client stores exactly one secret (the shared secret), DPAPI-protected
   in user scope; it is not readable by other accounts on the machine.
 - `settings.yaml` rejects plaintext secrets.
-- `.env` is git-ignored; CI runs a gitleaks scan over the full history and
-  the build script refuses to run if a key pattern appears in the tree.
+- `.env` is git-ignored; CI runs a gitleaks scan plus this project's own
+  `scripts/scan_secrets.py` (working tree *and* full history), and the
+  build script refuses to run if a key pattern appears in the tree.
+- The exposed key from the incident **must be revoked at the provider** —
+  that is the only real remediation, and this repository cannot do it for
+  you. See `SECURITY.md` for the current state and the remaining
+  force-push steps. A history rewrite is an operator action, never
+  something CI or the application does.
+- The CI history scan fails on any credential finding that is not listed,
+  with a reason, in `scripts/secret_scan_baseline.txt`. The one entry there
+  is the tracked incident blob: it is still printed on every run (accepted,
+  not hidden), and `scripts/scan_secrets.py --history --strict` — which
+  ignores the baseline — is how you verify a scrub afterwards. Once the
+  rewritten history is pushed, the entry matches nothing and the scanner
+  tells you to delete it.
 
 ---
 
 ## CI
 
-GitHub Actions runs on Python 3.10/3.11/3.12: dependency install, the
-full test suite (mocked everything, no credentials), `ruff` over
-`medical_stt tests scripts host`, `mypy`, and a gitleaks secret-scan job.
+GitHub Actions jobs:
 
-The Windows build runs separately on a Windows runner (or your own
-machine) because Nuitka must produce a Windows binary.
+- **Test** on Python 3.10/3.11/3.12 (Ubuntu): dependency install, the full
+  test suite (everything mocked, no credentials, no network), `ruff` over
+  `medical_stt tests scripts host`, `mypy medical_stt host/core.py`.
+- **Host service tests** (Ubuntu): `tests/test_host_service.py` and
+  `tests/test_host_client.py` without any Deepgram key.
+- **Windows platform checks** (`windows-latest`): the platform tests plus
+  `scripts/windows_selftest.py`, which exercises real DPAPI, the real
+  named mutex and the real `SendInput` backend — the only automated place
+  where Windows-only code runs.
+- **Secret scan** (Ubuntu, full history): gitleaks plus
+  `scripts/scan_secrets.py` (tree and history).
+
+No CI job needs a Deepgram credential or the internet (beyond package
+installation). The Windows *build* still runs on a Windows machine, because
+Nuitka must produce a Windows binary; `scripts/build_windows.ps1` runs the
+test suite and the Windows self-test before packaging.
 
 ---
 
@@ -549,7 +717,14 @@ machine) because Nuitka must produce a Windows binary.
   negation-scope detector.
 - Windows-native injection is the primary, most-tested path. The
   Linux/macOS fallback (`pyautogui`/`pyperclip`) is provided for
-  development convenience.
+  development convenience. DPAPI, the single-instance mutex and
+  `SendInput` are verified on Windows (CI job + self-test); they are not
+  verified in a Linux development environment.
+- The ASR is **Persian-only** (`language: fa`). English medical terms work
+  through keyterm prompting plus deterministic terminology rules, not
+  through language switching; a fully English dictation is out of scope.
+- The benchmark harness measures accuracy but has **no measured baseline in
+  this repository** — see Verification status.
 - The host's rate limiter is per worker process; with multiple workers,
   also enforce limits in the reverse proxy.
 - No LLM is used in the transcription-correction path, by design; novel

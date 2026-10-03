@@ -1,5 +1,23 @@
-# Small provider-side corrections for repeatedly observed ASR forms.
-# Clinical terminology normalization remains in corrections.yaml.
+# Provider-side `replace` parameters (Deepgram's documented feature).
+#
+# Ownership: this file is the ONLY provider-side text rewrite in the
+# project. Use it only for acoustically confusable Persian *spellings* that
+# the ASR itself must fix; the corrected text then flows through the normal
+# local pipeline (normalize -> terminology -> BiDi) like any other
+# transcript.
+#
+# Not allowed here (enforced by load_asr_replacements(), see
+# medical_stt/config.py):
+#   * digits, units or anything clinical (the local numeric protection owns
+#     those spans; provider-side replacement could bypass it),
+#   * a Latin/English medical term as the target (terminology belongs in
+#     data/corrections.yaml where `requires_context`/`dangerous` metadata
+#     and review apply),
+#   * an uppercase `from` term (Deepgram's find term must be lowercase or it
+#     silently never matches),
+#   * two different targets for the same `from`.
+#
+# Keep this list short: every entry is applied to every transcript.
 replacements:
   - from: "هایپرتمشن"
     to: "هایپرتنشن"

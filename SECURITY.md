@@ -48,7 +48,10 @@ rewrite performed anywhere:
    briefly public/private-then-public, or forked.
 
 This change set does **not** commit a replacement credential anywhere in
-the repository, docs, CI config, or git history.
+the repository, docs, CI config, or git history. It also cannot revoke the
+key: revocation happens in the Deepgram console and must be done by the
+account owner. Nothing in this repository should be read as evidence that
+the exposed key has been revoked.
 
 ## What was changed
 
@@ -63,38 +66,78 @@ the repository, docs, CI config, or git history.
 
 ## History rewrite — status and what still needs to happen on GitHub
 
-`git filter-repo` was used to scrub the key out of the commit history of
-this working copy (the local `main`/PR-source history no longer contains
-the plaintext key in any blob). **This local/PR-branch rewrite does not,
-by itself, remove the key from GitHub's `main` branch.** The commit
-`cc42196c3e27bb4892d62aa864f4ee979bcb9ce9` with the plaintext key is still
-reachable from `origin/main` on GitHub as of this writing, because:
+The local clone's history is scrubbed with this repository's own, tested
+tooling (no external dependency, and no secret value is ever printed):
 
-* This PR is opened from a feature branch and cannot force-push over
-  `main`.
-* A `git filter-repo`/BFG-style history rewrite only takes effect on
-  GitHub once someone with write access **force-pushes the rewritten
-  history to every affected ref** (at minimum `main`), and then GitHub's
-  cached views, PR diffs, forks, and any CI artifact caches are cleared.
+```bash
+python scripts/scan_secrets.py --history          # confirm what is reachable
+python scripts/scrub_history.py --yes \
+    --path .env \
+    --replace 'DEEPGRAM_API_KEY\s*=\s*\S+'      # dry run without --yes
+python scripts/scan_secrets.py --history --strict # verify: must be clean
+```
+
+Until the rewritten history is pushed, the incident blob is listed in
+`scripts/secret_scan_baseline.txt` so CI can tell "the known, tracked
+incident" apart from "a new leak". The entry is fingerprinted (not a value),
+carries its reason, is still printed on every scan, and makes the strict
+scan fail — so it can never be used to hide an unidentified finding. Delete
+the line once `python scripts/scan_secrets.py --history --strict` is clean;
+the scanner will tell you when it has become stale.
+
+`scripts/scrub_history.py` writes a `git bundle` backup *outside* the
+repository first, rewrites all refs with `git filter-branch`, deletes
+`refs/original`, expires reflogs, prunes unreachable objects and re-scans
+the rewritten history, failing loudly if anything is still reachable. It
+never pushes: rewriting a shared repository is an operator decision.
+
+What this does and does not achieve:
+
+- **Local clone:** the `.env` blob is no longer reachable from any ref,
+  including reflogs and `refs/original`. Verified with
+  `scripts/scan_secrets.py --history`.
+- **The remote still has it.** `cc42196c…` and the object it introduced are
+  still reachable from `origin/main` on GitHub until someone with write
+  access force-pushes rewritten history for every affected ref (at minimum
+  `main`) and GitHub purges cached views, PR diffs and forks.
+- **Restore path:** the backup bundle written before the rewrite
+  (`medical-stt-history-backup-<timestamp>.bundle` in the operator's home
+  directory) restores the pre-scrub state with
+  `git clone <bundle> restored-repo`.
+- **CI stays strict about new leaks.** `.github/workflows/ci.yml` runs
+  `scripts/scan_secrets.py` on the tree and on the full history. The known
+  incident finding is reported as accepted (with its reason); anything else
+  fails the job.
 
 **Repo owner action required, in this order, regardless of whether this
 PR is merged:**
 
 1. Revoke the key in the Deepgram console (do this first, independent of
    any git surgery — it is the only step that removes real risk).
-2. Separately rewrite `main`'s history (e.g. with `git filter-repo` or
-   BFG) to strip the secret and force-push the rewritten `main` to
-   GitHub.
-3. Re-clone or hard-reset any other local clones/forks to the rewritten
-   history; a rewritten history does not update existing clones in place,
-   and git objects containing the old key can persist in local reflogs,
-   CI caches, forks, or GitHub's own object/PR cache until they expire or
-   are explicitly purged (see GitHub's "removing sensitive data" support
-   article and consider contacting GitHub Support to purge cached views).
+2. Rewrite `main`'s history (the script above, or `git filter-repo`/BFG on
+   a machine that has it) and force-push the rewritten `main` to GitHub.
+3. Re-clone or hard-reset every other clone and fork. A rewritten history
+   does not update existing clones in place, and old objects can persist in
+   local reflogs, CI caches, forks, or GitHub's own object/PR cache until
+   they expire or are explicitly purged (see GitHub's "removing sensitive
+   data" article; consider contacting GitHub Support to purge cached views).
 
-Until steps 1–3 above are performed by someone with push access to
-`main`, the plaintext key remains visible in `main`'s history on GitHub
-regardless of anything in this pull request.
+## Fixes made alongside this incident
+
+- **`X-Forwarded-Proto` is no longer trusted from anyone.** The host
+  previously accepted the header from any client, so a direct HTTP request
+  carrying a forged `X-Forwarded-Proto: https` was treated as secure. It now
+  only believes the header when the request comes from a proxy in
+  `HOST_FORWARDED_ALLOW_IPS` (default `127.0.0.1`), uses the last hop
+  rather than the first, and rejects direct plaintext requests regardless of
+  the header. Covered by `tests/test_host_service.py`.
+- **Scanning is stricter.** `scripts/scan_secrets.py` covers both the
+  current `dg_`-prefixed key form and the legacy 40-hex form that caused
+  this incident, plus private keys; placeholder values in `.env.example`
+  files are allowed, real-looking values are not. It is used by CI and by
+  `scripts/build_windows.ps1` (which previously only looked for `dg_…`).
+- `host/README.md` and `README.md` no longer suggest putting a key in a
+  client-side file, and `.env.example` files contain placeholders only.
 
 ## Reporting
 

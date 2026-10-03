@@ -87,7 +87,9 @@ Terminate TLS in nginx/Caddy and forward to a loopback port. Set
 `HOST_TLS_CERTFILE=`/`HOST_TLS_KEYFILE=` empty and let the proxy set
 `X-Forwarded-Proto: https`; the app verifies that header and refuses
 plaintext otherwise. Keep `HOST_FORWARDED_ALLOW_IPS` set to the proxy's
-address only.
+address only. The header is honoured for that peer only, using the last
+hop's value — a client connecting directly and forging the header is still
+rejected as plaintext (covered by `tests/test_host_service.py`).
 
 ```nginx
 location / {
@@ -134,7 +136,9 @@ it by giving the key to a client.
 
 ## Operational notes
 
-- The in-memory rate limiter is per worker process. With multiple workers,
+- The in-memory rate limiter is per worker process, and its memory is
+  bounded: inactive client entries are reclaimed, so a flood from many
+  source addresses cannot grow it without limit. With multiple workers,
   enforce limits in the reverse proxy as well.
 - Access logs contain method, path and status only. The shared secret and
   issued tokens are never logged.

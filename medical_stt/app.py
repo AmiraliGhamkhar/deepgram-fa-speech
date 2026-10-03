@@ -149,7 +149,11 @@ class LiveMedicalSTT:
         self._shutdown = threading.Event()
         self._errors: List[ProviderError] = []
         self._reconnect_count = 0
-        self._last_drop_logged = 0
+        #: Set by the real-time callback, drained by `_report_audio_health`
+        #: on the sender thread (the callback must never log).
+        self._audio_drop_pending = threading.Event()
+        self._input_status_pending = threading.Event()
+        self._pending_input_status = ""
 
     def request_stop(self) -> None:
         """Ask the current (or next) session to shut down cleanly.
@@ -181,6 +185,25 @@ class LiveMedicalSTT:
         if utterance is None:
             return
 
+        self._finalize_utterance(utterance)
+
+    def _flush_pending_utterance(self) -> None:
+        """Emit an utterance the provider finalized but never endpointed.
+
+        Called once per session, right after shutdown has been requested
+        and the audio queue has been drained into the provider. Without it,
+        a segment that arrived as `is_final` without a following
+        `speech_final`/`UtteranceEnd` would be recognized but never
+        injected -- i.e. the last words of a dictation would be lost.
+        """
+        pending = self._utterance.flush()
+        if pending is None:
+            return
+        log.info("injecting the final buffered utterance during shutdown")
+        self._finalize_utterance(pending)
+
+    def _finalize_utterance(self, utterance: TranscriptEvent) -> None:
+        """Run one completed utterance through terminology, BiDi, injection."""
         self.latency.mark_speech_final()
         self.last_confidence_warning = find_low_confidence_medical_words(
             utterance.words, self.settings.medical_confidence_threshold
@@ -224,19 +247,36 @@ class LiveMedicalSTT:
         self._stop.set()
 
     def _on_audio(self, indata: Any, frames: int, time_info: Any, status: Any) -> None:
+        """Real-time capture callback: enqueue and return.
+
+        Runs on sounddevice's audio thread, so it only does O(1) work with
+        no logging, no locks beyond the queue's own, and no exceptions.
+        Anything worth reporting (queue overflow, device status) is turned
+        into a flag here and logged by the sender thread.
+        """
         self.latency.mark_utterance_start()
         if status:
-            log.warning("microphone status: %s", status)
-        ok = self._audio_q.put_nowait(bytes(indata))
-        if not ok:
+            # Never log here: store the latest status string for the
+            # sender thread to report (device overflow flags can repeat
+            # hundreds of times per second).
+            self._pending_input_status = str(status)
+            self._input_status_pending.set()
+        if not self._audio_q.put_nowait(bytes(indata)):
+            self._audio_drop_pending.set()
+
+    def _report_audio_health(self) -> None:
+        """Log capture problems from a worker thread (never the callback)."""
+        if self._input_status_pending.is_set():
+            self._input_status_pending.clear()
+            status, self._pending_input_status = self._pending_input_status, ""
+            if status:
+                log.warning("microphone status: %s", status)
+        if self._audio_drop_pending.is_set():
+            self._audio_drop_pending.clear()
             stats = self._audio_q.stats()
-            # Rate-limit the warning so a sustained overload doesn't flood
-            # the log from the real-time audio thread's perspective (the
-            # log call itself happens on the sender thread via stats, not
-            # here, but we still keep this branch cheap).
-            if stats.dropped_total != self._last_drop_logged:
-                self._last_drop_logged = stats.dropped_total
-                log.warning("audio queue full: dropped_total=%d depth=%d", stats.dropped_total, stats.depth)
+            log.warning(
+                "audio queue full: dropped_total=%d depth=%d", stats.dropped_total, stats.depth
+            )
 
     # -- session lifecycle -------------------------------------------------
 
@@ -288,17 +328,32 @@ class LiveMedicalSTT:
         provider_thread.start()
 
         def send_audio() -> None:
-            while not self._stop.is_set():
+            """Stream queued audio until it is empty *and* the session is
+            stopping.
+
+            This is what makes shutdown lossless: when Stop sets `_stop`,
+            the sender keeps sending whatever the capture callback already
+            queued, and only exits once the queue is empty. The caller
+            joins this thread *before* finalizing the Deepgram stream, so
+            no captured audio can be dropped between Stop and Finalize.
+            """
+            while True:
                 try:
                     chunk = self._audio_q.get(timeout=0.1)
                 except queue.Empty:
+                    self._report_audio_health()
+                    if self._stop.is_set():
+                        return
                     continue
                 try:
                     self.provider.send_audio(chunk)
                 except ProviderError as exc:
+                    # The connection is unusable: report once and stop
+                    # rather than reporting the same failure per chunk.
                     self._on_provider_error(exc)
-                finally:
                     self._audio_q.task_done()
+                    return
+                self._audio_q.task_done()
 
         sender = threading.Thread(target=send_audio, daemon=True, name="audio-sender")
         sender.start()
@@ -320,12 +375,27 @@ class LiveMedicalSTT:
             # The `with` block above releases the microphone on the way out.
             self._errors.append(ProviderError(ErrorCategory.MICROPHONE, str(exc), cause=exc))
         finally:
+            # Shutdown order matters; each step must finish before the next:
+            #   1. the microphone is already released (the `with` block
+            #      above exited), so no new audio can be captured;
+            #   2. `_stop` lets the sender drain everything that was
+            #      captured but not yet transmitted;
+            #   3. joining the sender -- not finalizing first -- is what
+            #      guarantees the last words reach Deepgram;
+            #   4. Finalize + CloseStream, then wait for the provider
+            #      thread, so the final transcript events are processed
+            #      before the session state is reset;
+            #   5. any utterance that Deepgram finalized but never closed
+            #      with `speech_final` is injected now instead of being
+            #      discarded;
+            #   6. finally, reset the per-session state for the next Start.
             self._stop.set()
-            # Closing order matters: stop feeding audio, finalize and close
-            # the websocket, then release the microphone.
-            self.provider.stop()
             sender.join(timeout=2.0)
+            if sender.is_alive():  # pragma: no cover - only on a wedged socket
+                log.warning("audio sender did not stop within 2s; queued audio is discarded")
+            self.provider.stop()
             provider_thread.join(timeout=4.0)
+            self._flush_pending_utterance()
             self._reset_session_state()
 
         if self._errors:

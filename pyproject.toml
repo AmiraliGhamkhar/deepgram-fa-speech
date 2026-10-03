@@ -19,3 +19,6 @@ exclude = ["tests/", "scripts/"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "live: talks to the real Deepgram service; disabled unless MEDICAL_STT_LIVE_TEST=1",
+]
