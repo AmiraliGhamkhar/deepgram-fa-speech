@@ -28,19 +28,29 @@
 
 .PARAMETER SkipVerify
     Skip the post-build "does it actually run?" check.
+
+.PARAMETER Upx
+    Declared only so that requesting UPX produces this script's explicit
+    error instead of PowerShell's generic parameter-binding failure.
 #>
 [CmdletBinding()]
 param(
     [string]$Python = "python",
-    [switch]$SkipVerify
+    [switch]$SkipVerify,
+    [switch]$Upx
 )
 
 $ErrorActionPreference = "Stop"
-Set-Location (Split-Path -Parent $PSScriptRoot)
 
-if ($args -contains "--upx") {
+# Reject UPX packing: a compressed binary unpacks at runtime, is flagged by
+# antivirus engines, and provides no security benefit. Two invocation
+# styles are covered: the declared -Upx switch and a literal --upx passed
+# through a call style that still reaches the script body.
+if ($Upx -or ($MyInvocation.Line -like "*--upx*")) {
     throw "UPX packing is not allowed for this project."
 }
+
+Set-Location (Split-Path -Parent $PSScriptRoot)
 
 $DistDir = Join-Path $PWD "dist\MedicalSTT"
 $BuildDir = Join-Path $PWD "build"
@@ -55,18 +65,26 @@ Write-Host "==> Installing build dependencies" -ForegroundColor Cyan
 & $Python -m pip install "nuitka>=2.5,<3.0" "ordered-set>=4.1" "zstandard>=0.22"
 
 Write-Host "==> Verifying the source tree is clean of secrets" -ForegroundColor Cyan
-# Fails the build if a provider credential is ever committed here.
-$forbidden = Select-String -Path (Get-ChildItem -Recurse -Include *.py,*.yaml,*.yml -File |
-                                  Where-Object { $_.FullName -notmatch '\\dist\\|\\build\\|\\\.venv\\' }) `
-                             -Pattern 'dg_[0-9a-f]{20,}' -ErrorAction SilentlyContinue
-if ($forbidden) {
-    $forbidden | ForEach-Object { Write-Host $_.Path -ForegroundColor Red }
-    throw "A Deepgram API key pattern was found in the source tree. The client must never contain one."
+# Fails the build if a provider credential is ever committed here. Uses the
+# project scanner (scripts/scan_secrets.py) instead of a local regex so the
+# build and CI apply exactly the same patterns -- the previous
+# `dg_...`-only check missed the legacy 40-hex key form from the incident.
+& $Python scripts/scan_secrets.py
+if ($LASTEXITCODE -ne 0) {
+    throw "A credential pattern was found in the source tree. The client must never contain one."
 }
 
 Write-Host "==> Running the test suite" -ForegroundColor Cyan
 & $Python -m pytest tests -q
 if ($LASTEXITCODE -ne 0) { throw "Tests failed; refusing to build." }
+
+# Win32 pieces (DPAPI, named mutex, SendInput backend) can only be checked
+# on Windows, so the build machine -- which is Windows -- is where they get
+# verified. This is what makes the Windows-only code paths tested rather
+# than assumed; see docs in README > Verification status.
+Write-Host "==> Verifying Windows-only components (DPAPI, mutex, SendInput)" -ForegroundColor Cyan
+& $Python scripts/windows_selftest.py
+if ($LASTEXITCODE -ne 0) { throw "Windows self-test failed; refusing to build." }
 
 $version = (& $Python -c "import medical_stt; print(medical_stt.__version__)").Trim()
 

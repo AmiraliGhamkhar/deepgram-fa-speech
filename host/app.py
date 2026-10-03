@@ -32,6 +32,7 @@ try:  # allows `python host/app.py` from a checkout
         authorize,
         grant_session,
         normalize_ttl,
+        request_is_secure,
     )
 except ImportError:  # pragma: no cover - direct script execution
     from core import (  # type: ignore[no-index]
@@ -41,6 +42,7 @@ except ImportError:  # pragma: no cover - direct script execution
         authorize,
         grant_session,
         normalize_ttl,
+        request_is_secure,
     )
 
 log = logging.getLogger("medical_stt.host")
@@ -59,9 +61,20 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
 
     @app.middleware("http")
     async def enforce_https(request: Request, call_next: Any) -> Any:
-        """Refuse plaintext requests (a secret must never cross the wire raw)."""
-        forwarded = request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower()
-        secure = request.url.scheme == "https" or forwarded == "https"
+        """Refuse plaintext requests (a secret must never cross the wire raw).
+
+        `X-Forwarded-Proto` is honoured only when the immediate peer is a
+        configured reverse proxy (`HOST_FORWARDED_ALLOW_IPS`, loopback by
+        default), so a direct HTTP client cannot forge the header to make a
+        plaintext request look like TLS.
+        """
+        peer_host = request.client.host if request.client else None
+        secure = request_is_secure(
+            request.url.scheme,
+            peer_host,
+            request.headers.get("x-forwarded-proto"),
+            resolved,
+        )
         if not secure and not resolved.allow_http:
             return JSONResponse(
                 {"detail": "HTTPS is required"},
@@ -140,9 +153,11 @@ def main() -> int:  # pragma: no cover - operational entry point
         ssl_certfile=certfile or None,
         ssl_keyfile=keyfile or None,
         log_level="info",
-        # Proxied deployments need the original scheme to pass the HTTPS check.
+        # Proxied deployments need the original scheme to pass the HTTPS
+        # check. Uvicorn applies the same trusted-peer rule as the app, so
+        # both use one configured list.
         proxy_headers=True,
-        forwarded_allow_ips=os.getenv("HOST_FORWARDED_ALLOW_IPS", "127.0.0.1"),
+        forwarded_allow_ips=",".join(settings.forwarded_allow_ips),
     )
     return 0
 

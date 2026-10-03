@@ -43,6 +43,33 @@ def test_context_manager_acquires_and_releases(tmp_path):
     assert instance.acquired is False
 
 
+def test_windows_mutex_name_is_per_session_and_app_specific():
+    """`Global\\` needs SeCreateGlobalPrivilege, which a normal user lacks."""
+    from medical_stt import app_instance
+
+    assert not app_instance._WINDOWS_MUTEX_NAME.startswith("Global\\")  # noqa: SLF001
+    assert "MedicalSTT" in app_instance._WINDOWS_MUTEX_NAME  # noqa: SLF001
+
+
+def test_unavailable_windows_mutex_does_not_block_startup(monkeypatch, caplog):
+    """If the Win32 mutex cannot be created, the app must still start.
+
+    Off Windows `ctypes.WinDLL` does not exist, which exercises exactly the
+    failure path that used to raise out of `acquire()`.
+    """
+    import logging
+
+    from medical_stt import app_instance
+
+    instance = app_instance.SingleInstance()
+    monkeypatch.setattr(app_instance.sys, "platform", "win32")
+    with caplog.at_level(logging.WARNING):
+        assert instance.acquire() is True
+    assert instance.acquired is True
+    assert any("mutex" in record.getMessage() for record in caplog.records)
+    instance.release()
+
+
 # -- session controller --------------------------------------------------
 
 

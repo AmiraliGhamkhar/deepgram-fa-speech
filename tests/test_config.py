@@ -7,6 +7,7 @@ import pytest
 from medical_stt.config import (
     ConfigError,
     Settings,
+    keyterm_parameter,
     load_correction_rules,
     load_correction_rules_raw,
     load_keyterms,
@@ -136,6 +137,53 @@ def test_invalid_medical_confidence_threshold_rejected():
     assert any("medical_confidence_threshold" in error for error in errors)
 
 
+# -- model / language / keyterm compatibility ----------------------------
+
+
+def test_nova_3_with_persian_is_valid():
+    assert validate_settings(_valid_settings(model="nova-3", language="fa")) == []
+    assert keyterm_parameter("nova-3") == "keyterm"
+
+
+def test_persian_is_rejected_on_models_that_do_not_support_it():
+    errors = validate_settings(_valid_settings(model="nova-2", language="fa"))
+    assert any("nova-3" in e and "language" in e for e in errors), errors
+    assert keyterm_parameter("nova-2") == "keywords"
+
+
+def test_unknown_model_is_rejected():
+    errors = validate_settings(_valid_settings(model="nova-9"))
+    assert any("nova-9" in e and "not supported" in e for e in errors)
+
+
+def test_invalid_language_is_rejected():
+    for bad in ("fa_IR", "!!", "Farsi", "fa-"):
+        errors = validate_settings(_valid_settings(language=bad))
+        assert any("language" in e for e in errors), (bad, errors)
+
+
+def test_legacy_models_keep_the_legacy_mechanism():
+    # A language we do not make a support claim about is allowed on any
+    # known model; the mechanism, not the model, is what changes.
+    assert validate_settings(_valid_settings(model="nova-2", language="en")) == []
+    assert keyterm_parameter("nova-2") == "keywords"
+    assert keyterm_parameter("enhanced") == "keywords"
+    assert keyterm_parameter("base") == "keywords"
+    assert keyterm_parameter("unknown-model") == ""
+
+
+def test_empty_keyterms_are_allowed():
+    assert load_keyterms("general", max_count=0) == []
+    assert validate_settings(_valid_settings()) == []
+
+
+def test_keyterms_are_non_empty_and_deduplicated():
+    terms = load_keyterms("cardiology")
+    assert terms, "the cardiology keyterm file should not be empty"
+    assert all(term.strip() for term in terms)
+    assert len(terms) == len(set(terms))
+
+
 def test_new_settings_defaults_are_backward_compatible():
     settings = Settings()
     assert settings.specialty == "general"
@@ -217,3 +265,69 @@ def test_corrections_yaml_rules_not_a_list_raises(tmp_path, monkeypatch):
     monkeypatch.setattr(config_module, "_DATA_DIR", tmp_path)
     with pytest.raises(ConfigError):
         config_module.load_correction_rules_raw()
+
+
+# -- provider-side `replace` parameters (data/asr_replacements.yaml) -------
+
+
+def _write_replacements(tmp_path, monkeypatch, body: str):
+    import medical_stt.config as config_module
+
+    (tmp_path / "asr_replacements.yaml").write_text(body, encoding="utf-8")
+    monkeypatch.setattr(config_module, "_DATA_DIR", tmp_path)
+    return config_module
+
+
+def test_real_asr_replacements_are_valid_and_lowercase():
+    from medical_stt.config import load_asr_replacements
+
+    replacements = load_asr_replacements()
+    assert replacements, "the shipped replacement list should not be empty"
+    for entry in replacements:
+        source, _, target = entry.partition(":")
+        assert source == source.lower()
+        assert target
+        assert not any(ch.isdigit() for ch in entry)
+
+
+def test_asr_replacement_rejects_uppercase_source(tmp_path, monkeypatch):
+    module = _write_replacements(
+        tmp_path, monkeypatch, "replacements:\n  - from: 'MI'\n    to: 'myocardial'\n"
+    )
+    with pytest.raises(ConfigError, match="lowercase"):
+        module.load_asr_replacements()
+
+
+def test_asr_replacement_rejects_digits_and_colons(tmp_path, monkeypatch):
+    module = _write_replacements(
+        tmp_path, monkeypatch, "replacements:\n  - from: 'bp'\n    to: '120:80'\n"
+    )
+    with pytest.raises(ConfigError, match="digits"):
+        module.load_asr_replacements()
+
+
+def test_asr_replacement_rejects_conflicting_targets(tmp_path, monkeypatch):
+    module = _write_replacements(
+        tmp_path,
+        monkeypatch,
+        "replacements:\n  - from: 'x'\n    to: 'y'\n  - from: 'x'\n    to: 'z'\n",
+    )
+    with pytest.raises(ConfigError, match="conflict"):
+        module.load_asr_replacements()
+
+
+def test_asr_replacement_deduplicates_identical_entries(tmp_path, monkeypatch):
+    module = _write_replacements(
+        tmp_path,
+        monkeypatch,
+        "replacements:\n  - from: 'x'\n    to: 'y'\n  - from: 'x'\n    to: 'y'\n",
+    )
+    assert module.load_asr_replacements() == ["x:y"]
+
+
+def test_asr_replacement_rejects_empty_side(tmp_path, monkeypatch):
+    module = _write_replacements(
+        tmp_path, monkeypatch, "replacements:\n  - from: 'x'\n    to: '   '\n"
+    )
+    with pytest.raises(ConfigError, match="non-empty"):
+        module.load_asr_replacements()

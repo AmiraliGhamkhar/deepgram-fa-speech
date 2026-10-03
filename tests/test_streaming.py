@@ -2,8 +2,10 @@
 sections 7, 9). No real network access or Deepgram credentials are used."""
 from __future__ import annotations
 
+import re
 import socket
 
+import pytest
 
 from medical_stt.stt.base import ErrorCategory, ProviderError
 from medical_stt.stt.deepgram_provider import classify_deepgram_exception
@@ -179,6 +181,133 @@ def test_provider_authenticates_with_a_session_token_not_an_api_key(monkeypatch)
     assert connection.listening is True
 
 
+def _install_fake_client(monkeypatch, connection, captured):
+    import deepgram
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        @property
+        def listen(self):
+            class V1:
+                def connect(self, **params):
+                    captured["connect"] = params
+                    return connection
+
+            class V2:
+                v1 = V1()
+
+            return V2()
+
+    monkeypatch.setattr(deepgram, "DeepgramClient", FakeClient)
+
+
+def test_nova_3_sends_keyterm_not_keywords(monkeypatch):
+    from medical_stt.config import Settings
+    from medical_stt.stt.deepgram_provider import DeepgramProvider
+
+    captured = {}
+    connection = _FakeConnection()
+    _install_fake_client(monkeypatch, connection, captured)
+
+    provider = DeepgramProvider(
+        Settings(host_url="https://stt.example.com", host_secret="secret", model="nova-3", language="fa"),
+        keyterms=["ICU", "هایپرتنشن"],
+        token_provider=lambda: "token",
+    )
+    provider.validate_config()
+    provider.start(lambda _e: None, lambda _e: None)
+
+    params = captured["connect"]
+    assert params["keyterm"] == ["ICU", "هایپرتنشن"]
+    assert "keywords" not in params, "keywords is rejected by Nova-3"
+
+
+def test_legacy_model_sends_keywords_not_keyterm(monkeypatch):
+    from medical_stt.config import Settings
+    from medical_stt.stt.deepgram_provider import DeepgramProvider
+
+    captured = {}
+    connection = _FakeConnection()
+    _install_fake_client(monkeypatch, connection, captured)
+
+    provider = DeepgramProvider(
+        Settings(host_url="https://stt.example.com", host_secret="secret", model="nova-2", language="en"),
+        keyterms=["ICU"],
+        token_provider=lambda: "token",
+    )
+    provider.validate_config()
+    provider.start(lambda _e: None, lambda _e: None)
+
+    params = captured["connect"]
+    assert params["keywords"] == ["ICU"]
+    assert "keyterm" not in params, "keyterm prompting is Nova-3 only"
+
+
+def test_empty_keyterms_send_neither_parameter(monkeypatch):
+    from medical_stt.config import Settings
+    from medical_stt.stt.deepgram_provider import DeepgramProvider
+
+    captured = {}
+    connection = _FakeConnection()
+    _install_fake_client(monkeypatch, connection, captured)
+
+    provider = DeepgramProvider(
+        Settings(host_url="https://stt.example.com", host_secret="secret"),
+        keyterms=[],
+        token_provider=lambda: "token",
+    )
+    provider.start(lambda _e: None, lambda _e: None)
+
+    assert "keyterm" not in captured["connect"]
+    assert "keywords" not in captured["connect"]
+
+
+def test_validate_config_rejects_persian_on_a_legacy_model():
+    from medical_stt.config import Settings
+    from medical_stt.stt.deepgram_provider import DeepgramProvider
+
+    provider = DeepgramProvider(
+        Settings(host_url="https://stt.example.com", host_secret="secret", model="nova-2", language="fa"),
+        token_provider=lambda: "token",
+    )
+    with pytest.raises(ProviderError) as excinfo:
+        provider.validate_config()
+    assert excinfo.value.category is ErrorCategory.CONFIG
+    assert "nova-3" in str(excinfo.value)
+
+
+def test_validate_config_rejects_an_unknown_model_before_connecting(monkeypatch):
+    from medical_stt.config import Settings
+    from medical_stt.stt.deepgram_provider import DeepgramProvider
+
+    captured = {}
+    _install_fake_client(monkeypatch, _FakeConnection(), captured)
+
+    provider = DeepgramProvider(
+        Settings(host_url="https://stt.example.com", host_secret="secret", model="nova-9"),
+        token_provider=lambda: "token",
+    )
+    with pytest.raises(ProviderError) as excinfo:
+        provider.validate_config()
+    assert excinfo.value.category is ErrorCategory.CONFIG
+    assert captured == {}, "no connection may be opened for an invalid model"
+
+
+def test_validate_config_rejects_an_invalid_language():
+    from medical_stt.config import Settings
+    from medical_stt.stt.deepgram_provider import DeepgramProvider
+
+    provider = DeepgramProvider(
+        Settings(host_url="https://stt.example.com", host_secret="secret", language="fa_IR"),
+        token_provider=lambda: "token",
+    )
+    with pytest.raises(ProviderError) as excinfo:
+        provider.validate_config()
+    assert excinfo.value.category is ErrorCategory.CONFIG
+
+
 def test_a_fresh_token_is_fetched_for_every_connection(monkeypatch):
     """A reconnect must not present a token that has already expired."""
     import deepgram
@@ -215,3 +344,72 @@ def test_a_fresh_token_is_fetched_for_every_connection(monkeypatch):
     provider.start(lambda _e: None, lambda _e: None)
 
     assert issued == ["token-1", "token-2"]
+
+
+# -- single-language Persian ASR (Phase 6: no code-switching claim) --------
+
+
+def test_provider_requests_one_configured_language(monkeypatch):
+    """The ASR runs in Persian; English terms are handled by keyterms and
+    local terminology rules, so no language detection may be requested.
+
+    If this ever changes, README > "Deepgram / streaming" and the
+    Limitations section must change with it -- an unfounded "code
+    switching" claim is a clinical-accuracy hazard.
+    """
+    from medical_stt.config import Settings
+    from medical_stt.stt.deepgram_provider import DeepgramProvider
+
+    captured = {}
+    connection = _FakeConnection()
+    _install_fake_client(monkeypatch, connection, captured)
+
+    provider = DeepgramProvider(
+        Settings(host_url="https://stt.example.com", host_secret="secret"),
+        keyterms=["ICU"],
+        token_provider=lambda: "token",
+    )
+    provider.start(lambda _e: None, lambda _e: None)
+
+    params = captured["connect"]
+    assert params["language"] == "fa"
+    for unsupported in ("detect_language", "multilingual", "language_hints", "code_switching"):
+        assert unsupported not in params, f"{unsupported} would imply language switching"
+
+
+def test_settings_default_to_persian_and_never_a_switching_locale():
+    from medical_stt.config import Settings
+
+    settings = Settings()
+    assert settings.language == "fa"
+    assert "," not in settings.language, "a multi-language list would be code switching"
+
+
+def test_readme_does_not_claim_code_switching():
+    """The README may *deny* language switching, but never claim it.
+
+    A blunt substring check would also forbid the honest disclaimer, so the
+    check looks at the sentence: a forbidden phrase is only an offence when
+    it is not negated, and the README must contain the negated disclaimer
+    somewhere (silence about the limitation is not acceptable either).
+    """
+    from pathlib import Path
+
+    readme = (Path(__file__).resolve().parent.parent / "README.md").read_text(encoding="utf-8")
+    forbidden = ("code-switch", "code switch", "seamlessly switches", "switches between languages")
+    negations = ("not ", "never", "no ", "rather than", "instead of", "without", "n't")
+
+    def negated(sentence: str) -> bool:
+        return any(negation in sentence for negation in negations)
+
+    # Strip markdown emphasis so "**not**" still counts as a negation.
+    sentences = [
+        re.sub(r"[*_`]", "", part.strip().lower())
+        for part in re.split(r"(?<=[.!?\n])\s+", readme)
+        if part.strip()
+    ]
+    offences = [s for s in sentences if any(f in s for f in forbidden) and not negated(s)]
+    assert not offences, f"README claims language switching: {offences}"
+    assert any(negated(s) and any(f in s for f in forbidden) for s in sentences), (
+        "README must explicitly deny unrestricted code-switching (see the language-scope section)"
+    )

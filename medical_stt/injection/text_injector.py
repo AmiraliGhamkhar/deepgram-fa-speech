@@ -8,6 +8,7 @@ final utterances.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import Optional
 
@@ -20,6 +21,25 @@ log = logging.getLogger("medical_stt.injection")
 # common-prefix backspace boundary: ZWNJ/ZWJ word joins and Arabic combining
 # diacritics.
 _COMBINING_MARKS = "\u200c\u200d\u064b\u064c\u064d\u064e\u064f\u0650\u0651\u0652\u0670"
+
+# Tabs and other horizontal whitespace collapse inside a line; line breaks
+# are structural and are never collapsed or converted. Windows-style
+# CRLF and bare CR are normalized to LF so injection is platform-neutral.
+_HORIZONTAL_WS_RE = re.compile(r"[^\S\n]+")
+
+
+def normalize_injected_whitespace(text: str) -> str:
+    """Collapse horizontal whitespace, preserve line structure.
+
+    Runs of spaces/tabs become one space, trailing whitespace on each line
+    is dropped, and empty leading/trailing lines are removed. `\\n` is kept
+    exactly as it is.
+    """
+    if not text:
+        return text
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    lines = [_HORIZONTAL_WS_RE.sub(" ", line).strip() for line in normalized.split("\n")]
+    return "\n".join(lines).strip("\n")
 
 
 class InjectionError(Exception):
@@ -143,13 +163,20 @@ class TextInjector:
     def paste_text(self, text: str, add_rtl_mark: bool = True) -> bool:
         """Paste `text` via the clipboard.
 
+        Whitespace is normalized *within* each line (runs of spaces/tabs
+        collapse to one space), but line breaks are preserved: structured
+        medical dictation -- a diagnosis line, a vital-signs line -- must
+        not be flattened into a single paragraph. `\\n` is the newline
+        contract for the whole pipeline; a future "سر خط" command only has
+        to emit it.
+
         `add_rtl_mark` (kept for backward compatibility) is now equivalent
         to always-on: the injected representation always gets exactly one
         leading directional mark matching its base direction, computed by
         processing.bidi.to_injected -- never a forced RLE/PDF embedding
         around the whole string (see processing/bidi.py for why).
         """
-        text = " ".join(text.split())
+        text = normalize_injected_whitespace(text)
         if not text:
             return False
 

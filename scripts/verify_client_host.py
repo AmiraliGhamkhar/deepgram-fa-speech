@@ -108,21 +108,38 @@ def main() -> int:
     strict = host_app.create_app(
         core.HostSettings.from_env({**os.environ, "HOST_ALLOW_HTTP": "0"})
     )
-    strict_client = TestClient(strict, base_url="http://stt.example.com")
-    response = strict_client.post(
-        "/v1/session", headers={"Authorization": f"Bearer {secret}"}, json={}
+    auth = {"Authorization": f"Bearer {secret}"}
+
+    # A direct client, identified by its peer address.
+    direct = TestClient(
+        strict, base_url="http://stt.example.com", client=("198.51.100.9", 51000)
     )
+    response = direct.post("/v1/session", headers=auth, json={})
     check("plain http rejected", response.status_code == 400, str(response.status_code))
+    response = direct.post(
+        "/v1/session", headers={**auth, "X-Forwarded-Proto": "https"}, json={}
+    )
+    check(
+        "forged X-Forwarded-Proto from a direct client is rejected",
+        response.status_code == 400,
+        str(response.status_code),
+    )
+
     response = TestClient(strict, base_url="https://stt.example.com").post(
-        "/v1/session", headers={"Authorization": f"Bearer {secret}"}, json={}
+        "/v1/session", headers=auth, json={}
     )
     check("https accepted", response.status_code == 200, str(response.status_code))
-    response = TestClient(strict, base_url="http://stt.example.com").post(
-        "/v1/session",
-        headers={"Authorization": f"Bearer {secret}", "X-Forwarded-Proto": "https"},
-        json={},
+
+    # A reverse proxy running on loopback (the default trusted peer).
+    proxy = TestClient(strict, base_url="http://stt.example.com", client=("127.0.0.1", 51000))
+    response = proxy.post(
+        "/v1/session", headers={**auth, "X-Forwarded-Proto": "https"}, json={}
     )
-    check("https via proxy header accepted", response.status_code == 200, str(response.status_code))
+    check(
+        "https via a trusted proxy header accepted",
+        response.status_code == 200,
+        str(response.status_code),
+    )
 
     print()
     if FAILURES:

@@ -102,3 +102,65 @@ def test_paste_text_mixed_persian_english_keeps_logical_content():
     injector.paste_text("MI در ECG مشاهده شد")
     pasted = backend.pasted[-1]
     assert "MI" in pasted and "ECG" in pasted
+
+
+# -- line structure ------------------------------------------------------
+
+
+def _paste(text: str) -> str:
+    backend = DryRunBackend()
+    injector = TextInjector(backend=backend, paste_settle_seconds=0.0)
+    assert injector.paste_text(text) is True
+    return backend.pasted[-1]
+
+
+def test_newlines_are_preserved():
+    pasted = _paste("Doctor Name\nDiagnosis\nBlood Pressure: 120/80")
+    assert "\n" in pasted, "structured dictation must keep its line breaks"
+    assert pasted.count("\n") == 2
+    assert pasted.splitlines()[0].endswith("Doctor Name")
+    assert pasted.splitlines()[2].endswith("Blood Pressure: 120/80")
+
+
+def test_multiple_consecutive_lines_keep_their_boundaries():
+    source_lines = [f"line {index}" for index in range(5)]
+    lines = _paste("\n".join(source_lines)).split("\n")
+    # Only the very first line carries the directional mark (LRM here,
+    # because the first strong character is Latin).
+    assert lines[0][0] in ("\u200e", "\u200f")
+    assert lines[0][1:] == source_lines[0]
+    assert lines[1:] == source_lines[1:]
+
+
+def test_horizontal_whitespace_is_still_normalized():
+    pasted = _paste("سلام    دنیا\tآزمایش")
+    assert "  " not in pasted
+    assert "\t" not in pasted
+    assert "سلام دنیا آزمایش" in pasted
+
+
+def test_trailing_whitespace_on_a_line_is_trimmed_but_the_break_stays():
+    pasted = _paste("خط اول   \nخط دوم")
+    assert pasted.count("\n") == 1
+    assert "   " not in pasted
+
+
+def test_crlf_is_normalized_to_a_line_break():
+    pasted = _paste("first\r\nsecond")
+    assert "\r" not in pasted
+    assert pasted.count("\n") == 1
+
+
+def test_mixed_persian_english_multiline_keeps_every_line():
+    text = "بیمار\nMI در ECG مشاهده شد\nدوز 5 mg IV"
+    pasted = _paste(text)
+    lines = pasted.split("\n")
+    assert len(lines) == 3
+    assert "MI" in lines[1] and "ECG" in lines[1]
+    assert "5 mg IV" in lines[2]
+
+
+def test_blank_lines_at_the_edges_are_removed():
+    pasted = _paste("\n\nمتن\n\n")
+    assert pasted.strip("\n").endswith("متن")
+    assert pasted.startswith("\u200f")

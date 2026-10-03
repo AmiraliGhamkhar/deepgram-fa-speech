@@ -6,6 +6,13 @@ Deepgram-specific error handling behind the generic `ErrorCategory`
 taxonomy so the reconnect loop never needs to know about Deepgram SDK
 exception types.
 
+**Recognition hints.** The parameter used to bias recognition depends on
+the model: Nova-3 uses Keyterm Prompting (`keyterm`, multi-word phrases
+allowed), Nova-2 and the older models use the legacy `keywords` parameter.
+The provider picks the right one from `config.keyterm_parameter` and
+refuses combinations Deepgram would reject *before* opening the socket
+(`validate_config`).
+
 **Credential path.** This client has no Deepgram API key. Before each
 connection it asks the self-hosted service for a *short-lived* session
 token (see `medical_stt/host_client.py`), which the SDK sends as
@@ -20,7 +27,7 @@ import socket
 import threading
 from typing import Any, Callable, List, Optional
 
-from ..config import Settings
+from ..config import Settings, keyterm_parameter, validate_model_language
 from .base import ErrorCategory, OnError, OnTranscript, ProviderError, STTProvider, TranscriptEvent, WordInfo
 
 log = logging.getLogger("medical_stt.stt.deepgram")
@@ -167,19 +174,37 @@ class DeepgramProvider(STTProvider):
         return session.access_token
 
     def validate_config(self) -> None:
+        """Refuse to open a WebSocket for a configuration Deepgram would
+        reject (or silently ignore), before any network call is made."""
         s = self._settings
         if not s.host_url:
             raise ProviderError(ErrorCategory.CONFIG, "host_url is not set")
         if not s.host_secret and self._token_provider is None:
             raise ProviderError(ErrorCategory.CONFIG, "no host shared secret is available")
-        if not s.model:
-            raise ProviderError(ErrorCategory.CONFIG, "model must not be empty")
-        if not s.language:
-            raise ProviderError(ErrorCategory.CONFIG, "language must not be empty")
+        model_language_errors = validate_model_language(s.model, s.language)
+        if model_language_errors:
+            raise ProviderError(ErrorCategory.CONFIG, "; ".join(model_language_errors))
         if s.sample_rate <= 0:
             raise ProviderError(ErrorCategory.CONFIG, "sample_rate must be positive")
         if s.channels not in (1, 2):
             raise ProviderError(ErrorCategory.CONFIG, "channels must be 1 or 2")
+
+    def _recognition_hint_parameters(self) -> dict:
+        """Return the keyterm/keywords parameters legal for this model.
+
+        Nova-3 uses Keyterm Prompting (`keyterm`, phrases allowed). The
+        legacy models use `keywords`, which Deepgram rejects for Nova-3 and
+        which cannot boost multi-word phrases -- words are passed through
+        unchanged rather than being turned into something unsupported.
+        """
+        if not self._keyterms:
+            return {}
+        parameter = keyterm_parameter(self._settings.model)
+        if parameter == "keyterm":
+            return {"keyterm": self._keyterms}
+        if parameter == "keywords":
+            return {"keywords": self._keyterms}
+        return {}
 
     def start(self, on_transcript: OnTranscript, on_error: OnError) -> None:
         # Imported lazily so environments that only run the deterministic
@@ -215,8 +240,8 @@ class DeepgramProvider(STTProvider):
                 vad_events=True,
                 smart_format=True,
                 punctuate=True,
-                keyterm=self._keyterms or None,
                 replace=self._asr_replacements or None,
+                **self._recognition_hint_parameters(),
             ) as connection:
                 with self._connection_lock:
                     self._connection = connection

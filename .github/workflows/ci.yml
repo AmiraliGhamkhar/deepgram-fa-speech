@@ -64,6 +64,34 @@ jobs:
       - name: Run host service tests
         run: pytest tests/test_host_service.py tests/test_host_client.py -v
 
+  windows-check:
+    name: Windows platform checks
+    runs-on: windows-latest
+    # DPAPI, the named mutex and the SendInput injection backend cannot be
+    # exercised on Linux. This job runs them on a real Windows runner; it is
+    # the only place where those code paths are verified automatically.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Platform tests (mutex, secret store, injection, selftest script)
+        run: >
+          pytest tests/test_session_lifecycle.py tests/test_secret_store.py
+          tests/test_injection.py tests/test_windows_selftest.py
+          tests/test_shutdown_flow.py -q
+
+      - name: Windows component self-test (DPAPI + mutex + SendInput)
+        run: python scripts/windows_selftest.py
+
   secret-scan:
     name: Secret scan
     runs-on: ubuntu-latest
@@ -76,3 +104,8 @@ jobs:
         uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Scan working tree and history (project scanner)
+        run: |
+          python3 scripts/scan_secrets.py
+          python3 scripts/scan_secrets.py --history
