@@ -44,6 +44,26 @@ class HostSession:
 
     access_token: str
     expires_in: int
+    #: Host-side correlation id for logs and metrics. Never a credential.
+    session_id: str = ""
+
+
+def _parse_retry_after(raw: Optional[str]) -> Optional[float]:
+    """Parse a `Retry-After` header into seconds.
+
+    Only the delta-seconds form is accepted. The HTTP-date form is legal in
+    RFC 9110 but a token service never needs it, and parsing a date
+    correctly across clock skew is more machinery than the situation
+    justifies. A malformed value returns None so the caller falls back to
+    its own backoff instead of trusting a garbage hint.
+    """
+    if not raw:
+        return None
+    try:
+        seconds = float(raw.strip())
+    except ValueError:
+        return None
+    return seconds if seconds > 0 else None
 
 
 class HostSessionClient:
@@ -55,11 +75,13 @@ class HostSessionClient:
         secret: str,
         timeout: float = 10.0,
         opener: Optional[Callable[[urllib.request.Request, float], Any]] = None,
+        client_id: str = "",
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._secret = secret
         self._timeout = timeout
         self._open = opener or self._default_open
+        self._client_id = client_id
 
     def _default_open(self, request: urllib.request.Request, timeout: float) -> bytes:
         with _OPENER_FACTORY.open(request, timeout=timeout) as response:
@@ -90,6 +112,11 @@ class HostSessionClient:
                 "Content-Type": "application/json",
                 "Accept": "application/json",
                 "User-Agent": "MedicalSTT",
+                # Identifies *which* device is asking, so the host can rate
+                # limit per clinician instead of per hospital NAT address.
+                # Omitted when unconfigured: an un-migrated host resolves it
+                # to its single legacy identity.
+                **({"X-Client-Id": self._client_id} if self._client_id else {}),
             },
         )
 
@@ -126,6 +153,9 @@ class HostSessionClient:
         """
         status = exc.code
         host = exc.url or "the host"
+        retry_after = _parse_retry_after(
+            exc.headers.get("Retry-After") if exc.headers is not None else None
+        )
         if status in (401, 403):
             # Most likely a wrong/mismatched shared secret: never retry.
             return ProviderError(
@@ -136,6 +166,7 @@ class HostSessionClient:
             return ProviderError(
                 ErrorCategory.RATE_LIMIT,
                 f"host rate limit reached (HTTP 429) at {host}",
+                retry_after=retry_after,
             )
         if status in (400, 404, 405, 422):
             return ProviderError(
@@ -146,6 +177,7 @@ class HostSessionClient:
             return ProviderError(
                 ErrorCategory.SERVER_DISCONNECT,
                 f"host is unavailable (HTTP {status}) at {host}",
+                retry_after=retry_after,
             )
         return ProviderError(
             ErrorCategory.UNKNOWN, f"unexpected host response (HTTP {status}) at {host}"
@@ -177,4 +209,9 @@ class HostSessionClient:
             raise ProviderError(
                 ErrorCategory.UNKNOWN, "host response did not contain a valid expiry"
             )
-        return HostSession(access_token=token, expires_in=expires_in)
+        session_id = payload.get("session_id")
+        return HostSession(
+            access_token=token,
+            expires_in=expires_in,
+            session_id=session_id if isinstance(session_id, str) else "",
+        )

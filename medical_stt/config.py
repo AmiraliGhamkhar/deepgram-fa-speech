@@ -14,9 +14,11 @@ shared secret -- never a provider credential -- and a plaintext secret in
 """
 from __future__ import annotations
 
+import copy
 import logging
 import os
 import re
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, FrozenSet, List, Tuple
@@ -80,6 +82,17 @@ _FORBIDDEN_SECRET_KEYS = ("api_key", "apikey", "deepgram_api_key", "host_secret"
 
 def _valid_specialty_name(value: str) -> bool:
     return bool(value) and value.replace("_", "").replace("-", "").isalnum()
+
+
+def _valid_client_id(value: str) -> bool:
+    """Mirror of `host.core.is_valid_client_id`.
+
+    Duplicated deliberately rather than imported: the client package must
+    not depend on the host package, which runs on a different machine.
+    """
+    if not 1 <= len(value) <= 64:
+        return False
+    return all(ch.isalnum() or ch in "-_." for ch in value)
 
 
 def keyterm_parameter(model: str) -> str:
@@ -160,6 +173,10 @@ class Settings:
     #: Shared secret for that host. Loaded from the DPAPI-protected store;
     #: never written to settings.yaml and never logged.
     host_secret: str = field(default="", repr=False)
+    #: Identifies *which* device is talking to the host, so the host can rate
+    #: limit per clinician rather than per hospital NAT address. Not a
+    #: credential, so it lives in settings.yaml next to `host_url`.
+    host_client_id: str = ""
     host_timeout_seconds: float = 10.0
     #: Requested lifetime of the short-lived session token. Only needs to
     #: cover the WebSocket handshake (default 30s, Deepgram's own default).
@@ -188,6 +205,7 @@ class Settings:
             "use_asr_replacements": self.use_asr_replacements,
             "host_url": self.host_url,
             "host_secret": self.host_secret,
+            "host_client_id": self.host_client_id,
             "host_timeout_seconds": self.host_timeout_seconds,
             "session_ttl_seconds": self.session_ttl_seconds,
         }
@@ -198,14 +216,52 @@ class Settings:
         return self.as_dict()[key]
 
 
+#: Cache of parsed YAML keyed by (path, mtime_ns, size).
+#:
+#: The terminology/keyterm files are static, shipped with the build and read
+#: only. Re-parsing them on every session start cost ~0.37s each -- measured
+#: at 18.8s to build 50 sessions -- for a result that never changes. The
+#: cache is keyed on size *and* nanosecond mtime, so editing a file still
+#: invalidates it and no stale data can be served.
+#:
+#: A copy is returned on every hit because callers own their result: notably
+#: `save_host_credentials` mutates the mapping it reads before rewriting it,
+#: and handing out the cached object would corrupt it for everyone else.
+_YAML_CACHE: Dict[Tuple[str, int, int], Any] = {}
+_YAML_CACHE_LOCK = threading.Lock()
+
+#: Hard cap on cached documents, so a process that reads many distinct paths
+#: cannot grow this without bound.
+_YAML_CACHE_MAX = 64
+
+
 def _load_yaml(path: Path) -> Any:
     if not path.is_file():
         return {}
+    try:
+        stat = path.stat()
+        key = (str(path), stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        key = None
+
+    if key is not None:
+        with _YAML_CACHE_LOCK:
+            cached = _YAML_CACHE.get(key)
+        if cached is not None:
+            return copy.deepcopy(cached)
+
     with path.open(encoding="utf-8") as f:
         try:
-            return yaml.safe_load(f) or {}
+            parsed = yaml.safe_load(f) or {}
         except yaml.YAMLError as exc:
             raise ConfigError(f"Malformed YAML in {path}: {exc}") from exc
+
+    if key is not None:
+        with _YAML_CACHE_LOCK:
+            if len(_YAML_CACHE) >= _YAML_CACHE_MAX:
+                _YAML_CACHE.clear()
+            _YAML_CACHE[key] = parsed
+    return copy.deepcopy(parsed)
 
 
 def _reject_plaintext_secrets(cfg: Dict[str, Any], source: Path) -> None:
@@ -368,6 +424,11 @@ def validate_settings(settings: Settings) -> List[str]:
             "no host shared secret available: enter it in the app's settings "
             "panel so it can be stored with Windows DPAPI"
         )
+    if settings.host_client_id and not _valid_client_id(settings.host_client_id):
+        errors.append(
+            "host_client_id must be 1-64 characters of letters, digits, "
+            "'-', '_' or '.' (see: python -m host.provision)"
+        )
     if not (1.0 <= settings.host_timeout_seconds <= 60.0):
         errors.append("host_timeout_seconds must be between 1 and 60")
     if not (5 <= settings.session_ttl_seconds <= _MAX_SESSION_TTL_SECONDS):
@@ -410,6 +471,9 @@ def get_settings() -> Settings:
         use_asr_replacements=bool(cfg.get("use_asr_replacements", True)),
         host_url=os.getenv("MEDICALSTT_HOST_URL", str(cfg.get("host_url", "") or "")),
         host_secret=load_host_secret(),
+        host_client_id=os.getenv(
+            "MEDICALSTT_HOST_CLIENT_ID", str(cfg.get("host_client_id", "") or "")
+        ).strip(),
         host_timeout_seconds=float(cfg.get("host_timeout_seconds", 10.0)),
         session_ttl_seconds=int(cfg.get("session_ttl_seconds", 30)),
     )
