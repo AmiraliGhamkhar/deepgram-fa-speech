@@ -121,6 +121,10 @@ actually fails to authenticate.
 `Retry-After` is returned on every 429, and the client honors it (clamped),
 so a throttled client slows down when told to instead of guessing.
 
+**Upgrading from a single shared secret?** `HOST_RATE_LIMIT_REQUESTS` is no
+longer used — see the table above. It is accepted and warned about rather
+than rejected, so an existing configuration keeps loading.
+
 ### Sizing for 50 users
 
 Defaults are chosen for the 50-session target with headroom:
@@ -161,6 +165,7 @@ set -a; . host/.env; set +a
 | `HOST_GLOBAL_BURST` | no | `1200` | Global burst capacity. |
 | `HOST_AUTH_FAILURE_LIMIT` | no | `20` | Failed auths per IP per window. |
 | `HOST_RATE_LIMIT_WINDOW_SECONDS` | no | `60` | Window for all of the above. |
+| `HOST_RATE_LIMIT_REQUESTS` | no | — | **Ignored.** This was the old per-IP fixed-window budget. Session requests are now limited per authenticated `client_id`, so it has nothing to apply to. It is still accepted (so existing configs keep loading) and the service logs a warning when it is set, but changing it has no effect. |
 | `HOST_GRANT_TIMEOUT_SECONDS` | no | `10` | Deepgram read/write/pool timeout. |
 | `HOST_GRANT_CONNECT_TIMEOUT_SECONDS` | no | `5` | Deepgram connect timeout. |
 | `HOST_GRANT_MAX_CONNECTIONS` | no | `100` | HTTP pool size. |
