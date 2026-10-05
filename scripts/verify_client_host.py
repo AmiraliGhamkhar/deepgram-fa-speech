@@ -44,12 +44,19 @@ def main() -> int:
 
     granted = []
 
-    def fake_grant(url, api_key, ttl, timeout):
-        granted.append({"url": url, "api_key": api_key, "ttl": ttl})
+    async def fake_grant(_self, api_key, ttl):
+        """Stub the *async* transport the route actually calls.
+
+        The host moved token issuance onto the event loop via
+        `core.AsyncGrantClient.grant`. Stubbing the old synchronous
+        `_httpx_grant` would leave the real transport in place and send a
+        live request to Deepgram with a placeholder key -- so this must be
+        patched at the async seam.
+        """
+        granted.append({"url": core.DEEPGRAM_GRANT_URL, "api_key": api_key, "ttl": ttl})
         return {"access_token": "issued.jwt.token", "expires_in": 30}
 
-    core._httpx_grant = fake_grant
-    host_app.grant_session.__globals__["_httpx_grant"] = fake_grant
+    core.AsyncGrantClient.grant = fake_grant
 
     service = host_app.create_app(core.HostSettings.from_env(os.environ))
     client = TestClient(service)
@@ -86,8 +93,13 @@ def main() -> int:
     check("client saw the expiry", session.expires_in == 30)
 
     print("5. rate limiting")
+    # Per-client token bucket, not the retired per-IP fixed window. The
+    # limit is keyed on client identity, so the same client must be the one
+    # that gets limited.
     limited = host_app.create_app(
-        core.HostSettings.from_env({**os.environ, "HOST_RATE_LIMIT_REQUESTS": "2"})
+        core.HostSettings.from_env(
+            {**os.environ, "HOST_CLIENT_BURST": "2", "HOST_CLIENT_RATE_LIMIT_REQUESTS": "1"}
+        )
     )
     limited_client = TestClient(limited)
     for _ in range(2):

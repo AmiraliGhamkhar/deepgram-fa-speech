@@ -21,4 +21,6 @@ exclude = ["tests/", "scripts/"]
 testpaths = ["tests"]
 markers = [
     "live: talks to the real Deepgram service; disabled unless MEDICAL_STT_LIVE_TEST=1",
+    "soak: long-running 50-client soak; disabled unless MEDICAL_STT_SOAK=1",
+    "loadtest: real Deepgram concurrent-stream load test; disabled unless MEDICAL_STT_LOAD_TEST=1",
 ]

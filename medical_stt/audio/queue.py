@@ -12,6 +12,12 @@ import threading
 import time
 from dataclasses import dataclass
 
+#: Consecutive dropped chunks after which the session is reported as
+#: degraded. Sized so an isolated glitch (a GC pause, one momentarily full
+#: queue) does not raise an alarm, but a genuinely stuck sender -- the real
+#: cause of sustained overflow -- trips it almost immediately.
+DEGRADED_AFTER_DROPS = 3
+
 
 @dataclass(frozen=True)
 class QueueStats:
@@ -22,6 +28,13 @@ class QueueStats:
     put_total: int
     get_total: int
     last_drop_at: float
+    #: Consecutive drops with no successful send in between. This is the
+    #: signal that distinguishes a one-off hiccup from a sustained network
+    #: problem: a permanently non-zero value means the sender cannot keep up
+    #: and audio is being lost continuously, not sporadically.
+    consecutive_drops: int = 0
+    #: True while the queue is dropping audio -- the session health flag.
+    degraded: bool = False
 
 
 class BoundedAudioQueue:
@@ -37,6 +50,7 @@ class BoundedAudioQueue:
         self._get_total = 0
         self._max_depth_seen = 0
         self._last_drop_at = 0.0
+        self._consecutive_drops = 0
 
     def put_nowait(self, chunk: bytes) -> bool:
         """Non-blocking enqueue. Returns True if enqueued, False if the
@@ -48,6 +62,7 @@ class BoundedAudioQueue:
         except queue.Full:
             with self._lock:
                 self._dropped_total += 1
+                self._consecutive_drops += 1
                 self._last_drop_at = time.monotonic()
             return False
         with self._lock:
@@ -61,6 +76,9 @@ class BoundedAudioQueue:
         chunk = self._q.get(timeout=timeout)
         with self._lock:
             self._get_total += 1
+            # The sender has drained one chunk, so it is keeping up again:
+            # this is the signal that ends a degraded streak.
+            self._consecutive_drops = 0
         return chunk
 
     def task_done(self) -> None:
@@ -76,6 +94,8 @@ class BoundedAudioQueue:
                 put_total=self._put_total,
                 get_total=self._get_total,
                 last_drop_at=self._last_drop_at,
+                consecutive_drops=self._consecutive_drops,
+                degraded=self._consecutive_drops >= DEGRADED_AFTER_DROPS,
             )
 
     def drain(self) -> int:

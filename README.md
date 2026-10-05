@@ -21,7 +21,7 @@ clinician's machine.
 
 ```
                     ┌──────────────── your host (has DEEPGRAM_API_KEY) ───┐
-  MedicalSTT.exe ───┤  POST /v1/session   (shared secret, DPAPI-stored)  │
+  MedicalSTT.exe ───┤  POST /v1/session  (client id + secret, DPAPI-stored) │
   (no API key)      │        └──► Deepgram /v1/auth/grant ──► JWT (30s)  │
         │           └────────────────────────────────────────────────────┘
         │
@@ -30,10 +30,12 @@ clinician's machine.
 
 The desktop app:
 
-- authenticates to the host with a **shared secret** you control;
+- authenticates to the host with its own **client id + per-device secret**
+  (a single shared secret is still accepted for one-clinician installs);
 - receives a **short-lived session token** (30s by default — it only has
-  to be valid for the WebSocket handshake);
-- stores that shared secret locally **only** as a Windows DPAPI-protected
+  to be valid for the WebSocket handshake) plus a `session_id` used only for
+  logs and metrics;
+- stores that secret locally **only** as a Windows DPAPI-protected
   blob (`CryptProtectData`, user scope) in
   `%APPDATA%\MedicalSTT\host_secret.dpapi`;
 - never writes a secret into `settings.yaml` (a plaintext secret there is
@@ -89,8 +91,12 @@ medical_stt/
     └── overlay.py               # optional floating transcript overlay
 
 host/                       # the self-hosted service (has the API key)
-├── core.py                # env config, auth, rate limiting, Deepgram grant
-├── app.py                 # FastAPI wiring (HTTPS, /v1/session, /healthz)
+├── core.py                # env config, client registry, auth, rate limits,
+│                           #   async Deepgram grant
+├── app.py                 # FastAPI wiring (HTTPS, /v1/session, /healthz,
+│                           #   /readyz, /metrics)
+├── metrics.py             # dependency-free counters/gauges/histograms
+├── provision.py           # mints client_id + secret per device
 ├── requirements.txt       # fastapi, uvicorn, httpx — no Deepgram SDK
 └── Dockerfile
 ```
@@ -142,13 +148,100 @@ Notes:
   trusted when the peer is listed in `HOST_FORWARDED_ALLOW_IPS` (default
   `127.0.0.1`) and the **last** hop's value is used, so a direct request
   with a forged header is still rejected as plaintext.
-- **Rate limiting** is per client IP (30 requests / 60s by default,
-  configurable) with bounded memory: inactive clients are reclaimed, so a
-  spawn of source IPs cannot grow the limiter without limit.
+- **Rate limiting is per client identity, not per IP.** 50 doctors behind
+  one hospital NAT share an address, so a per-IP limit would reject 19
+  legitimate clinicians. Limits are token buckets keyed on `client_id`
+  (plus a global ceiling); the per-IP limiter survives only for *failed*
+  authentication, which is the one case a shared address must not exempt.
 - The Deepgram key needs at least **Member** permission to call
   `/v1/auth/grant`.
-- Rotating the Deepgram key requires **no client change**. Rotating the
-  shared secret requires re-entering it in the app.
+- Rotating the Deepgram key requires **no client change**. Rotating one
+  device's secret affects only that device.
+
+---
+
+## Capacity: 50 concurrent active streaming sessions
+
+The design target is **50 concurrent active streaming sessions** — 50
+clinicians dictating at once. Precisely: the audio of 50 simultaneous
+users, of which the host carries only the token requests.
+
+The architecture is unchanged in shape, because it was already right for
+this: **audio goes client → Deepgram directly.** The host issues ~50
+short-lived tokens and nothing else, so it never scales with audio volume
+and needs no streaming infrastructure of its own.
+
+What changed to make 50 *actually work*:
+
+| Concern | Before | Now |
+|---|---|---|
+| Token issuance | blocking `httpx.post()` inside `async def` — froze the event loop | reused `httpx.AsyncClient` pool with explicit timeouts, closed on shutdown |
+| Identity | one shared secret for everyone | `client_id` + per-device secret, hashed at rest |
+| Rate limiting | per IP, 30/min — rejected 19 of 50 on one NAT | token buckets per client + global; IP limit only for failed auth |
+| Correlation | none | `session_id` on every session, in logs and metrics |
+| Reconnect | symmetric jitter, no `Retry-After` | full jitter, `Retry-After` honored (and clamped) |
+| Queue health | drops counted, not surfaced | sustained overflow raises a degraded session state |
+| Observability | none | `/metrics`, `/readyz`, bounded label cardinality |
+| Startup cost | terminology YAML re-parsed per session (0.37s) | parsed once, cached on (path, mtime, size) |
+
+### Deploying for 50
+
+```bash
+export DEEPGRAM_API_KEY='...'
+
+# 50 device identities; only hashes are written to the host.
+python -m host.provision --count 50 --prefix doctor \
+    --out /secure/host/clients.txt --secrets-dir ./device-secrets
+export HOST_CLIENTS_FILE=/secure/host/clients.txt
+
+# Defaults already suit 50; shown for explicitness:
+export HOST_CLIENT_BURST=120          # > 50 so a startup surge never 429s
+export HOST_GLOBAL_BURST=1200
+export HOST_METRICS_ADMIN_TOKEN='...' # protects /metrics
+
+python -m host.app
+```
+
+On each machine, enter the host URL, that device's **client id** and its
+secret in the settings panel. Run **one** uvicorn worker: the registry and
+limiters are per-process.
+
+### Proving it
+
+| Claim | Test |
+|---|---|
+| 50 simultaneous token requests, 0 legitimate 429s | `tests/test_host_concurrency.py` |
+| 50 clients on one NAT all allowed; one abuser throttled alone | `tests/test_host_concurrency.py` |
+| Token issuance does not block the event loop | `tests/test_host_concurrency.py` |
+| 50 concurrent sessions isolated, no thread leaks, no queue cross-talk | `tests/test_session_concurrency.py` |
+| Reconnect storm decorrelated; retry limits enforced | `tests/test_session_concurrency.py` |
+| 50 simultaneous shutdowns release every thread, queue and session | `tests/test_session_concurrency.py` |
+| Sustained 50-client soak (opt-in, mocked) | `tests/test_soak.py` |
+| Real provider capacity (opt-in, spends credit) | `tests/test_live_load.py` |
+
+```bash
+pytest tests/ -q     # includes the 50-client concurrency suite
+```
+
+### Measured (mocked Deepgram, 50 clients, this repository)
+
+| Threshold | Target | Measured |
+|---|---|---|
+| 50 simultaneous session requests | ≥99% success | 50/50 (100%), 0 × 429 |
+| Token acquisition p95 | < 2s | < 0.01s (local mock) |
+| Event loop during token issuance | not blocked | 50 × 50ms grants in < 0.15s, not 2.5s |
+| 50 sessions, 30-min soak | no growth | +0.65 MB RSS, 0 drops, 0 leaks |
+
+Latency figures come from mocked Deepgram on this machine and are **not**
+a claim about production speech-to-text latency. Measure those against the
+real provider.
+
+> **What is *not* claimed.** "50 concurrent active streaming sessions" is
+> proven for the application: it issues 50 tokens and opens 50 sockets.
+> Whether your Deepgram project permits 50 simultaneous Nova-3 streams is a
+> property of your plan. Run the opt-in real-provider test, which reports
+> `APPLICATION CAPACITY` and `PROVIDER CAPACITY` separately rather than
+> hiding the difference.
 
 ---
 
@@ -213,6 +306,12 @@ triggers far fewer antivirus false positives.
    Press **ذخیره تنظیمات**. The secret is immediately protected with
    Windows DPAPI and written to `host_secret.dpapi`; the field is then
    cleared.
+
+   For a multi-clinician deployment, provision per-device credentials (see
+   [Capacity](#capacity-50-concurrent-active-streaming-sessions)): the
+   client sends `X-Client-Id` alongside the secret so the host can rate
+   limit and revoke each device independently. Set the id via
+   `MEDICALSTT_HOST_CLIENT_ID` or `host_client_id` in `settings.yaml`.
 4. Press **شروع** to dictate and **توقف** to stop.
 
 No Deepgram API key is ever entered, requested, or stored on that machine.
@@ -264,10 +363,15 @@ The checked-in `.env.example` documents the same variables
 `host/.env.example` is the equivalent template for the host service.
 
 ```bash
-pytest tests/ -q          # 258 tests, no network, no Windows, no credentials
+pytest tests/ -q          # no network, no Windows, no credentials
 ruff check medical_stt tests scripts host
 mypy medical_stt host/core.py
 ```
+
+The default run includes the 50-client concurrency suite
+(`tests/test_host_concurrency.py`, `tests/test_session_concurrency.py`) with
+Deepgram mocked, so CI never spends credit. The soak and real-provider load
+tests are opt-in via `MEDICAL_STT_SOAK=1` and `MEDICAL_STT_LOAD_TEST=1`.
 
 ---
 
@@ -311,6 +415,24 @@ immediate rather than waiting out a 30-second backoff.
 `AUTH` and `CONFIG` are **never retried** — a wrong shared secret or an
 invalid configuration needs human action, and retrying forever would just
 look like a hang (`stt/reconnect.py`).
+
+Reconnect backoff uses **full jitter**: the wait is drawn uniformly from
+`[ceiling*(1-jitter), ceiling]` rather than symmetrically around the
+ceiling. This is what stops 50 clients that lost the same upstream at the
+same instant from retrying in lockstep and hitting a recovering provider
+with a synchronized spike. An upstream `Retry-After` is honored when
+present, clamped to 60s so a confused server cannot pin a session open.
+
+### Audio queue health
+
+The bounded queue (40 chunks) drops rather than blocks, because the
+microphone callback must never wait. A drop is only *noise* occasionally;
+sustained drops mean the sender cannot keep up and audio is being lost
+continuously. Three consecutive drops therefore flip the session to a
+**degraded** state, logged at ERROR and readable via
+`LiveMedicalSTT.session_health`. The queue is deliberately **not** enlarged
+to paper over a slow network — that would convert dropped audio into
+increasing latency instead.
 
 ### Inject modes
 

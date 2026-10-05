@@ -38,11 +38,25 @@ class ErrorCategory(enum.Enum):
 
 
 class ProviderError(Exception):
-    """An STT provider failure, classified for the reconnect loop."""
+    """An STT provider failure, classified for the reconnect loop.
 
-    def __init__(self, category: ErrorCategory, message: str, *, cause: Optional[BaseException] = None) -> None:
+    `retry_after` carries an upstream hint in seconds when one was supplied
+    (the host's HTTP `Retry-After`). The reconnect loop prefers it over its
+    own backoff so a rate-limited client slows down when told to, instead of
+    guessing.
+    """
+
+    def __init__(
+        self,
+        category: ErrorCategory,
+        message: str,
+        *,
+        cause: Optional[BaseException] = None,
+        retry_after: Optional[float] = None,
+    ) -> None:
         super().__init__(message)
         self.category = category
+        self.retry_after = retry_after
         self.__cause__ = cause
 
 

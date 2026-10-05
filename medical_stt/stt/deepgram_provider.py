@@ -150,6 +150,10 @@ class DeepgramProvider(STTProvider):
         self._stop_event = threading.Event()
         self._connection: Any = None
         self._connection_lock = threading.Lock()
+        #: Number of connections this provider has opened. Instance-local,
+        #: never a module global: 50 clients share no provider state, so one
+        #: session can never influence another.
+        self._connections_opened = 0
 
     def _request_session_token(self) -> str:
         """Get a short-lived Deepgram session token from the host.
@@ -167,9 +171,15 @@ class DeepgramProvider(STTProvider):
             base_url=s.host_url,
             secret=s.host_secret,
             timeout=s.host_timeout_seconds,
+            client_id=s.host_client_id,
         )
-        log.info("requesting short-lived Deepgram session from host")
         session = client.fetch_session(ttl_seconds=s.session_ttl_seconds)
+        # Correlation only: safe to log, and the only host-side handle that
+        # ties this WebSocket to a host log line. The token below is not.
+        log.info(
+            "deepgram_session_granted session_id=%s expires_in=%ds",
+            session.session_id or "n/a", session.expires_in,
+        )
         # Intentionally not logged and not stored beyond this return value.
         return session.access_token
 
@@ -265,11 +275,12 @@ class DeepgramProvider(STTProvider):
                     if not self._stop_event.is_set():
                         on_error(ProviderError(ErrorCategory.SERVER_DISCONNECT, "Deepgram connection closed"))
 
-                connection.on(EventType.OPEN, lambda _: log.info("Deepgram connection established"))
+                connection.on(EventType.OPEN, lambda _: log.info("deepgram_connected"))
                 connection.on(EventType.MESSAGE, _on_message)
                 connection.on(EventType.ERROR, _on_provider_error)
                 connection.on(EventType.CLOSE, _on_close)
 
+                self._connections_opened += 1
                 connection.start_listening()
         except BaseException as exc:  # noqa: BLE001 - single classification boundary
             with self._connection_lock:
@@ -284,6 +295,15 @@ class DeepgramProvider(STTProvider):
             # Do not keep the session credential alive in this frame any
             # longer than the connection needed it.
             session_token = ""
+
+    @property
+    def connections_opened(self) -> int:
+        """How many Deepgram connections this provider has opened.
+
+        Lets a test prove each reconnect mints a *new* connection rather than
+        reusing a dead one, and that no state is shared between clients.
+        """
+        return self._connections_opened
 
     def send_audio(self, chunk: bytes) -> None:
         with self._connection_lock:

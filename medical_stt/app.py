@@ -21,7 +21,7 @@ import queue
 import sys
 import threading
 import time
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from . import paths
 from .app_instance import SingleInstance
@@ -173,6 +173,25 @@ class LiveMedicalSTT:
         """Current queue depth and dropped-audio counters."""
         return self._audio_q.stats()
 
+    @property
+    def session_health(self) -> Dict[str, Any]:
+        """Operational snapshot for a live session.
+
+        Exposes whether the audio path is keeping up. `degraded` is a
+        *controlled* signal: when the sender cannot drain as fast as the
+        microphone fills it, audio is being lost and the user (or support)
+        needs to know, rather than the loss being discovered later as a gap
+        in the chart.
+        """
+        stats = self._audio_q.stats()
+        return {
+            "degraded": stats.degraded,
+            "audio_queue_depth": stats.depth,
+            "audio_queue_drops_total": stats.dropped_total,
+            "consecutive_drops": stats.consecutive_drops,
+            "reconnect_count": self._reconnect_count,
+        }
+
     # -- transcript handling --------------------------------------------
 
     def _on_transcript(self, event: TranscriptEvent) -> None:
@@ -274,8 +293,15 @@ class LiveMedicalSTT:
         if self._audio_drop_pending.is_set():
             self._audio_drop_pending.clear()
             stats = self._audio_q.stats()
-            log.warning(
-                "audio queue full: dropped_total=%d depth=%d", stats.dropped_total, stats.depth
+            # Persisting overflow is reported at ERROR and flips the session
+            # health flag; an isolated drop stays a warning. Silently
+            # absorbing a sustained loss of audio is the failure mode this
+            # is meant to prevent.
+            level = logging.ERROR if stats.degraded else logging.WARNING
+            log.log(
+                level,
+                "audio queue full: dropped_total=%d depth=%d consecutive=%d degraded=%s",
+                stats.dropped_total, stats.depth, stats.consecutive_drops, stats.degraded,
             )
 
     # -- session lifecycle -------------------------------------------------
@@ -431,7 +457,13 @@ class LiveMedicalSTT:
                         # classified: that is a normal stop, not an error.
                         break
                     self._reconnect_count += 1
-                    decision = decide(policy, exc, self._reconnect_count)
+                    # `exc.retry_after` is honored when the host sent one, so
+                    # a rate-limited client slows down when told to instead of
+                    # guessing -- which is what would otherwise turn 50
+                    # clients into a synchronized retry storm.
+                    decision = decide(
+                        policy, exc, self._reconnect_count, retry_after=exc.retry_after
+                    )
                     if not decision.should_retry:
                         log.error("not retrying: %s", decision.reason)
                         exit_code = 1 if exc.category != ErrorCategory.SHUTDOWN else 0

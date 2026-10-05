@@ -47,10 +47,12 @@ jobs:
         run: mypy medical_stt host/core.py
 
   host-test:
-    name: Host service tests
+    name: Host service + 50-client concurrency
     runs-on: ubuntu-latest
-    # Proves host/core.py's auth, rate limiting, TTL clamping and Deepgram
-    # grant logic. No Deepgram key and no network access are required.
+    # Proves host/core.py's auth, client registry, rate limiting, TTL clamping
+    # and Deepgram grant logic -- and that 50 simultaneous clients are served.
+    # The Deepgram grant is stubbed at the async transport, so no key and no
+    # network access are required and no credit is ever spent.
     steps:
       - uses: actions/checkout@v4
 
@@ -63,6 +65,11 @@ jobs:
 
       - name: Run host service tests
         run: pytest tests/test_host_service.py tests/test_host_client.py -v
+
+      - name: Run 50-client concurrency suite
+        # The load and soak tests are opt-in via environment variables and
+        # are skipped here by design: they must never run in CI.
+        run: pytest tests/test_host_concurrency.py tests/test_session_concurrency.py -v
 
   windows-check:
     name: Windows platform checks

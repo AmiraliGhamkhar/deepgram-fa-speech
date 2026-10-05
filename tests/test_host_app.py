@@ -32,16 +32,27 @@ FAKE_GRANT = {"access_token": "issued-token", "expires_in": 30}
 
 @pytest.fixture()
 def host(monkeypatch):
-    """Import (or reload) the host ASGI app with test configuration."""
+    """Import (or reload) the host ASGI app with test configuration.
+
+    The Deepgram grant is stubbed at the *async* transport
+    (`AsyncGrantClient.grant`) because Phase 3 moved token issuance onto the
+    event loop via a reused `httpx.AsyncClient`. The stub returns a fixed
+    payload, so no real Deepgram credit is ever spent in CI.
+    """
     monkeypatch.setenv("DEEPGRAM_API_KEY", "dg_fake_host_side_only")
     monkeypatch.setenv("HOST_SHARED_SECRET", SECRET)
     monkeypatch.delenv("HOST_ALLOW_HTTP", raising=False)
     monkeypatch.delenv("HOST_FORWARDED_ALLOW_IPS", raising=False)
+    monkeypatch.delenv("HOST_CLIENTS_FILE", raising=False)
 
     core = importlib.import_module("core")
     app_module = importlib.import_module("app")
     importlib.reload(app_module)
-    monkeypatch.setattr(core, "_httpx_grant", lambda *a, **k: dict(FAKE_GRANT))
+
+    async def fake_grant(_self, _api_key, _ttl):
+        return dict(FAKE_GRANT)
+
+    monkeypatch.setattr(core.AsyncGrantClient, "grant", fake_grant)
 
     service = app_module.create_app(core.HostSettings.from_env())
     return service
@@ -120,21 +131,22 @@ def test_wrong_secret_is_rejected(host):
     assert response.status_code == 401
 
 
-def test_session_returns_the_issued_token(host, monkeypatch):
-    core = importlib.import_module("core")
-    monkeypatch.setattr(core, "_httpx_grant", lambda *a, **k: dict(FAKE_GRANT))
+def test_session_returns_the_issued_token(host):
     client = TestClient(host, base_url="https://stt.example.com")
     body = _post(client).json()
-    assert body == {"access_token": "issued-token", "expires_in": 30}
+    assert body["access_token"] == "issued-token"
+    assert body["expires_in"] == 30
+    # Phase 5: every session carries a correlation id for logs and metrics.
+    assert len(body["session_id"]) == 32
 
 
 def test_upstream_timeout_is_reported_as_504(host, monkeypatch):
     core = importlib.import_module("core")
 
-    def failing_transport(*_args, **_kwargs):
+    async def failing_transport(_self, _api_key, _ttl):
         raise core.GrantError("Deepgram token request timed out", 504)
 
-    monkeypatch.setattr(core, "_httpx_grant", failing_transport)
+    monkeypatch.setattr(core.AsyncGrantClient, "grant", failing_transport)
     client = TestClient(host, base_url="https://stt.example.com")
     response = _post(client)
     assert response.status_code == 504
@@ -144,18 +156,32 @@ def test_upstream_timeout_is_reported_as_504(host, monkeypatch):
 def test_upstream_unavailable_is_reported_as_503(host, monkeypatch):
     core = importlib.import_module("core")
 
-    def failing_transport(*_args, **_kwargs):
+    async def failing_transport(_self, _api_key, _ttl):
         raise core.GrantError("cannot reach Deepgram", 503)
 
-    monkeypatch.setattr(core, "_httpx_grant", failing_transport)
+    monkeypatch.setattr(core.AsyncGrantClient, "grant", failing_transport)
     client = TestClient(host, base_url="https://stt.example.com")
     assert _post(client).status_code == 503
 
 
 def test_rate_limit_returns_429_with_retry_after(host, monkeypatch):
+    """The per-client token bucket sheds a looping client with Retry-After.
+
+    Phase 4 replaced the old fixed-window per-IP counter with a per-client
+    token bucket; the observable contract (429 plus a usable Retry-After) is
+    deliberately unchanged, so this regression test still pins it.
+    """
     core = importlib.import_module("core")
-    service = importlib.import_module("app").create_app(
-        core.HostSettings.from_env({**os.environ, "HOST_RATE_LIMIT_REQUESTS": "2"})
+    app_module = importlib.import_module("app")
+
+    async def fake_grant(_self, _api_key, _ttl):
+        return dict(FAKE_GRANT)
+
+    monkeypatch.setattr(core.AsyncGrantClient, "grant", fake_grant)
+    service = app_module.create_app(
+        core.HostSettings.from_env(
+            {**os.environ, "HOST_CLIENT_BURST": "2", "HOST_CLIENT_RATE_LIMIT_REQUESTS": "1"}
+        )
     )
     client = TestClient(service, base_url="https://stt.example.com")
     assert _post(client).status_code == 200
