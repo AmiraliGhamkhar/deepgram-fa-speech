@@ -1,0 +1,329 @@
+Run started:2026-10-05 05:04:28.824863+00:00
+
+Test results:
+>> Issue: [B104:hardcoded_bind_all_interfaces] Possible binding to all interfaces.
+   Severity: Medium   Confidence: Medium
+   CWE: CWE-605 (https://cwe.mitre.org/data/definitions/605.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b104_hardcoded_bind_all_interfaces.html
+   Location: host/app.py:411:34
+410	        return 2
+411	    host = os.getenv("HOST_BIND", "0.0.0.0")
+412	    port = int(os.getenv("HOST_PORT", "8443"))
+
+--------------------------------------------------
+>> Issue: [B105:hardcoded_password_string] Possible hardcoded password: ''
+   Severity: Low   Confidence: Medium
+   CWE: CWE-259 (https://cwe.mitre.org/data/definitions/259.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b105_hardcoded_password_string.html
+   Location: medical_stt/stt/deepgram_provider.py:297:28
+296	            # longer than the connection needed it.
+297	            session_token = ""
+298	
+
+--------------------------------------------------
+>> Issue: [B105:hardcoded_password_string] Possible hardcoded password: 'issued-token'
+   Severity: Low   Confidence: Medium
+   CWE: CWE-259 (https://cwe.mitre.org/data/definitions/259.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b105_hardcoded_password_string.html
+   Location: scripts/measure_capacity.py:94:16
+93	        await asyncio.sleep(GRANT_LATENCY_SECONDS)
+94	        return {"access_token": "issued-token", "expires_in": 30}
+95	
+
+--------------------------------------------------
+>> Issue: [B404:blacklist] Consider possible security implications associated with the subprocess module.
+   Severity: Low   Confidence: High
+   CWE: CWE-78 (https://cwe.mitre.org/data/definitions/78.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/blacklists/blacklist_imports.html#b404-import-subprocess
+   Location: scripts/scan_secrets.py:24:0
+23	import re
+24	import subprocess
+25	import sys
+
+--------------------------------------------------
+>> Issue: [B607:start_process_with_partial_path] Starting a process with a partial executable path
+   Severity: Low   Confidence: High
+   CWE: CWE-78 (https://cwe.mitre.org/data/definitions/78.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b607_start_process_with_partial_path.html
+   Location: scripts/scan_secrets.py:179:13
+178	def _git(*args: str, root: Path = ROOT) -> str:
+179	    result = subprocess.run(
+180	        ["git", *args], cwd=str(root), capture_output=True, text=True
+181	    )
+182	    if result.returncode != 0:
+
+--------------------------------------------------
+>> Issue: [B603:subprocess_without_shell_equals_true] subprocess call - check for execution of untrusted input.
+   Severity: Low   Confidence: High
+   CWE: CWE-78 (https://cwe.mitre.org/data/definitions/78.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b603_subprocess_without_shell_equals_true.html
+   Location: scripts/scan_secrets.py:179:13
+178	def _git(*args: str, root: Path = ROOT) -> str:
+179	    result = subprocess.run(
+180	        ["git", *args], cwd=str(root), capture_output=True, text=True
+181	    )
+182	    if result.returncode != 0:
+
+--------------------------------------------------
+>> Issue: [B607:start_process_with_partial_path] Starting a process with a partial executable path
+   Severity: Low   Confidence: High
+   CWE: CWE-78 (https://cwe.mitre.org/data/definitions/78.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b607_start_process_with_partial_path.html
+   Location: scripts/scan_secrets.py:209:22
+208	            checked.add(blob)
+209	            content = subprocess.run(
+210	                ["git", "cat-file", "-p", blob],
+211	                cwd=str(root),
+212	                capture_output=True,
+213	                text=True,
+214	                errors="replace",
+215	            ).stdout
+216	            findings.extend(scan_text(content, path, f"history[{commit[:8]}]"))
+
+--------------------------------------------------
+>> Issue: [B603:subprocess_without_shell_equals_true] subprocess call - check for execution of untrusted input.
+   Severity: Low   Confidence: High
+   CWE: CWE-78 (https://cwe.mitre.org/data/definitions/78.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b603_subprocess_without_shell_equals_true.html
+   Location: scripts/scan_secrets.py:209:22
+208	            checked.add(blob)
+209	            content = subprocess.run(
+210	                ["git", "cat-file", "-p", blob],
+211	                cwd=str(root),
+212	                capture_output=True,
+213	                text=True,
+214	                errors="replace",
+215	            ).stdout
+216	            findings.extend(scan_text(content, path, f"history[{commit[:8]}]"))
+
+--------------------------------------------------
+>> Issue: [B404:blacklist] Consider possible security implications associated with the subprocess module.
+   Severity: Low   Confidence: High
+   CWE: CWE-78 (https://cwe.mitre.org/data/definitions/78.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/blacklists/blacklist_imports.html#b404-import-subprocess
+   Location: scripts/scrub_history.py:40:0
+39	import os
+40	import subprocess
+41	import sys
+
+--------------------------------------------------
+>> Issue: [B607:start_process_with_partial_path] Starting a process with a partial executable path
+   Severity: Low   Confidence: High
+   CWE: CWE-78 (https://cwe.mitre.org/data/definitions/78.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b607_start_process_with_partial_path.html
+   Location: scripts/scrub_history.py:60:13
+59	def git(*args: str, root: Path = ROOT, check: bool = True) -> str:
+60	    result = subprocess.run(["git", *args], cwd=str(root), capture_output=True, text=True)
+61	    if check and result.returncode != 0:
+
+--------------------------------------------------
+>> Issue: [B603:subprocess_without_shell_equals_true] subprocess call - check for execution of untrusted input.
+   Severity: Low   Confidence: High
+   CWE: CWE-78 (https://cwe.mitre.org/data/definitions/78.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b603_subprocess_without_shell_equals_true.html
+   Location: scripts/scrub_history.py:60:13
+59	def git(*args: str, root: Path = ROOT, check: bool = True) -> str:
+60	    result = subprocess.run(["git", *args], cwd=str(root), capture_output=True, text=True)
+61	    if check and result.returncode != 0:
+
+--------------------------------------------------
+>> Issue: [B607:start_process_with_partial_path] Starting a process with a partial executable path
+   Severity: Low   Confidence: High
+   CWE: CWE-78 (https://cwe.mitre.org/data/definitions/78.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b607_start_process_with_partial_path.html
+   Location: scripts/scrub_history.py:119:13
+118	    print("Rewriting all refs (git filter-branch)...")
+119	    result = subprocess.run(
+120	        [
+121	            "git", "filter-branch", "--force", "--prune-empty",
+122	            "--tree-filter", tree_filter,
+123	            "--tag-name-filter", "cat", "--", "--all",
+124	        ],
+125	        cwd=str(root),
+126	        env=env,
+127	        capture_output=True,
+128	        text=True,
+129	    )
+130	    config_path.unlink(missing_ok=True)
+
+--------------------------------------------------
+>> Issue: [B603:subprocess_without_shell_equals_true] subprocess call - check for execution of untrusted input.
+   Severity: Low   Confidence: High
+   CWE: CWE-78 (https://cwe.mitre.org/data/definitions/78.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b603_subprocess_without_shell_equals_true.html
+   Location: scripts/scrub_history.py:119:13
+118	    print("Rewriting all refs (git filter-branch)...")
+119	    result = subprocess.run(
+120	        [
+121	            "git", "filter-branch", "--force", "--prune-empty",
+122	            "--tree-filter", tree_filter,
+123	            "--tag-name-filter", "cat", "--", "--all",
+124	        ],
+125	        cwd=str(root),
+126	        env=env,
+127	        capture_output=True,
+128	        text=True,
+129	    )
+130	    config_path.unlink(missing_ok=True)
+
+--------------------------------------------------
+>> Issue: [B607:start_process_with_partial_path] Starting a process with a partial executable path
+   Severity: Low   Confidence: High
+   CWE: CWE-78 (https://cwe.mitre.org/data/definitions/78.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b607_start_process_with_partial_path.html
+   Location: scripts/scrub_history.py:164:22
+163	            seen.add(parts[2])
+164	            content = subprocess.run(
+165	                ["git", "cat-file", "-p", parts[2]], cwd=str(root),
+166	                capture_output=True, text=True, errors="replace",
+167	            ).stdout
+168	            for pattern in compiled:
+
+--------------------------------------------------
+>> Issue: [B603:subprocess_without_shell_equals_true] subprocess call - check for execution of untrusted input.
+   Severity: Low   Confidence: High
+   CWE: CWE-78 (https://cwe.mitre.org/data/definitions/78.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b603_subprocess_without_shell_equals_true.html
+   Location: scripts/scrub_history.py:164:22
+163	            seen.add(parts[2])
+164	            content = subprocess.run(
+165	                ["git", "cat-file", "-p", parts[2]], cwd=str(root),
+166	                capture_output=True, text=True, errors="replace",
+167	            ).stdout
+168	            for pattern in compiled:
+
+--------------------------------------------------
+>> Issue: [B607:start_process_with_partial_path] Starting a process with a partial executable path
+   Severity: Low   Confidence: High
+   CWE: CWE-78 (https://cwe.mitre.org/data/definitions/78.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b607_start_process_with_partial_path.html
+   Location: scripts/scrub_history.py:242:18
+241	        if stashed:
+242	            pop = subprocess.run(
+243	                ["git", "stash", "pop", "--quiet"], cwd=str(root),
+244	                capture_output=True, text=True,
+245	            )
+246	            if pop.returncode != 0:
+
+--------------------------------------------------
+>> Issue: [B603:subprocess_without_shell_equals_true] subprocess call - check for execution of untrusted input.
+   Severity: Low   Confidence: High
+   CWE: CWE-78 (https://cwe.mitre.org/data/definitions/78.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b603_subprocess_without_shell_equals_true.html
+   Location: scripts/scrub_history.py:242:18
+241	        if stashed:
+242	            pop = subprocess.run(
+243	                ["git", "stash", "pop", "--quiet"], cwd=str(root),
+244	                capture_output=True, text=True,
+245	            )
+246	            if pop.returncode != 0:
+
+--------------------------------------------------
+>> Issue: [B105:hardcoded_password_string] Possible hardcoded password: 'issued.jwt.token'
+   Severity: Low   Confidence: Medium
+   CWE: CWE-259 (https://cwe.mitre.org/data/definitions/259.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b105_hardcoded_password_string.html
+   Location: scripts/verify_client_host.py:57:16
+56	        granted.append({"url": core.DEEPGRAM_GRANT_URL, "api_key": api_key, "ttl": ttl})
+57	        return {"access_token": "issued.jwt.token", "expires_in": 30}
+58	
+
+--------------------------------------------------
+>> Issue: [B105:hardcoded_password_string] Possible hardcoded password: 'issued.jwt.token'
+   Severity: Low   Confidence: Medium
+   CWE: CWE-259 (https://cwe.mitre.org/data/definitions/259.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b105_hardcoded_password_string.html
+   Location: scripts/verify_client_host.py:92:63
+91	    ).fetch_session(ttl_seconds=30)
+92	    check("client received the token", session.access_token == "issued.jwt.token")
+93	    check("client saw the expiry", session.expires_in == 30)
+
+--------------------------------------------------
+>> Issue: [B101:assert_used] Use of assert detected. The enclosed code will be removed when compiling to optimised byte code.
+   Severity: Low   Confidence: High
+   CWE: CWE-703 (https://cwe.mitre.org/data/definitions/703.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b101_assert_used.html
+   Location: scripts/windows_selftest.py:54:4
+53	    blob = protector.protect(ROUNDTRIP_VALUE)
+54	    assert blob and blob != ROUNDTRIP_VALUE, "protect() did not transform the input"
+55	    assert protector.unprotect(blob) == ROUNDTRIP_VALUE, "unprotect() did not restore the input"
+
+--------------------------------------------------
+>> Issue: [B101:assert_used] Use of assert detected. The enclosed code will be removed when compiling to optimised byte code.
+   Severity: Low   Confidence: High
+   CWE: CWE-703 (https://cwe.mitre.org/data/definitions/703.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b101_assert_used.html
+   Location: scripts/windows_selftest.py:55:4
+54	    assert blob and blob != ROUNDTRIP_VALUE, "protect() did not transform the input"
+55	    assert protector.unprotect(blob) == ROUNDTRIP_VALUE, "unprotect() did not restore the input"
+56	
+
+--------------------------------------------------
+>> Issue: [B101:assert_used] Use of assert detected. The enclosed code will be removed when compiling to optimised byte code.
+   Severity: Low   Confidence: High
+   CWE: CWE-703 (https://cwe.mitre.org/data/definitions/703.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b101_assert_used.html
+   Location: scripts/windows_selftest.py:64:4
+63	    second = SingleInstance()
+64	    assert first.acquire() is True, "could not acquire the mutex"
+65	    try:
+
+--------------------------------------------------
+>> Issue: [B101:assert_used] Use of assert detected. The enclosed code will be removed when compiling to optimised byte code.
+   Severity: Low   Confidence: High
+   CWE: CWE-703 (https://cwe.mitre.org/data/definitions/703.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b101_assert_used.html
+   Location: scripts/windows_selftest.py:66:8
+65	    try:
+66	        assert second.acquire() is False, "a second instance was allowed"
+67	    finally:
+
+--------------------------------------------------
+>> Issue: [B101:assert_used] Use of assert detected. The enclosed code will be removed when compiling to optimised byte code.
+   Severity: Low   Confidence: High
+   CWE: CWE-703 (https://cwe.mitre.org/data/definitions/703.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b101_assert_used.html
+   Location: scripts/windows_selftest.py:69:4
+68	        first.release()
+69	    assert first.acquired is False, "the mutex was not released"
+70	
+
+--------------------------------------------------
+>> Issue: [B101:assert_used] Use of assert detected. The enclosed code will be removed when compiling to optimised byte code.
+   Severity: Low   Confidence: High
+   CWE: CWE-703 (https://cwe.mitre.org/data/definitions/703.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b101_assert_used.html
+   Location: scripts/windows_selftest.py:77:4
+76	    backend = WindowsBackend()
+77	    assert hasattr(backend, "send_unicode_text")
+78	    assert hasattr(backend, "paste_text")
+
+--------------------------------------------------
+>> Issue: [B101:assert_used] Use of assert detected. The enclosed code will be removed when compiling to optimised byte code.
+   Severity: Low   Confidence: High
+   CWE: CWE-703 (https://cwe.mitre.org/data/definitions/703.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b101_assert_used.html
+   Location: scripts/windows_selftest.py:78:4
+77	    assert hasattr(backend, "send_unicode_text")
+78	    assert hasattr(backend, "paste_text")
+79	
+
+--------------------------------------------------
+
+Code scanned:
+	Total lines of code: 6684
+	Total lines skipped (#nosec): 0
+	Total potential issues skipped due to specifically being disabled (e.g., #nosec BXXX): 0
+
+Run metrics:
+	Total issues (by severity):
+		Undefined: 0
+		Low: 25
+		Medium: 1
+		High: 0
+	Total issues (by confidence):
+		Undefined: 0
+		Low: 0
+		Medium: 5
+		High: 21
+Files skipped (0):
