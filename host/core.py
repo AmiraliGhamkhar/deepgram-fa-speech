@@ -572,7 +572,16 @@ class ClientRegistry:
     def from_file(cls, path: str) -> "ClientRegistry":
         """Load a registry file, ignoring blank lines and `#` comments."""
         clients: Dict[str, str] = {}
-        text = Path(path).read_text(encoding="utf-8")
+        try:
+            text = Path(path).read_text(encoding="utf-8")
+        except OSError as exc:
+            # A missing or unreadable registry must be diagnosable from the
+            # log alone: a bare traceback would name a line of core.py, not
+            # the file the operator misconfigured.
+            raise ConfigurationError(
+                f"cannot read the client registry {path!r}: {exc.strerror or exc}. "
+                "Check HOST_CLIENTS_FILE and restart."
+            ) from exc
         for lineno, raw in enumerate(text.splitlines(), start=1):
             line = raw.strip()
             if not line or line.startswith("#"):

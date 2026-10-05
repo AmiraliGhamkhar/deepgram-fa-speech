@@ -306,6 +306,7 @@ DECLARED_COUNTERS: Tuple[str, ...] = (
     "audio_queue_drops_total",
     "auth_failures_total",
     "rate_limited_total",
+    "request_body_rejections_total",
 )
 
 DECLARED_GAUGES: Tuple[str, ...] = (

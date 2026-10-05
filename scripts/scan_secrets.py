@@ -55,6 +55,13 @@ PATTERNS: Tuple[Pattern, ...] = (
     Pattern("private_key", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
 )
 
+#: Filenames that are credentials by construction, whatever their contents.
+#: `host/provision.py` writes one `*.secret` file per device holding a
+#: 256-bit plaintext secret; committing one must fail the scan even if the
+#: value itself never matches a key pattern (a `token_urlsafe` secret does
+#: not). Matched case-insensitively on the file name only.
+SECRET_FILENAME_SUFFIXES = (".secret",)
+
 #: Values that are obviously documentation, not credentials.
 PLACEHOLDER_RE = re.compile(
     r"(?i)^(your[_-].*|.*[_-]here|<.*>|\$\{.*\}|xxx+|\*+|-+|example.*|placeholder.*|not[-_]real.*|fake.*)$"
@@ -151,6 +158,15 @@ def scan_text(text: str, path: str, location: str) -> List[Finding]:
 
 
 def scan_file(path: Path, relative: str) -> List[Finding]:
+    if relative.lower().endswith(SECRET_FILENAME_SUFFIXES):
+        # Never read the value into a finding description; the file name
+        # alone is the finding.
+        return [
+            Finding(
+                "tree", relative, "secret_file", "<redacted: filename is the finding>",
+                fingerprint(relative.lower()),
+            )
+        ]
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -214,6 +230,14 @@ def scan_history(root: Path = ROOT) -> List[Finding]:
                 errors="replace",
             ).stdout
             findings.extend(scan_text(content, path, f"history[{commit[:8]}]"))
+            if path.lower().endswith(SECRET_FILENAME_SUFFIXES):
+                findings.append(
+                    Finding(
+                        f"history[{commit[:8]}]", path, "secret_file",
+                        "<redacted: filename is the finding>",
+                        fingerprint(path.lower()),
+                    )
+                )
     return findings
 
 

@@ -183,6 +183,14 @@ class Settings:
     session_ttl_seconds: int = 30
 
     def as_dict(self) -> Dict[str, Any]:
+        """A serializable view of the settings, **without the secret**.
+
+        `as_dict()` is the shape every dump/log path goes through, so the
+        shared secret is excluded at the source: a future refactor that
+        starts serializing settings cannot leak it by accident. The
+        plaintext value exists only in the DPAPI-protected store and this
+        field.
+        """
         return {
             "model": self.model,
             "language": self.language,
@@ -204,7 +212,6 @@ class Settings:
             "medical_confidence_threshold": self.medical_confidence_threshold,
             "use_asr_replacements": self.use_asr_replacements,
             "host_url": self.host_url,
-            "host_secret": self.host_secret,
             "host_client_id": self.host_client_id,
             "host_timeout_seconds": self.host_timeout_seconds,
             "session_ttl_seconds": self.session_ttl_seconds,

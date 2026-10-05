@@ -29,9 +29,32 @@ log = logging.getLogger("medical_stt.host_client")
 #: Deepgram session token.
 SESSION_PATH = "/v1/session"
 
-#: Refuse to follow redirects: a redirect could send the shared secret to
-#: a host we did not intend to authenticate against.
-_OPENER_FACTORY = urllib.request.build_opener(urllib.request.HTTPHandler(), urllib.request.HTTPSHandler())
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Refuse every redirect instead of following it.
+
+    `urllib.request.build_opener` installs the stdlib `HTTPRedirectHandler`
+    by default, which silently follows 301/302/303 -- and re-sends the
+    `Authorization` header to whatever URL the redirect names. For this
+    client that would deliver the shared secret (and the client id) to an
+    arbitrary redirect target, whose response would then be trusted as a
+    valid session. A token service never legitimately redirects, so any
+    3xx is treated as a failed, non-retried host error.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise HostProtocolError(
+            f"host attempted a redirect (HTTP {code}); refusing to send credentials anywhere else"
+        )
+
+
+#: Opener that refuses redirects. `HostProtocolError` raised from
+#: `redirect_request` is caught in `fetch_session` and mapped onto the
+#: provider error taxonomy.
+_OPENER_FACTORY = urllib.request.build_opener(
+    urllib.request.HTTPHandler(),
+    urllib.request.HTTPSHandler(),
+    _NoRedirectHandler(),
+)
 
 
 class HostProtocolError(RuntimeError):
@@ -122,6 +145,13 @@ class HostSessionClient:
 
         try:
             raw = self._open(request, self._timeout)
+        except HostProtocolError as exc:
+            # A redirect was refused. The configured host is reported (not
+            # the redirect target), and the credential never left for it.
+            raise ProviderError(
+                ErrorCategory.CONFIG,
+                f"host redirected the session request: {exc} (configured host: {self._base_url})",
+            ) from None
         except urllib.error.HTTPError as exc:
             raise self._classify_http_error(exc) from None
         except urllib.error.URLError as exc:
@@ -152,10 +182,23 @@ class HostSessionClient:
         which could echo back request headers.
         """
         status = exc.code
+        # `exc.url` is the *effective* URL, which a followed redirect would
+        # have attacker-chosen (and which may echo into logs/UI). The
+        # opener refuses redirects, so this is always the configured host
+        # -- but the configured host is what an operator can act on anyway.
         host = exc.url or "the host"
         retry_after = _parse_retry_after(
             exc.headers.get("Retry-After") if exc.headers is not None else None
         )
+        if status in (301, 302, 303, 307, 308):
+            # The opener refuses to follow redirects; a 3xx that still
+            # surfaces as an HTTPError (307/308 are not auto-handled, and
+            # a proxy may also emit one) means the host is misconfigured
+            # or is redirecting credentials elsewhere. Never retried.
+            return ProviderError(
+                ErrorCategory.CONFIG,
+                f"host redirected the session request (HTTP {status}) at {host}",
+            )
         if status in (401, 403):
             # Most likely a wrong/mismatched shared secret: never retry.
             return ProviderError(

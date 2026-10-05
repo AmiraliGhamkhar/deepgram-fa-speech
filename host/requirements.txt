@@ -4,3 +4,8 @@
 fastapi>=0.115,<1.0
 uvicorn>=0.30,<1.0
 httpx>=0.27,<1.0
+
+# WSGI adapter for hosts that cannot run ASGI (cPanel "Setup Python App"
+# / Passenger). Required only for host/passenger_wsgi.py; plain uvicorn
+# deployments do not import it.
+a2wsgi>=1.10,<2.0
