@@ -30,7 +30,7 @@ import os
 import secrets
 import sys
 from pathlib import Path
-from typing import List, Optional, Sequence
+from typing import Any, List, Optional, Sequence
 
 #: Number of random bytes in a client secret. 32 bytes = 256 bits of
 #: entropy, which makes an offline attack against the stored SHA-256 hash
@@ -40,6 +40,32 @@ SECRET_BYTES = 32
 #: Refuse absurd counts: a typo like `--count 5000` should fail loudly
 #: rather than silently produce a huge registry.
 MAX_COUNT = 5_000
+
+#: A generated id is `<safe_prefix>-<suffix>`; the fixed-width suffix and
+#: its separator need 5 characters. A longer prefix would be truncated by
+#: `generate_client_id`, making every id identical -- so it is refused
+#: up front instead of hanging the generation loop forever.
+MAX_PREFIX_LENGTH = 59  # 64 - 5
+
+#: Upper bound on candidate ids tried to satisfy `--count` after collisions
+#: (a random suffix that was seen before, or a truncated id). Without it, a
+#: pathological prefix makes the loop never terminate and the operator's
+#: provisioning session hangs indefinitely.
+MAX_DEDUP_ATTEMPTS = MAX_COUNT * 2
+
+
+def _is_valid_client_id(client_id: Any) -> bool:
+    """Mirror of `host.core.is_valid_client_id`.
+
+    Duplicated deliberately rather than imported: this tool must run
+    standalone (it has no web-framework dependency and `host` ships no
+    `__init__.py`), and the client package makes the same trade-off. The
+    registry is rejected wholesale by `ClientRegistry.from_file` if any
+    line is invalid, so an id this tool cannot mint must never be written.
+    """
+    if not isinstance(client_id, str) or not 1 <= len(client_id) <= 64:
+        return False
+    return all(ch.isalnum() or ch in "-." or ch == "_" for ch in client_id)
 
 
 def generate_client_id(prefix: str, index: Optional[int] = None) -> str:
@@ -81,6 +107,25 @@ def _write_secret_file(directory: Path, client_id: str, secret: str) -> Path:
     return path
 
 
+def _existing_registry_ids(registry_path: Path) -> set:
+    """Client ids already present in the registry file (best effort).
+
+    Used only to warn about re-provisioning: appending a duplicate line
+    would silently replace that device's stored hash, and the old secret
+    would stop working without any notice.
+    """
+    try:
+        text = registry_path.read_text(encoding="utf-8")
+    except OSError:
+        return set()
+    ids = set()
+    for line in text.splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            ids.add(line.partition(":")[0].strip())
+    return ids
+
+
 def _generate(
     args: argparse.Namespace, out: List[str]
 ) -> int:
@@ -89,13 +134,42 @@ def _generate(
         print(f"error: --count {count} exceeds the {MAX_COUNT} limit", file=sys.stderr)
         return 2
 
-    ids: List[str] = []
     if args.client_id:
+        # `ClientRegistry.from_file` rejects the *whole registry* on any
+        # invalid id, so one typo here would take down every deployed
+        # device at the host's next restart. Refuse it now instead.
+        if not _is_valid_client_id(args.client_id):
+            print(
+                f"error: --client-id {args.client_id!r} is not valid: use 1-64 "
+                "characters of letters, digits, '-', '_' or '.'",
+                file=sys.stderr,
+            )
+            return 2
         ids = [args.client_id]
-        count = 1
     else:
+        safe_prefix = "".join(ch for ch in args.prefix if ch.isalnum() or ch in "-." or ch == "_")
+        if len(safe_prefix) > MAX_PREFIX_LENGTH:
+            print(
+                f"error: --prefix {args.prefix!r} is too long: generated ids are "
+                f"truncated at 64 characters, so a prefix longer than "
+                f"{MAX_PREFIX_LENGTH} characters would produce identical ids. "
+                "Use a shorter --prefix.",
+                file=sys.stderr,
+            )
+            return 2
+        ids = []
         seen = set()
+        attempts = 0
         while len(ids) < count:
+            attempts += 1
+            if attempts > MAX_DEDUP_ATTEMPTS:
+                print(
+                    f"error: could not generate {count} unique id(s) after "
+                    f"{MAX_DEDUP_ATTEMPTS} attempts; the prefix is likely too "
+                    "long or the ids are colliding",
+                    file=sys.stderr,
+                )
+                return 2
             candidate = generate_client_id(args.prefix, len(ids) if args.start_index else None)
             if candidate in seen:
                 continue
@@ -103,6 +177,8 @@ def _generate(
             ids.append(candidate)
 
     registry_path = Path(args.out)
+    existing_ids = _existing_registry_ids(registry_path)
+    duplicates = [client_id for client_id in ids if client_id in existing_ids]
     # Append, so re-provisioning one extra device does not revoke the 50
     # already deployed.
     with registry_path.open("a", encoding="utf-8") as handle:
@@ -118,6 +194,16 @@ def _generate(
                 # Printed once, on the operator's terminal, for manual
                 # transfer. Never echoed into a log or a shell history file.
                 out.append(f"{client_id} -> {secret}")
+
+    if duplicates:
+        # Loud, on stderr, and non-fatal: the operator chose to re-provision
+        # these ids, but the devices that hold the *old* secrets are now
+        # locked out and must be told why.
+        print(
+            "warning: re-provisioned existing client id(s) " + ", ".join(duplicates)
+            + " -- the previously issued secret(s) for them no longer work",
+            file=sys.stderr,
+        )
 
     print(f"registry updated: {registry_path} ({len(ids)} client(s))")
     for line in out:

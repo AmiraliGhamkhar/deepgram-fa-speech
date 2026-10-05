@@ -415,12 +415,22 @@ class LiveMedicalSTT:
             #      with `speech_final` is injected now instead of being
             #      discarded;
             #   6. finally, reset the per-session state for the next Start.
+            # Every step runs even if an earlier one raises: `stop()` and
+            # the joins are best-effort during teardown, and letting one
+            # exception skip the rest would leave threads, the queue, or
+            # the injector in a stale state for the next Start.
             self._stop.set()
             sender.join(timeout=2.0)
             if sender.is_alive():  # pragma: no cover - only on a wedged socket
                 log.warning("audio sender did not stop within 2s; queued audio is discarded")
-            self.provider.stop()
-            provider_thread.join(timeout=4.0)
+            try:
+                self.provider.stop()
+            except Exception as exc:  # noqa: BLE001 - shutdown must continue
+                log.warning("provider stop raised during shutdown: %s", exc)
+            try:
+                provider_thread.join(timeout=4.0)
+            except RuntimeError as exc:  # pragma: no cover - thread already gone
+                log.debug("provider thread join skipped: %s", exc)
             self._flush_pending_utterance()
             self._reset_session_state()
 

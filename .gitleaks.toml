@@ -25,7 +25,9 @@ regexes = [
   # `VAR=` with nothing after it -- the only shape the templates use for
   # secrets. The obsolete `your_deepgram_api_key_here` placeholder (and its
   # regex) was removed along with the DEEPGRAM_API_KEY client variable.
-  '''(?m)^\s*(DEEPGRAM_API_KEY|HOST_SHARED_SECRET|MEDICALSTT_HOST_SECRET|MEDICALSTT_HOST_URL|MEDICALSTT_APP_DATA_DIR|HOST_TLS_CERTFILE|HOST_TLS_KEYFILE)\s*=\s*$''',
+  # Extended for every variable the templates carry; keep in sync with
+  # .env.example and host/.env.example (audit finding 15-F5).
+  '''(?m)^\s*(DEEPGRAM_API_KEY|HOST_SHARED_SECRET|HOST_CLIENTS_FILE|MEDICALSTT_HOST_SECRET|MEDICALSTT_HOST_URL|MEDICALSTT_HOST_CLIENT_ID|MEDICALSTT_APP_DATA_DIR|HOST_TLS_CERTFILE|HOST_TLS_KEYFILE|HOST_METRICS_ADMIN_TOKEN)\s*=\s*$''',
   # The documented command that *generates* a secret is not a secret.
   '''secrets\.token_urlsafe\(32\)''',
 ]

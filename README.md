@@ -117,8 +117,17 @@ normalize → numbers protection → FST terminology → BiDi → injection.
 
 ## Deploying the host
 
-See **[`host/README.md`](host/README.md)** for the full guide. The short
-version:
+See **[`host/README.md`](host/README.md)** for the full guide. Platform
+specific walk-throughs:
+
+- **[`docs/CPANEL_HOSTING.md`](docs/CPANEL_HOSTING.md)** — shared hosting
+  via cPanel "Setup Python App" (Passenger/WSGI), including the
+  step-by-step diagnosis of a **502 Bad Gateway on Start**.
+- **[`docs/WINDOWS_POWERSHELL.md`](docs/WINDOWS_POWERSHELL.md)** —
+  building, installing and troubleshooting the Windows client entirely
+  from PowerShell.
+
+The short version:
 
 ```bash
 python -m venv .venv && . .venv/bin/activate
@@ -246,6 +255,10 @@ real provider.
 ---
 
 ## Building the Windows application
+
+A complete PowerShell walk-through (prerequisites, venv setup, signing,
+install, and a Start-failure troubleshooting table) lives in
+**[`docs/WINDOWS_POWERSHELL.md`](docs/WINDOWS_POWERSHELL.md)**.
 
 ```powershell
 # On a Windows machine with Python 3.10-3.12
@@ -691,6 +704,7 @@ tests/
 ├── test_benchmark.py                      # metric math + harness honesty
 ├── test_windows_selftest.py                # Windows-only checks refuse to fake success
 ├── test_secret_tooling.py                   # scanner + history-scrub tooling
+├── test_audit_fixes.py                       # regression pins for the audit remediation
 ├── test_live_deepgram.py                     # opt-in live test (skipped by default)
 ├── regression/
 │   └── test_medical_cases.py         # semantic-preservation corpus

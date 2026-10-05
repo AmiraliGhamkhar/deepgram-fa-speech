@@ -7,6 +7,12 @@
 secrets.yaml
 secrets.yml
 
+# Per-device plaintext secrets written by `python -m host.provision`, and
+# the client registry it appends to (hashes only, but never a repo file).
+*.secret
+device-secrets/
+clients.txt
+
 # --- Python ---
 __pycache__/
 *.py[cod]

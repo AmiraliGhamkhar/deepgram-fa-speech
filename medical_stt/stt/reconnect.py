@@ -84,8 +84,16 @@ def decide(
     if retry_after is not None and retry_after > 0:
         # Honor the server, but not unconditionally: an upstream (or a
         # misconfigured proxy) claiming "retry in 6 hours" must not leave a
-        # clinician unable to dictate.
-        honored = min(float(retry_after), policy.max_retry_after_seconds)
+        # clinician unable to dictate. The wait is clamped from above by
+        # `max_retry_after_seconds` and floored by the normal backoff: a
+        # server asking for less than we would wait anyway is still honored
+        # verbatim, while a server asking for *more* than the backoff must
+        # win -- clamping a 10s hint down to a 2s base delay would put the
+        # client into exactly the retry loop the server told it to stop.
+        honored = min(
+            max(float(retry_after), exponential_backoff_delay(policy, attempt)),
+            policy.max_retry_after_seconds,
+        )
         return ReconnectDecision(
             True,
             honored,

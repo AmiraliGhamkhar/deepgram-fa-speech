@@ -18,6 +18,11 @@ from dataclasses import dataclass
 #: cause of sustained overflow -- trips it almost immediately.
 DEGRADED_AFTER_DROPS = 3
 
+#: Consecutive successful sends required to end a degraded streak. A single
+#: good frame between drops does not mean the sender caught up: flapping
+#: audio would otherwise read as healthy while chunks are still being lost.
+RECOVERED_AFTER_SENDS = 3
+
 
 @dataclass(frozen=True)
 class QueueStats:
@@ -51,6 +56,7 @@ class BoundedAudioQueue:
         self._max_depth_seen = 0
         self._last_drop_at = 0.0
         self._consecutive_drops = 0
+        self._consecutive_sends = 0
 
     def put_nowait(self, chunk: bytes) -> bool:
         """Non-blocking enqueue. Returns True if enqueued, False if the
@@ -63,10 +69,17 @@ class BoundedAudioQueue:
             with self._lock:
                 self._dropped_total += 1
                 self._consecutive_drops += 1
+                self._consecutive_sends = 0
                 self._last_drop_at = time.monotonic()
             return False
         with self._lock:
             self._put_total += 1
+            # A successful enqueue means the sender had made room: count it
+            # toward recovery, and only clear the degraded streak after a
+            # sustained run of them (see RECOVERED_AFTER_SENDS).
+            self._consecutive_sends += 1
+            if self._consecutive_sends >= RECOVERED_AFTER_SENDS:
+                self._consecutive_drops = 0
             depth = self._q.qsize()
             if depth > self._max_depth_seen:
                 self._max_depth_seen = depth
@@ -76,9 +89,6 @@ class BoundedAudioQueue:
         chunk = self._q.get(timeout=timeout)
         with self._lock:
             self._get_total += 1
-            # The sender has drained one chunk, so it is keeping up again:
-            # this is the signal that ends a degraded streak.
-            self._consecutive_drops = 0
         return chunk
 
     def task_done(self) -> None:
@@ -116,6 +126,10 @@ class BoundedAudioQueue:
         if drained:
             with self._lock:
                 self._drained_total += drained
+                # A session reset is a clean slate: the next session must
+                # not inherit the previous one's degraded streak.
+                self._consecutive_drops = 0
+                self._consecutive_sends = 0
         return drained
 
     def qsize(self) -> int:

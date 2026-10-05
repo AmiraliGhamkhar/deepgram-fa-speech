@@ -82,11 +82,6 @@ log = logging.getLogger("medical_stt.host")
 #: the secret in `Authorization` is what authenticates.
 CLIENT_ID_HEADER = "X-Client-Id"
 
-#: Cap on concurrent in-flight Deepgram grant calls. Beyond this the host
-#: answers 503 instead of queueing forever, so a Deepgram slowdown cannot
-#: turn into unbounded host memory growth.
-DEFAULT_MAX_INFLIGHT_GRANTS = 100
-
 #: Security headers added to every response. Conservative and safe for a
 #: JSON API with no HTML surface: `nosniff` and a deny-all frame policy.
 _SECURITY_HEADERS = {
@@ -260,7 +255,6 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
         x_client_id: Optional[str] = Header(default=None),
     ) -> Any:
         peer = request.client.host if request.client else "unknown"
-        metrics.increment("session_starts_total")
 
         # -- abuse guard: a locked-out address is refused without any work ----
         auth_key = f"auth:{peer}"
@@ -288,6 +282,10 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
                 {"detail": "invalid credentials"}, status_code=401, headers=headers
             )
 
+        # Counted only for authenticated callers: brute-force noise must not
+        # inflate the session-start metric.
+        metrics.increment("session_starts_total")
+
         # -- layered rate limits, keyed on identity, not on the NAT IP ----
         allowed, retry_after = client_limiter.allow(f"client:{identity.client_id}")
         if allowed:
@@ -305,6 +303,15 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
             )
 
         # -- bounded request body ----------------------------------------
+        #
+        # The declared length is refused before reading anything, and the
+        # body itself is read *in chunks* with the same cap applied while
+        # streaming. `await request.body()` would buffer an entire chunked
+        # request (which declares no Content-Length) before the size check
+        # could run, so any authenticated client could exhaust host memory
+        # with `Transfer-Encoding: chunked` and take the shared token
+        # service down for every clinician. Chunk-by-chunk, the connection
+        # is aborted at the cap instead.
         declared = request.headers.get("content-length")
         if declared is not None:
             try:
@@ -318,11 +325,20 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
 
         body: Any = {}
         try:
-            raw = await request.body()
+            raw = b""
+            received = 0
+            async for chunk in request.stream():
+                received += len(chunk)
+                if received > resolved.max_request_body_bytes:
+                    metrics.increment("request_body_rejections_total")
+                    log.warning(
+                        "session aborted session_id=%s reason=body_over_cap bytes=%d",
+                        session_id, received,
+                    )
+                    return JSONResponse({"detail": "request body too large"}, status_code=413)
+                raw += chunk
         except Exception:  # noqa: BLE001 - a truncated body is simply empty
             raw = b""
-        if len(raw) > resolved.max_request_body_bytes:
-            return JSONResponse({"detail": "request body too large"}, status_code=413)
         if raw:
             try:
                 import json
@@ -379,7 +395,12 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
 
 
 def _token_matches(authorization: Optional[str], expected: str) -> bool:
-    """Constant-time admin-token comparison for `/metrics`."""
+    """Constant-time admin-token comparison for `/metrics`.
+
+    `hmac.compare_digest` raises `TypeError` on non-ASCII input, so both
+    sides are compared as UTF-8 bytes: a caller who sends a non-ASCII
+    bearer token gets 401, never a 500.
+    """
     import hmac
 
     if not authorization:
@@ -387,7 +408,9 @@ def _token_matches(authorization: Optional[str], expected: str) -> bool:
     scheme, _, presented = authorization.partition(" ")
     if scheme.strip().lower() != "bearer":
         return False
-    return hmac.compare_digest(presented.strip(), expected)
+    return hmac.compare_digest(
+        presented.strip().encode("utf-8"), expected.encode("utf-8")
+    )
 
 
 # Fail fast at import if the Deepgram key is absent: this service has no

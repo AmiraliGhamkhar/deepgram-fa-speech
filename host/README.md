@@ -35,7 +35,8 @@ desktop app ──HTTPS POST /v1/session (client id + secret)──▶ host ─�
 | `app.py` | FastAPI wiring: HTTPS enforcement, `POST /v1/session`, `/healthz`, `/readyz`, `/metrics`. |
 | `metrics.py` | dependency-free counters/gauges/histograms in Prometheus text format. |
 | `provision.py` | mints `client_id` + secret per device; writes only hashes to the registry. |
-| `requirements.txt` | `fastapi`, `uvicorn`, `httpx`. The Deepgram SDK is **not** used here. |
+| `passenger_wsgi.py` | WSGI entry point for cPanel "Setup Python App" / Passenger; see [`docs/CPANEL_HOSTING.md`](../docs/CPANEL_HOSTING.md). Not used by uvicorn/Docker deployments. |
+| `requirements.txt` | `fastapi`, `uvicorn`, `httpx`, `a2wsgi`. The Deepgram SDK is **not** used here. |
 | `.env.example` | template for all of the variables below; empty placeholders only. |
 
 ## Authentication model
