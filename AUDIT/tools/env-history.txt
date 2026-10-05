@@ -1,0 +1,16 @@
+== git-tracked files with env-like names ==
+.env.example
+host/.env.example
+medical_stt/security/secret_store.py
+scripts/scan_secrets.py
+scripts/secret_scan_baseline.txt
+tests/test_secret_store.py
+tests/test_secret_tooling.py
+== ever ADDED in history (all refs) ==
+.env.example
+host/.env.example
+medical_stt/security/secret_store.py
+scripts/scan_secrets.py
+scripts/secret_scan_baseline.txt
+tests/test_secret_store.py
+tests/test_secret_tooling.py
