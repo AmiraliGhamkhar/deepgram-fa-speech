@@ -46,6 +46,34 @@ def test_short_shared_secret_refuses_to_start():
     assert "24 characters" in str(excinfo.value)
 
 
+def test_missing_shared_secret_refuses_to_start_in_legacy_mode():
+    with pytest.raises(core.ConfigurationError) as excinfo:
+        core.HostSettings.from_env({"DEEPGRAM_API_KEY": API_KEY})
+    assert "HOST_SHARED_SECRET" in str(excinfo.value)
+    assert "24 characters" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("legacy_secret", [None, "tooshort"])
+def test_registry_mode_ignores_legacy_shared_secret(tmp_path, legacy_secret):
+    client_id = "doctor-01"
+    device_secret = "device-secret-used-only-by-this-test"
+    registry_path = tmp_path / "clients.txt"
+    registry_path.write_text(
+        f"{client_id}:{core.hash_client_secret(device_secret)}\n", encoding="utf-8"
+    )
+    env = {"DEEPGRAM_API_KEY": API_KEY, "HOST_CLIENTS_FILE": str(registry_path)}
+    if legacy_secret is not None:
+        env["HOST_SHARED_SECRET"] = legacy_secret
+
+    settings = core.HostSettings.from_env(env)
+
+    assert settings.shared_secret == (legacy_secret or "")
+    registry = settings.build_client_registry()
+    identity = core.authenticate_client(f"Bearer {device_secret}", client_id, registry)
+    assert identity is not None and identity.client_id == client_id
+    assert core.authenticate_client(f"Bearer {device_secret}", None, registry) is None
+
+
 def test_settings_load_from_environment():
     settings = core.HostSettings.from_env({
         "DEEPGRAM_API_KEY": API_KEY,

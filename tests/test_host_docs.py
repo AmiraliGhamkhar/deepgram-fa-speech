@@ -131,7 +131,15 @@ def test_client_credentials_are_documented():
         assert term in readme, f"host/README.md should mention {term}"
 
 
+def test_legacy_shared_secret_is_only_required_without_a_registry():
+    readme = HOST_README.read_text(encoding="utf-8")
+    section = readme[readme.index("The service **refuses to start**"):]
+    assert "HOST_SHARED_SECRET` must be at least 24 characters" in section
+    assert "When a registry is configured, `HOST_SHARED_SECRET` is ignored." in section
+
+
 def test_deprecated_rate_limit_var_is_flagged_not_silently_ignored():
+
     """`HOST_RATE_LIMIT_REQUESTS` is inert; the docs must say so.
 
     A retired setting that is silently accepted is the worst outcome: an

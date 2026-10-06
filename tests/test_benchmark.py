@@ -64,6 +64,13 @@ def test_numeric_accuracy_requires_the_exact_clinical_expression():
     assert numeric_accuracy("بیمار بی‌حال بود", "بیمار بی‌حال بود") == 1.0
 
 
+def test_numeric_accuracy_compares_persian_and_arabic_indic_digits_by_value():
+    assert numeric_accuracy("فشار خون ۱۲۵/۸۰", "BP 125/80.") == 1.0
+    assert numeric_accuracy("قند ١٢٦", "قند 126") == 1.0
+    assert numeric_accuracy("قند 126", "قند ١٢٦") == 1.0
+    assert numeric_accuracy("قند 126", "قند ١٢٧") == 0.0
+
+
 def test_negation_preservation_detects_a_flip():
     assert negation_preservation("علائم عفونت ندارد", "علائم عفونت ندارد") == 1.0
     assert negation_preservation("علائم عفونت ندارد", "علائم عفونت دارد") == 0.0
@@ -193,6 +200,7 @@ def test_declared_expected_rewrites_match_the_deterministic_layer():
         ("14:30", "14:300"),
         ("2024-01-05", "2024-01-055"),
         ("98", "98.5"),
+        ("۱۲", "۱۲۳"),
     ],
 )
 def test_numeric_accuracy_rejects_a_number_embedded_in_a_longer_one(reference, hypothesis):
@@ -205,6 +213,8 @@ def test_numeric_accuracy_rejects_a_number_embedded_in_a_longer_one(reference, h
         ("120/80 mmHg", "BP 120/80 mmHg."),          # sentence punctuation is not an extension
         ("5-10 mg", "دوز 5-10 mg, سپس"),             # neither is a comma
         ("7.2 درصد", "HbA1c 7.2 درصد"),
+        ("7.2", "HbA1c 7.2."),                       # decimal value before a full stop
+        ("7.2", "HbA1c 7.2, سپس ادامه داد"),          # decimal value before a comma
         ("120/80 mmHg", "فشار خون 120/80 mmHg و ضربان 72"),
     ],
 )

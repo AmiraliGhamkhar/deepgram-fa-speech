@@ -29,6 +29,11 @@ log = logging.getLogger("medical_stt.host_client")
 #: Deepgram session token.
 SESSION_PATH = "/v1/session"
 
+#: A session grant is a small JSON object. Bound the response even if a
+#: broken proxy or host streams an unexpectedly large body.
+MAX_HOST_RESPONSE_BYTES = 64 * 1024
+
+
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
     """Refuse every redirect instead of following it.
 
@@ -59,6 +64,10 @@ _OPENER_FACTORY = urllib.request.build_opener(
 
 class HostProtocolError(RuntimeError):
     """The host replied with something we cannot use."""
+
+
+class HostResponseTooLarge(HostProtocolError):
+    """The session response exceeded the small protocol size limit."""
 
 
 @dataclass(frozen=True)
@@ -108,7 +117,10 @@ class HostSessionClient:
 
     def _default_open(self, request: urllib.request.Request, timeout: float) -> bytes:
         with _OPENER_FACTORY.open(request, timeout=timeout) as response:
-            return response.read()
+            raw = response.read(MAX_HOST_RESPONSE_BYTES + 1)
+        if len(raw) > MAX_HOST_RESPONSE_BYTES:
+            raise HostResponseTooLarge("host returned an oversized session response")
+        return raw
 
     def fetch_session(self, ttl_seconds: int = 30) -> HostSession:
         """Exchange the shared secret for a temporary session token.
@@ -145,6 +157,10 @@ class HostSessionClient:
 
         try:
             raw = self._open(request, self._timeout)
+        except HostResponseTooLarge:
+            raise ProviderError(
+                ErrorCategory.UNKNOWN, "host returned an oversized session response"
+            ) from None
         except HostProtocolError as exc:
             # A redirect was refused. The configured host is reported (not
             # the redirect target), and the credential never left for it.

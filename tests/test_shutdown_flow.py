@@ -542,3 +542,89 @@ def test_an_abandoned_sender_stops_consuming_the_shared_queue(monkeypatch):
     finally:
         provider.release_all()
         stt.request_stop()
+
+
+class _SessionTaggedProvider(STTProvider):
+    """Records which replacement session received each audio chunk."""
+
+    def __init__(self) -> None:
+        self.starts = 0
+        self.first_started = threading.Event()
+        self.first_release = threading.Event()
+        self.second_started = threading.Event()
+        self.second_release = threading.Event()
+        self.sent: list = []
+
+    def validate_config(self) -> None:
+        pass
+
+    def start(self, on_transcript: OnTranscript, on_error: OnError) -> None:
+        self.starts += 1
+        if self.starts == 1:
+            self.first_started.set()
+            self.first_release.wait(timeout=10.0)
+        else:
+            self.second_started.set()
+            self.second_release.wait(timeout=10.0)
+
+    def send_audio(self, chunk: bytes) -> None:
+        self.sent.append((self.starts, chunk))
+
+    def stop(self) -> None:
+        if self.starts == 1:
+            self.first_release.set()
+        else:
+            self.second_release.set()
+
+
+def test_audio_dequeued_by_an_old_sender_is_dropped_after_session_replacement(monkeypatch):
+    """A sender preempted just after get() must not use the replacement stream."""
+    provider = _SessionTaggedProvider()
+    stt, _backend = _build_session(provider, monkeypatch)
+    _fast_teardown(monkeypatch)
+    chunk_dequeued = threading.Event()
+    release_old_sender = threading.Event()
+    original_get = stt._audio_q.get
+
+    def pause_after_get(timeout=0.1):
+        chunk = original_get(timeout=timeout)
+        if chunk == b"old-audio" and not chunk_dequeued.is_set():
+            chunk_dequeued.set()
+            release_old_sender.wait(timeout=10.0)
+        return chunk
+
+    stt._audio_q.get = pause_after_get
+    first = threading.Thread(target=stt._run_session, daemon=True)
+    first.start()
+    second = None
+    try:
+        assert provider.first_started.wait(timeout=5.0)
+        assert stt._audio_q.put_nowait(b"old-audio") is True
+        assert chunk_dequeued.wait(timeout=5.0), "session 1 sender never dequeued its audio"
+
+        stt._stop.set()
+        first.join(timeout=5.0)
+        assert not first.is_alive(), "session 1 teardown blocked on the stale sender"
+
+        second = threading.Thread(target=stt._run_session, daemon=True)
+        second.start()
+        assert provider.second_started.wait(timeout=5.0)
+        assert _wait_for(lambda: len(_threads_named("audio-sender")) == 2)
+        release_old_sender.set()
+        assert _wait_for(lambda: len(_threads_named("audio-sender")) == 1)
+        assert (2, b"old-audio") not in provider.sent, (
+            "audio dequeued by session 1 reached session 2's provider stream"
+        )
+
+        assert stt._audio_q.put_nowait(b"new-audio") is True
+        assert _wait_for(lambda: (2, b"new-audio") in provider.sent)
+        stt.request_stop()
+        second.join(timeout=5.0)
+        assert not second.is_alive()
+    finally:
+        release_old_sender.set()
+        provider.first_release.set()
+        provider.second_release.set()
+        stt.request_stop()
+        if second is not None:
+            second.join(timeout=5.0)

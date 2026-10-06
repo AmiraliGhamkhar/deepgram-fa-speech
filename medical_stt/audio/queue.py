@@ -123,13 +123,14 @@ class BoundedAudioQueue:
                 break
             drained += 1
             self._q.task_done()
-        if drained:
-            with self._lock:
+        with self._lock:
+            if drained:
                 self._drained_total += drained
-                # A session reset is a clean slate: the next session must
-                # not inherit the previous one's degraded streak.
-                self._consecutive_drops = 0
-                self._consecutive_sends = 0
+            # A session reset is a clean slate even when the sender consumed
+            # the last chunk before drain() ran. The next session must not
+            # inherit the previous one's degraded streak.
+            self._consecutive_drops = 0
+            self._consecutive_sends = 0
         return drained
 
     def qsize(self) -> int:

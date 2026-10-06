@@ -440,6 +440,12 @@ class LiveMedicalSTT:
                     if self._stop.is_set():
                         return
                     continue
+                if generation != self._session_generation:
+                    # A session can be replaced while this sender is blocked
+                    # in get(). Do not let a chunk it already dequeued cross
+                    # that boundary into the replacement provider stream.
+                    self._audio_q.task_done()
+                    return
                 try:
                     self.provider.send_audio(chunk)
                 except ProviderError as exc:

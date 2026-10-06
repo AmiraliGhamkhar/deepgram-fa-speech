@@ -75,6 +75,8 @@ class ControlWindow:
         self._ready = threading.Event()
         self._closed = False
         self._running = False
+        self._stopping = False
+        self._close_requested = False
         self._status: Optional["tk.Label"] = None
         self._detail: Optional["tk.Label"] = None
         self._toggle: Optional["tk.Button"] = None
@@ -100,10 +102,13 @@ class ControlWindow:
             self._thread.join()
 
     def close(self) -> None:
-        """Stop any session, then destroy the window."""
-        self._controller.stop()
-        self._running = False
+        """Stop any session before destroying the window, without blocking Tk."""
+        if self._closed or self._close_requested:
+            return
+        self._close_requested = True
+        self._stop()
 
+    def _destroy_window(self) -> None:
         def _destroy() -> None:
             if self._root is not None:
                 try:
@@ -114,6 +119,21 @@ class ControlWindow:
 
         self._ui(_destroy, force=True)
         self._closed = True
+
+    def _finish_stop(self, completed: bool) -> None:
+        """Update the UI after the controller's bounded join has returned."""
+        self._stopping = False
+        if completed or not self._controller.is_running:
+            self._running = False
+            self._set_button("شروع", _OK)
+            self._set_status("\u25cf آماده", _MUTED)
+            if self._close_requested:
+                self._destroy_window()
+            return
+
+        self._running = True
+        self._close_requested = False
+        self._set_status("\u25cf توقف کامل نشد", _REC, "جلسه هنوز در حال پایان است.")
 
     # -- Tk thread --------------------------------------------------------
 
@@ -256,6 +276,8 @@ class ControlWindow:
         self._ui(_)
 
     def _on_toggle(self) -> None:
+        if self._stopping:
+            return
         if self._running:
             self._stop()
         else:
@@ -279,11 +301,20 @@ class ControlWindow:
         threading.Thread(target=self._watch, name="control-watch", daemon=True).start()
 
     def _stop(self) -> None:
+        if self._stopping:
+            return
+        self._stopping = True
         self._set_status("\u25cf در حال توقف...", _MUTED)
-        self._controller.stop()
-        self._running = False
-        self._set_button("شروع", _OK)
-        self._set_status("\u25cf آماده", _MUTED)
+
+        def stop_controller() -> None:
+            try:
+                completed = self._controller.stop()
+            except Exception:  # noqa: BLE001 - shutdown status must reach the UI
+                log.exception("session controller stop raised")
+                completed = False
+            self._ui(lambda: self._finish_stop(completed))
+
+        threading.Thread(target=stop_controller, name="control-stop", daemon=True).start()
 
     def _watch(self) -> None:
         """Reflect a session that ended on its own (error, or clean exit)."""

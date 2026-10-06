@@ -180,8 +180,9 @@ set -a; . host/.env; set +a
 | `HOST_ALLOW_HTTP` | no | `0` | `1` serves plaintext. **Development only.** |
 
 The service **refuses to start** if `DEEPGRAM_API_KEY` is missing, or if
-`HOST_SHARED_SECRET` is set but shorter than 24 characters, or if
-`HOST_CLIENTS_FILE` contains a malformed entry.
+`HOST_CLIENTS_FILE` contains a malformed entry. When `HOST_CLIENTS_FILE` is
+unset (legacy mode), `HOST_SHARED_SECRET` must be at least 24 characters.
+When a registry is configured, `HOST_SHARED_SECRET` is ignored.
 
 ## Concurrency
 

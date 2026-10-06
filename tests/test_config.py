@@ -59,6 +59,23 @@ def test_http_is_allowed_for_localhost_development():
     assert validate_settings(_valid_settings(host_url="http://localhost:8443")) == []
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://operator:password@stt.example.com",
+        "https://stt.example.com/?token=do-not-log",
+        "https://stt.example.com/#do-not-log",
+        "https://stt.example.com?",
+        "https://stt.example.com#",
+    ],
+)
+def test_host_url_rejects_credentials_query_and_fragment_without_echoing_url(url):
+    errors = validate_settings(_valid_settings(host_url=url))
+    assert any("host_url" in error for error in errors)
+    assert all(url not in error for error in errors), "invalid URL must not be echoed into logs"
+    assert all("password" not in error and "do-not-log" not in error for error in errors)
+
+
 def test_invalid_session_ttl_is_rejected():
     errors = validate_settings(_valid_settings(session_ttl_seconds=100_000))
     assert any("session_ttl_seconds" in e for e in errors)

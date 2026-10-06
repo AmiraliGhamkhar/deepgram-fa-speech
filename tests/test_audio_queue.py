@@ -71,3 +71,22 @@ def test_drain_accumulates_across_sessions():
     q.put_nowait(b"c")
     q.drain()
     assert q.stats().drained_total == 3
+
+
+def test_empty_drain_resets_a_degraded_streak_after_sender_consumes_queue():
+    q = BoundedAudioQueue(maxsize=1)
+    assert q.put_nowait(b"queued") is True
+    for _ in range(3):
+        assert q.put_nowait(b"dropped") is False
+    assert q.stats().degraded is True
+
+    # The sender can consume the only queued chunk before the session reset.
+    assert q.get(timeout=0.1) == b"queued"
+    q.task_done()
+    assert q.qsize() == 0
+
+    assert q.drain() == 0
+    stats = q.stats()
+    assert stats.consecutive_drops == 0
+    assert stats.degraded is False
+    assert stats.dropped_total == 3  # cumulative diagnostics remain intact
