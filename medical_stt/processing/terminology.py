@@ -128,10 +128,31 @@ class TerminologyEngine:
 
     def apply(self, text: str) -> str:
         """Rewrite `text`, protecting numeric expressions and negation
-        markers from being touched by any rule."""
+        markers from being touched by any rule.
+
+        Word boundaries are required as well, and this is the single most
+        important safety property in the pipeline. Aho-Corasick matches
+        substrings, so without it a rule for a whole word fires inside a
+        longer one. The shipped rule set contains `مش` -> `Mesh`, `پا` ->
+        `Foot`, `دست` -> `Hand`, `امی` -> `MI`, `دما` -> `T` and `تنفس` ->
+        `RR`, and Persian builds words by attachment, so substring matching
+        turned ordinary dictation into this:
+
+            مشکل تنفسی   ->  Meshکل RRی        ("respiratory problem")
+            پاسخ دهید    ->  Footسخ دهید      ("please answer")
+            امید به زندگی ->  MIد به زندگی    ("life expectancy")
+            دستگاه تنفس  ->  Handگاه RR        ("ventilator")
+
+        The third one is the dangerous shape: `MI` (myocardial infarction)
+        injected into a sentence about life expectancy, then pasted into the
+        clinician's record. Preserving the spoken word is always safe;
+        rewriting part of one never is.
+        """
         if not text:
             return text
         protected: List[Tuple[int, int]] = []
         protected.extend((s.start, s.end) for s in find_numeric_spans(text))
         protected.extend(find_negation_spans(text))
-        return self._fst.apply(text, protected_ranges=protected)
+        return self._fst.apply(
+            text, protected_ranges=protected, require_word_boundaries=True
+        )
