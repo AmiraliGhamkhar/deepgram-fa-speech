@@ -175,3 +175,81 @@ def test_declared_expected_rewrites_match_the_deterministic_layer():
     assert missing == []
     assert score.mean_wer == 0.0
     assert score.mean_cer == 0.0
+
+
+# -- boundary-aware containment -------------------------------------------
+#
+# Every recall/accuracy metric used `needle in haystack`. That credits a
+# truncated digit and an abbreviation swallowed by a longer Latin word as a
+# perfect hit -- the exact false positives a clinical benchmark exists to
+# catch, and the reason the numbers in a report could not be trusted.
+
+
+@pytest.mark.parametrize(
+    "reference,hypothesis",
+    [
+        ("120/8", "120/80 mmHg"),      # a dropped digit must not be found in a longer one
+        ("7.2", "7.25"),               # HbA1c 7.2 versus 7.25 is a different clinical value
+        ("14:30", "14:300"),
+        ("2024-01-05", "2024-01-055"),
+        ("98", "98.5"),
+    ],
+)
+def test_numeric_accuracy_rejects_a_number_embedded_in_a_longer_one(reference, hypothesis):
+    assert numeric_accuracy(reference, hypothesis) == 0.0
+
+
+@pytest.mark.parametrize(
+    "reference,hypothesis",
+    [
+        ("120/80 mmHg", "BP 120/80 mmHg."),          # sentence punctuation is not an extension
+        ("5-10 mg", "دوز 5-10 mg, سپس"),             # neither is a comma
+        ("7.2 درصد", "HbA1c 7.2 درصد"),
+        ("120/80 mmHg", "فشار خون 120/80 mmHg و ضربان 72"),
+    ],
+)
+def test_numeric_accuracy_still_accepts_a_whole_expression_in_context(reference, hypothesis):
+    """The boundary rule must not manufacture false negatives."""
+    assert numeric_accuracy(reference, hypothesis) == 1.0
+
+
+def test_numeric_accuracy_finds_the_whole_expression_after_a_truncated_mention():
+    """Every occurrence is tested, not just the first."""
+    assert numeric_accuracy("120/80", "شنیدم 120/8 یعنی 120/80") == 1.0
+
+
+def test_english_term_recall_does_not_credit_an_abbreviation_inside_a_word():
+    # "IV" is a substring of "DRIVE"; the speaker's IV order was not heard.
+    assert english_term_recall("give IV push", "give DRIVE fast") == pytest.approx(1 / 3)
+
+
+def test_english_term_recall_does_not_credit_a_shorter_form_of_a_token():
+    assert english_term_recall("SpO2 88 درصد", "SpO22 88 درصد") == 0.0
+
+
+def test_english_term_recall_accepts_a_token_next_to_punctuation():
+    assert english_term_recall("SpO2 88 درصد", "نتیجه: SpO2=88 درصد.") == 1.0
+
+
+def test_medical_term_recall_does_not_credit_a_term_inside_a_longer_word():
+    # "MI" (myocardial infarction) is a substring of "ADMINISTRATION".
+    assert medical_term_recall(
+        "درد قفسه سینه و MI", "درد قفسه سینه و ADMINISTRATION", ["MI"]
+    ) == 0.0
+
+
+def test_medical_term_recall_ignores_a_term_only_embedded_in_the_reference():
+    """The denominator counts terms the speaker actually said.
+
+    A term list entry that appears only inside a longer reference word was
+    being treated as spoken, which both inflated the denominator and then
+    credited the hypothesis for a word it never produced.
+    """
+    assert medical_term_recall("دارو در حال ADMINISTRATION است", "دارو در حال ADMINISTRATION است", ["MI"]) == 1.0
+
+
+def test_medical_term_recall_persian_terms_are_unchanged():
+    """The boundary rule is ASCII-only, so Persian matching is untouched."""
+    reference = "بیمار در ICU با SpO2 96 درصد بستری شد"
+    assert medical_term_recall(reference, reference, ["بستری", "ICU"]) == 1.0
+    assert medical_term_recall(reference, "بیمار در بخش بستری شد", ["بستری", "ICU"]) == 0.5
