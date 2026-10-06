@@ -269,3 +269,134 @@ def test_malformed_baseline_is_an_error(tmp_path):
     result = run(SCAN, "--baseline", str(bad))
     assert result.returncode == 2
     assert "malformed" in result.stderr
+
+
+# -- the project's own credentials ----------------------------------------
+#
+# `host/provision.py` mints 256-bit `secrets.token_urlsafe(32)` client secrets
+# and HOST_SHARED_SECRET / HOST_METRICS_ADMIN_TOKEN are operator-chosen
+# strings. None has a recognizable prefix, so no key-shaped pattern can match
+# one: before `host_credential_assignment` existed, a pasted `.env`, an
+# `export` line in a README or a support-thread one-liner was invisible to the
+# project's own history gate.
+#
+# The values below are assembled at runtime so this file is not itself a
+# finding -- `test_this_file_is_not_a_scan_finding_itself` checks that.
+
+FAKE_HOST_SECRET = "T0kV9xQ2" * 6  # 48 chars of [A-Za-z0-9]; not a real secret
+FAKE_ADMIN_TOKEN = "mZ7pL4wR" * 6
+
+
+@pytest.mark.parametrize("name", ["HOST_SHARED_SECRET", "MEDICALSTT_HOST_SECRET"])
+@pytest.mark.parametrize("separator", ["=", ": ", '="', "='"])
+def test_scanner_finds_a_leaked_host_credential(tmp_path, name, separator):
+    repo = make_repo(tmp_path, leak=False)
+    closing = '"' if separator.endswith('"') else ("'" if separator.endswith("'") else "")
+    (repo / ".env").write_text(
+        f"{name}{separator}{FAKE_HOST_SECRET}{closing}\n", encoding="utf-8"
+    )
+    result = run(SCAN, "--root", str(repo))
+    assert result.returncode == 1, result.stdout
+    assert "host_credential_assignment" in result.stdout
+    assert FAKE_HOST_SECRET not in result.stdout, "the value must never be printed"
+    assert "redacted" in result.stdout
+
+
+def test_scanner_finds_a_leaked_metrics_admin_token_in_a_readme(tmp_path):
+    """Documentation is where these leak: an `export` line in a HOWTO."""
+    repo = make_repo(tmp_path, leak=False)
+    (repo / "README.md").write_text(
+        "# Setup\n\n```bash\n"
+        f"export HOST_METRICS_ADMIN_TOKEN={FAKE_ADMIN_TOKEN}\n```\n",
+        encoding="utf-8",
+    )
+    result = run(SCAN, "--root", str(repo))
+    assert result.returncode == 1, result.stdout
+    assert "README.md" in result.stdout
+    assert FAKE_ADMIN_TOKEN not in result.stdout
+
+
+def test_scanner_finds_a_host_credential_in_history(tmp_path):
+    repo = make_repo(tmp_path, leak=False)
+    env = {
+        **__import__("os").environ,
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@example.test",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@example.test",
+    }
+    (repo / "deploy.sh").write_text(
+        f"HOST_SHARED_SECRET={FAKE_HOST_SECRET}\n", encoding="utf-8"
+    )
+    subprocess.run(["git", "add", "-A"], cwd=repo, env=env, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "oops"], cwd=repo, env=env, check=True)
+    (repo / "deploy.sh").unlink()
+    subprocess.run(["git", "add", "-A"], cwd=repo, env=env, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "remove"], cwd=repo, env=env, check=True)
+
+    assert run(SCAN, "--root", str(repo)).returncode == 0, "the tree is clean again"
+    result = run(SCAN, "--history", "--root", str(repo))
+    assert result.returncode == 1, "removing a file does not remove it from history"
+    assert "host_credential_assignment" in result.stdout
+    assert FAKE_HOST_SECRET not in result.stdout
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "HOST_SHARED_SECRET=your-secret-here",
+        "HOST_SHARED_SECRET=<24+ characters>",
+        "HOST_SHARED_SECRET=${HOST_SHARED_SECRET}",
+        "HOST_SHARED_SECRET=$(openssl rand -base64 32)",
+        "HOST_SHARED_SECRET=changeme",
+        "HOST_SHARED_SECRET=",
+        "HOST_SHARED_SECRET=not_real_at_all_no_really",
+        "# HOST_SHARED_SECRET is required",
+    ],
+)
+def test_scanner_still_ignores_documented_host_credential_placeholders(tmp_path, line):
+    """The new pattern must not turn every mention of the variable into a finding.
+
+    A scanner that cries wolf on `.env.example` and the README gets disabled,
+    which is worse than the gap it was added to close.
+    """
+    repo = make_repo(tmp_path, leak=False)
+    (repo / ".env.example").write_text(line + "\n", encoding="utf-8")
+    (repo / "docs.md").write_text(line + "\n", encoding="utf-8")
+    result = run(SCAN, "--root", str(repo))
+    assert result.returncode == 0, result.stdout
+
+
+def test_one_leaked_secret_is_one_finding_whatever_variable_holds_it():
+    """The fingerprint identifies the credential, not the name or the file.
+
+    `Pattern.group` exists for this: fingerprinting the whole match would
+    report the same leaked secret twice when it appears as HOST_SHARED_SECRET
+    in one file and MEDICALSTT_HOST_SECRET in another, and the baseline
+    (which is keyed on `pattern fingerprint`) could not accept it as one
+    incident.
+    """
+    module = _load_scanner()
+    first = module.scan_text(f"HOST_SHARED_SECRET={FAKE_HOST_SECRET}", "a.env", "tree")
+    second = module.scan_text(
+        f"MEDICALSTT_HOST_SECRET: {FAKE_HOST_SECRET}", "docs/b.md", "tree"
+    )
+    assert len(first) == 1 and len(second) == 1
+    assert first[0].key == second[0].key
+    assert first[0].fingerprint == module.fingerprint(FAKE_HOST_SECRET)
+
+
+def test_deepgram_legacy_fingerprint_is_unchanged_by_the_group_field():
+    """The tracked incident in secret_scan_baseline.txt is keyed on a
+    fingerprint computed over the *whole* `deepgram_api_key=<hex>` match.
+
+    `deepgram_key_legacy` therefore stays at group 0 with its special case,
+    even though a value group would read more cleanly: re-pointing it would
+    silently un-track the SECURITY.md leak.
+    """
+    module = _load_scanner()
+    pattern = next(p for p in module.PATTERNS if p.name == "deepgram_key_legacy")
+    assert pattern.group == 0
+    findings = module.scan_text(f"DEEPGRAM_API_KEY={FAKE_KEY}", ".env", "tree")
+    assert len(findings) == 1
+    assert findings[0].fingerprint == module.fingerprint(f"DEEPGRAM_API_KEY={FAKE_KEY}")
