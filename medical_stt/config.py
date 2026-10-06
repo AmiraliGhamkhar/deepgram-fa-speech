@@ -95,6 +95,16 @@ def _valid_client_id(value: str) -> bool:
     return all(ch.isalnum() or ch in "-_." for ch in value)
 
 
+def _contains_non_ascii_letter(text: str) -> bool:
+    """True if `text` contains a Persian/Arabic (non-ASCII) letter.
+
+    Persian and Arabic letters are non-ASCII; Latin/English letters and
+    ASCII units are ASCII. Used to tell a real provider-side spelling fix
+    from one that would smuggle a Latin/English term into the transcript.
+    """
+    return any(not ch.isascii() and ch.isalpha() for ch in text)
+
+
 def keyterm_parameter(model: str) -> str:
     """Return the recognition-assistance parameter for `model`.
 
@@ -567,6 +577,21 @@ def load_asr_replacements() -> List[str]:
         # remain protected locally during all terminology operations.
         if any(ch.isdigit() for ch in source + target) or ":" in source + target:
             raise ConfigError("ASR replacements cannot contain digits or ':'")
+        # A fix for a Persian/Arabic *spelling* must not introduce a
+        # Latin/English term or a unit in the target: those are owned by
+        # data/corrections.yaml, where `requires_context`/`dangerous`
+        # metadata and human review apply. A provider-side `replace` would
+        # bypass that review and rewrite the transcript verbatim. ASCII-only
+        # placeholder pairs (purely alphanumeric, no non-ASCII source) stay
+        # allowed so tooling/tests are not needlessly constrained.
+        if _contains_non_ascii_letter(source) and any(
+            (ch.isascii() and ch.isalpha()) or ch == "%" for ch in target
+        ):
+            raise ConfigError(
+                f"ASR replacement {source!r} -> {target!r} introduces a "
+                "Latin/English term or unit; those belong in "
+                "data/corrections.yaml where the category/context guards apply"
+            )
         if source in seen and seen[source] != target:
             raise ConfigError(
                 f"ASR replacement conflict: {source!r} maps to both {seen[source]!r} and {target!r}"
