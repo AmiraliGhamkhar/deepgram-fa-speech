@@ -295,3 +295,250 @@ def test_restart_after_a_provider_error_is_clean(monkeypatch):
     session.join(timeout=10.0)
     assert not session.is_alive()
     assert stt._errors == []
+
+
+# -- abandoned threads from a superseded session ---------------------------
+#
+# One `LiveMedicalSTT` is reused across reconnects, so `_stop`, `_errors` and
+# the audio queue outlive a single session while the provider and sender
+# threads do not. A thread that outlives its join timeout (a wedged provider
+# socket, a blocked send) used to keep writing into that shared state -- most
+# damagingly by setting `_stop`, which ended the *next* session immediately
+# and made `run()` report a clean exit, so dictation stopped with no error.
+# Every callback now carries the session generation it was created with.
+
+
+def _threads_named(name: str) -> list:
+    return [thread for thread in threading.enumerate()
+            if thread.name == name and thread.is_alive()]
+
+
+def _fast_teardown(monkeypatch) -> None:
+    """Shorten the join timeouts so a wedged thread is abandoned quickly."""
+    from medical_stt import app as app_module
+
+    monkeypatch.setattr(app_module, "SENDER_JOIN_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(app_module, "PROVIDER_JOIN_TIMEOUT_SECONDS", 0.2)
+
+
+class WedgedStartProvider(STTProvider):
+    """Session 1's `start()` ignores `stop()` and outlives the join."""
+
+    def __init__(self) -> None:
+        self.starts = 0
+        self.release_wedge = threading.Event()
+        self.wedge_returned = threading.Event()
+        self.second_started = threading.Event()
+        self.second_release = threading.Event()
+        self.second_stopped = False
+
+    def validate_config(self) -> None:
+        pass
+
+    def start(self, on_transcript: OnTranscript, on_error: OnError) -> None:
+        self.starts += 1
+        if self.starts == 1:
+            self.release_wedge.wait(timeout=15.0)
+            self.wedge_returned.set()
+            return
+        self.second_started.set()
+        self.second_release.wait(timeout=15.0)
+
+    def send_audio(self, chunk: bytes) -> None:
+        pass
+
+    def stop(self) -> None:
+        # Session 1: a wedged socket ignores the close request entirely.
+        if self.starts >= 2:
+            self.second_stopped = True
+            self.second_release.set()
+            self.release_wedge.set()
+
+
+class CapturingProvider(STTProvider):
+    """Blocks in `start()` and records the callbacks it was handed."""
+
+    def __init__(self) -> None:
+        self.callbacks: list = []
+        self._gates: list = []
+
+    def validate_config(self) -> None:
+        pass
+
+    def start(self, on_transcript: OnTranscript, on_error: OnError) -> None:
+        gate = threading.Event()
+        self._gates.append(gate)
+        self.callbacks.append((on_transcript, on_error))
+        gate.wait(timeout=15.0)
+
+    def send_audio(self, chunk: bytes) -> None:
+        pass
+
+    def stop(self) -> None:
+        # Only the second (and later) sessions are stoppable: session 1 stays
+        # wedged so its thread is genuinely abandoned and reports late.
+        if len(self._gates) >= 2:
+            self._gates[-1].set()
+
+    def release_all(self) -> None:
+        for gate in self._gates:
+            gate.set()
+
+
+class WedgedSendProvider(STTProvider):
+    """Session 1's `send_audio()` blocks past the sender join timeout."""
+
+    def __init__(self) -> None:
+        self.starts = 0
+        self.second_started = threading.Event()
+        self.send_entered = threading.Event()
+        self.release_send = threading.Event()
+        self.sent: list = []
+        self._gates: list = []
+
+    def validate_config(self) -> None:
+        pass
+
+    def start(self, on_transcript: OnTranscript, on_error: OnError) -> None:
+        self.starts += 1
+        gate = threading.Event()
+        self._gates.append(gate)
+        if self.starts >= 2:
+            self.second_started.set()
+        gate.wait(timeout=15.0)
+
+    def send_audio(self, chunk: bytes) -> None:
+        self.send_entered.set()
+        self.release_send.wait(timeout=15.0)
+        self.sent.append(chunk)
+
+    def stop(self) -> None:
+        # Releases the current session's start() -- so the provider thread
+        # exits cleanly and only the *sender* is abandoned -- but not the
+        # blocked send, which is what the sender join gives up on.
+        if self._gates:
+            self._gates[-1].set()
+
+    def release_all(self) -> None:
+        self.release_send.set()
+        for gate in self._gates:
+            gate.set()
+
+
+def test_an_abandoned_provider_thread_cannot_stop_the_next_session(monkeypatch):
+    provider = WedgedStartProvider()
+    stt, _backend = _build_session(provider, monkeypatch)
+    _fast_teardown(monkeypatch)
+
+    first = threading.Thread(target=stt._run_session, daemon=True)
+    first.start()
+    try:
+        assert _wait_for(lambda: provider.starts == 1), "session 1 never started"
+
+        # Tear session 1 down while its provider thread is still wedged.
+        stt._stop.set()
+        first.join(timeout=10.0)
+        assert not first.is_alive(), "teardown blocked on a wedged provider thread"
+
+        second = threading.Thread(target=stt._run_session, daemon=True)
+        second.start()
+        assert provider.second_started.wait(timeout=5.0), "the next session never started"
+
+        # The abandoned thread now returns. Before the generation guard this
+        # set `_stop`, ending session 2 within one poll interval.
+        provider.release_wedge.set()
+        assert provider.wedge_returned.wait(timeout=5.0)
+        time.sleep(0.4)  # several times the 0.1s the session loop polls `_stop`
+
+        assert not stt._stop.is_set(), "an abandoned thread stopped the current session"
+        assert provider.second_stopped is False, "the current session was torn down"
+        assert second.is_alive(), "the current session ended"
+
+        stt.request_stop()
+        second.join(timeout=10.0)
+        assert not second.is_alive()
+    finally:
+        provider.release_wedge.set()
+        provider.second_release.set()
+        stt.request_stop()
+
+
+def test_transcript_and_error_from_a_superseded_session_are_ignored(monkeypatch):
+    provider = CapturingProvider()
+    stt, backend = _build_session(provider, monkeypatch)
+    _fast_teardown(monkeypatch)
+
+    first = threading.Thread(target=stt._run_session, daemon=True)
+    first.start()
+    try:
+        assert _wait_for(lambda: len(provider.callbacks) == 1)
+        stale_transcript, stale_error = provider.callbacks[0]
+
+        stt._stop.set()
+        first.join(timeout=10.0)
+        assert not first.is_alive()
+
+        second = threading.Thread(target=stt._run_session, daemon=True)
+        second.start()
+        assert _wait_for(lambda: len(provider.callbacks) == 2)
+
+        # Session 1's abandoned thread reports late: its transcript belongs to
+        # audio the user has already moved on from, and its error describes a
+        # socket the current session is not using.
+        stale_transcript(TranscriptEvent("دوز قبلی 500 mg", is_final=True, speech_final=True))
+        stale_error(ProviderError(ErrorCategory.NETWORK, "socket from the previous session"))
+        time.sleep(0.3)
+
+        assert backend.pasted == [], "a superseded session injected text into the current one"
+        assert stt._errors == [], "a superseded session's error was attributed to the current one"
+        assert not stt._stop.is_set(), "a superseded session stopped the current one"
+        assert second.is_alive()
+
+        stt.request_stop()
+        second.join(timeout=10.0)
+        assert not second.is_alive()
+    finally:
+        provider.release_all()
+        stt.request_stop()
+
+
+def test_an_abandoned_sender_stops_consuming_the_shared_queue(monkeypatch):
+    """No terminated session may leave a thread draining the live queue."""
+    provider = WedgedSendProvider()
+    stt, _backend = _build_session(provider, monkeypatch)
+    _fast_teardown(monkeypatch)
+
+    first = threading.Thread(target=stt._run_session, daemon=True)
+    first.start()
+    try:
+        assert _wait_for(lambda: provider.starts == 1), "session 1 never started"
+        assert stt._audio_q.put_nowait(b"\x01") is True  # noqa: SLF001 - test hook
+        assert provider.send_entered.wait(timeout=5.0), "the sender never reached send_audio"
+
+        stt._stop.set()
+        first.join(timeout=10.0)
+        assert not first.is_alive(), "teardown blocked on a wedged sender"
+        assert len(_threads_named("audio-sender")) == 1, "the wedged sender is still alive"
+
+        # Session 2 clears `_stop`, so without the generation guard the
+        # abandoned sender would wake up and start draining session 2's queue.
+        second = threading.Thread(target=stt._run_session, daemon=True)
+        second.start()
+        assert provider.second_started.wait(timeout=5.0)
+        assert _wait_for(lambda: len(_threads_named("audio-sender")) == 2)
+
+        assert second.is_alive(), "session 2 must still be running"
+        assert not stt._stop.is_set(), "test precondition: session 2 cleared the stop flag"
+
+        provider.release_send.set()
+        assert _wait_for(lambda: len(_threads_named("audio-sender")) == 1), (
+            "a sender left over from session 1 kept consuming the shared audio queue"
+        )
+        assert provider.sent == [b"\x01"]
+
+        stt.request_stop()
+        second.join(timeout=10.0)
+        assert not second.is_alive()
+    finally:
+        provider.release_all()
+        stt.request_stop()

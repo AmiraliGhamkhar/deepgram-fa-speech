@@ -49,6 +49,17 @@ from .ui import TranscriptOverlay
 
 log = logging.getLogger("medical_stt.app")
 
+#: How long shutdown waits for the audio sender to drain the queue before
+#: giving up on whatever is left (discarded, and reported in the log).
+SENDER_JOIN_TIMEOUT_SECONDS = 2.0
+
+#: How long shutdown waits for the provider thread to return after
+#: `provider.stop()`. A wedged provider socket outlives this; the thread is
+#: then abandoned rather than holding the user's Stop button open. Abandoned
+#: threads carry an older `_session_generation`, so their callbacks cannot
+#: reach the session that follows them.
+PROVIDER_JOIN_TIMEOUT_SECONDS = 4.0
+
 
 def load_sounddevice() -> Any:
     try:
@@ -149,6 +160,15 @@ class LiveMedicalSTT:
         self._shutdown = threading.Event()
         self._errors: List[ProviderError] = []
         self._reconnect_count = 0
+        #: Identifies the session currently owned by this instance. One
+        #: `LiveMedicalSTT` is reused across reconnects, so its provider and
+        #: sender threads are per-session while `_stop`, `_errors` and the
+        #: audio queue are not. A thread from session N that outlives its
+        #: join timeout (a wedged socket) would otherwise stop session N+1,
+        #: append an error to it, or drain its audio queue. Every
+        #: session-scoped callback carries the generation it was created
+        #: with and is ignored once `_session_generation` moves on.
+        self._session_generation = 0
         #: Set by the real-time callback, drained by `_report_audio_health`
         #: on the sender thread (the callback must never log).
         self._audio_drop_pending = threading.Event()
@@ -194,7 +214,21 @@ class LiveMedicalSTT:
 
     # -- transcript handling --------------------------------------------
 
-    def _on_transcript(self, event: TranscriptEvent) -> None:
+    def _is_current_session(self, generation: Optional[int]) -> bool:
+        """True when `generation` still refers to the session being run.
+
+        `None` means "no generation supplied" (a direct call from a test or
+        from the current session's own code path) and is always current, so
+        the guard never changes single-session behaviour.
+        """
+        return generation is None or generation == self._session_generation
+
+    def _on_transcript(self, event: TranscriptEvent, generation: Optional[int] = None) -> None:
+        if not self._is_current_session(generation):
+            # A transcript from a superseded session must never be injected
+            # into the one the user is dictating into now.
+            log.debug("dropped a transcript from a superseded session")
+            return
         if not event.is_final:
             self.latency.mark_first_interim()
             self.overlay.set_partial(normalize(event.text))
@@ -260,7 +294,17 @@ class LiveMedicalSTT:
         time.sleep(0.08)
         self.overlay.set_idle()
 
-    def _on_provider_error(self, error: ProviderError) -> None:
+    def _on_provider_error(self, error: ProviderError, generation: Optional[int] = None) -> None:
+        if not self._is_current_session(generation):
+            # Belongs to a session that was already torn down: reporting it
+            # would make the *current* session fail for the previous one's
+            # reason (and `run()` would then back off or give up on a
+            # healthy connection).
+            log.debug(
+                "dropped a provider error from a superseded session: category=%s",
+                error.category.value,
+            )
+            return
         log.error("provider error: category=%s message=%s", error.category.value, str(error))
         self._errors.append(error)
         self._stop.set()
@@ -333,22 +377,42 @@ class LiveMedicalSTT:
 
         self.provider.validate_config()
 
+        # Claim this session. Any thread still running for a previous one is
+        # now stale and its callbacks are ignored (see `_is_current_session`).
+        self._session_generation += 1
+        generation = self._session_generation
+
         # A stop requested before the session started must not be cleared
         # here, otherwise it would be lost.
         if not self._shutdown.is_set():
             self._stop.clear()
         self._errors.clear()
-        self._utterance.reset()
         self._reset_session_state()
         self.latency.mark_utterance_start()
 
+        def on_transcript(event: TranscriptEvent) -> None:
+            self._on_transcript(event, generation)
+
+        def on_provider_error(error: ProviderError) -> None:
+            self._on_provider_error(error, generation)
+
         def run_provider() -> None:
             try:
-                self.provider.start(self._on_transcript, self._on_provider_error)
+                self.provider.start(on_transcript, on_provider_error)
             except ProviderError as exc:
-                self._on_provider_error(exc)
+                on_provider_error(exc)
             finally:
-                self._stop.set()
+                if generation == self._session_generation:
+                    self._stop.set()
+                else:
+                    # The join below timed out and this thread outlived the
+                    # session it belonged to. Stopping `_stop` here would end
+                    # the *next* session, which `run()` would then report as a
+                    # clean exit -- the dictation would stop with no error.
+                    log.warning(
+                        "a provider thread from a previous session outlived its "
+                        "join and is being abandoned; the current session is unaffected"
+                    )
 
         provider_thread = threading.Thread(target=run_provider, daemon=True, name="stt-provider")
         provider_thread.start()
@@ -364,6 +428,11 @@ class LiveMedicalSTT:
             no captured audio can be dropped between Stop and Finalize.
             """
             while True:
+                if generation != self._session_generation:
+                    # Superseded: the audio queue belongs to a newer session
+                    # now, so draining it here would feed one session's audio
+                    # into another's connection.
+                    return
                 try:
                     chunk = self._audio_q.get(timeout=0.1)
                 except queue.Empty:
@@ -376,7 +445,7 @@ class LiveMedicalSTT:
                 except ProviderError as exc:
                     # The connection is unusable: report once and stop
                     # rather than reporting the same failure per chunk.
-                    self._on_provider_error(exc)
+                    on_provider_error(exc)
                     self._audio_q.task_done()
                     return
                 self._audio_q.task_done()
@@ -420,17 +489,32 @@ class LiveMedicalSTT:
             # exception skip the rest would leave threads, the queue, or
             # the injector in a stale state for the next Start.
             self._stop.set()
-            sender.join(timeout=2.0)
-            if sender.is_alive():  # pragma: no cover - only on a wedged socket
-                log.warning("audio sender did not stop within 2s; queued audio is discarded")
+            sender.join(timeout=SENDER_JOIN_TIMEOUT_SECONDS)
+            if sender.is_alive():
+                log.warning(
+                    "audio sender did not stop within %.1fs; queued audio is discarded",
+                    SENDER_JOIN_TIMEOUT_SECONDS,
+                )
             try:
                 self.provider.stop()
             except Exception as exc:  # noqa: BLE001 - shutdown must continue
                 log.warning("provider stop raised during shutdown: %s", exc)
             try:
-                provider_thread.join(timeout=4.0)
+                provider_thread.join(timeout=PROVIDER_JOIN_TIMEOUT_SECONDS)
             except RuntimeError as exc:  # pragma: no cover - thread already gone
                 log.debug("provider thread join skipped: %s", exc)
+            if provider_thread.is_alive():
+                # Reported, not swallowed: this thread is now abandoned and
+                # outlives the session. Its callbacks are ignored from here on
+                # (they carry an older `_session_generation`), so it can no
+                # longer corrupt the next session -- but a leaked thread must
+                # be visible in the log rather than discovered as a mystery
+                # growth in thread count.
+                log.warning(
+                    "provider thread did not stop within %.1fs and is being "
+                    "abandoned (a wedged provider socket); it will be ignored",
+                    PROVIDER_JOIN_TIMEOUT_SECONDS,
+                )
             self._flush_pending_utterance()
             self._reset_session_state()
 
