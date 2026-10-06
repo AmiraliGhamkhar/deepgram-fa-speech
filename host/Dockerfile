@@ -6,8 +6,11 @@
 #
 # Sized for 50 concurrent streaming sessions: the host only mints short-lived
 # tokens, so it needs no audio stack, no Deepgram SDK and no database. Peak
-# memory is dominated by the HTTP connection pool (default 100 keepalive
-# connections), which is why the default pool is sized for the target.
+# memory is dominated by the HTTP connection pool -- 100 connections by
+# default, 20 of them kept warm (HOST_GRANT_MAX_CONNECTIONS /
+# HOST_GRANT_MAX_KEEPALIVE_CONNECTIONS), which is what the target needs: 50
+# clinicians starting at once, without holding 100 sockets open to a service
+# that answers one small POST per session.
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -18,11 +21,14 @@ WORKDIR /srv
 
 COPY host/requirements.txt ./host/requirements.txt
 RUN pip install --no-cache-dir -r host/requirements.txt \
-    && useradd --system --no-create-home --create-home --uid 10001 stt
+    && useradd --system --create-home --uid 10001 stt
 
 COPY host/ ./host/
 
-# Run as an unprivileged user; the service needs no write access.
+# Run as an unprivileged user; the service needs no write access beyond its
+# own home directory, which --create-home makes (it used to be passed together
+# with --no-create-home, where the last flag won -- the behaviour below is
+# unchanged, only the contradiction is gone).
 USER stt
 
 EXPOSE 8443
