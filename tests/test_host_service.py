@@ -398,3 +398,39 @@ def test_grant_success_through_the_default_transport(monkeypatch):
         _FakeResponse(status_code=200, payload={"access_token": "issued", "expires_in": 30}),
     )
     assert core.grant_session(_settings(), 30) == ("issued", 30)
+
+
+# -- failed-authentication attribution -----------------------------------
+
+
+def test_auth_failure_key_prefers_the_peer_address():
+    assert core.auth_failure_key("203.0.113.9", "doctor-01") == "auth:203.0.113.9"
+    assert core.auth_failure_key("::1", None) == "auth:::1"
+
+
+def test_auth_failure_key_falls_back_to_a_valid_client_id():
+    """A WSGI environ can carry no peer address at all."""
+    assert core.auth_failure_key(None, "doctor-01") == "auth-id:doctor-01"
+    assert core.auth_failure_key("", "  doctor-02  ") == "auth-id:doctor-02"
+
+
+def test_auth_failure_key_is_none_when_nothing_can_be_attributed():
+    """None means "charge no lockout", never "share one global bucket".
+
+    A budget shared by every unattributable request turns the brute-force
+    control into a denial of service: 20 failures from anywhere would lock
+    every legitimate clinician out for a whole window.
+    """
+    assert core.auth_failure_key(None, None) is None
+    assert core.auth_failure_key("", "") is None
+    # An unusable client id must not become a key either: it is attacker
+    # chosen, and an over-long or control-character id would also end up in
+    # the log line.
+    assert core.auth_failure_key(None, "a" * 65) is None
+    assert core.auth_failure_key(None, "bad id!") is None
+    assert core.auth_failure_key(None, 12345) is None
+
+
+def test_auth_failure_keys_do_not_collide_between_peer_and_client_id():
+    """The two namespaces must not be able to shadow each other."""
+    assert core.auth_failure_key("doctor-01", None) != core.auth_failure_key(None, "doctor-01")

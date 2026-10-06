@@ -125,6 +125,29 @@ def test_a_3xx_httperror_is_config_without_following():
     assert excinfo.value.category is ErrorCategory.CONFIG
 
 
+def test_host_grant_client_never_follows_a_redirect():
+    """The grant request carries the Deepgram API key in an Authorization header.
+
+    `httpx` defaults to `follow_redirects=False`; this pins that the host keeps
+    saying so explicitly. A silent library default change -- or a well-meaning
+    "behave like a browser" edit -- would hand the long-lived API key to
+    whatever host a 302 names, which is the exact failure the client-side
+    `_NoRedirectHandler` above exists to prevent.
+    """
+    client = core.AsyncGrantClient()
+    try:
+        # httpx exposes this publicly from 0.28 and privately before it; the
+        # supported range is >=0.27,<1.0, so read whichever exists. A rename
+        # that leaves neither is worth a loud failure here.
+        http_client = client._client  # noqa: SLF001 - the property under test
+        follow = getattr(http_client, "follow_redirects", None)
+        if follow is None:
+            follow = http_client._follow_redirects  # noqa: SLF001
+        assert follow is False
+    finally:
+        asyncio.run(client.aclose())
+
+
 # -- 01-F1: the body cap applies while streaming ---------------------------
 
 SECRET = "s" * 40
