@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Iterable, List, Sequence, Tuple
+from typing import Iterable, List, Tuple
 
 from .fst import DeterministicFST, LoadResult, Rule
 from .negation import find_negation_spans
@@ -135,13 +135,3 @@ class TerminologyEngine:
         protected.extend((s.start, s.end) for s in find_numeric_spans(text))
         protected.extend(find_negation_spans(text))
         return self._fst.apply(text, protected_ranges=protected)
-
-
-def load_rules_from_yaml_data(data) -> Sequence[dict]:
-    """Extract the `rules` list from parsed YAML, tolerating both the
-    categorized dict-list shape and a bare list."""
-    if isinstance(data, dict):
-        return data.get("rules") or []
-    if isinstance(data, list):
-        return data
-    return []

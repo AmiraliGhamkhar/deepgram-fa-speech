@@ -413,3 +413,116 @@ def test_readme_does_not_claim_code_switching():
     assert any(negated(s) and any(f in s for f in forbidden) for s in sentences), (
         "README must explicitly deny unrestricted code-switching (see the language-scope section)"
     )
+
+
+# -- the exported ConnectionClosed type -----------------------------------
+#
+# `medical_stt.stt.__all__` exported `ConnectionClosed`, and nothing in the
+# codebase ever raised it: every failure -- including a closed socket -- was
+# reported as a bare `ProviderError`. A consumer that wrote the natural
+# `except ConnectionClosed:` handler got a silently dead branch.
+
+
+def _start_provider_with_fake_sdk(monkeypatch):
+    """Return (connection, errors) with the provider wired to a fake SDK."""
+    from medical_stt.config import Settings
+    from medical_stt.stt.deepgram_provider import DeepgramProvider
+
+    captured: dict = {}
+    connection = _FakeConnection()
+    _install_fake_client(monkeypatch, connection, captured)
+    errors: list = []
+    provider = DeepgramProvider(
+        Settings(host_url="https://stt.example.com", host_secret="secret"),
+        token_provider=lambda: "short-lived-token",
+    )
+    provider.start(lambda _event: None, errors.append)
+    return connection, errors
+
+
+def test_a_closed_socket_is_reported_as_connection_closed(monkeypatch):
+    from deepgram.core.events import EventType
+
+    from medical_stt.stt import ConnectionClosed
+
+    connection, errors = _start_provider_with_fake_sdk(monkeypatch)
+    connection.handlers[EventType.CLOSE](object())
+
+    assert len(errors) == 1
+    assert isinstance(errors[0], ConnectionClosed)
+    # The category is unchanged, so the reconnect decision -- which keys on
+    # `error.category` alone -- behaves exactly as it did before.
+    assert errors[0].category is ErrorCategory.SERVER_DISCONNECT
+    assert errors[0].category.is_retryable
+    # And it is still a ProviderError, so every existing handler catches it.
+    assert isinstance(errors[0], ProviderError)
+
+
+@pytest.mark.parametrize("closure", ["ConnectionClosedOK", "ConnectionClosedError", "ConnectionClosed"])
+def test_a_websocket_closure_exception_is_reported_as_connection_closed(monkeypatch, closure):
+    websockets_exceptions = pytest.importorskip("websockets.exceptions")
+    from deepgram.core.events import EventType
+
+    from medical_stt.stt import ConnectionClosed
+
+    connection, errors = _start_provider_with_fake_sdk(monkeypatch)
+    exc = getattr(websockets_exceptions, closure)(None, None)
+    connection.handlers[EventType.ERROR](exc)
+
+    assert len(errors) == 1
+    assert isinstance(errors[0], ConnectionClosed)
+    assert errors[0].category is ErrorCategory.SERVER_DISCONNECT
+    assert errors[0].__cause__ is exc
+
+
+def test_an_upstream_5xx_is_a_disconnect_but_not_a_closed_connection(monkeypatch):
+    """The distinction that makes the type mean something.
+
+    `SERVER_DISCONNECT` is also what an HTTP 5xx classifies to, and a 502 from
+    the token endpoint is not a closed WebSocket. Reporting it as one would
+    tell a consumer to treat an upstream outage as a socket close.
+    """
+    from deepgram.core.events import EventType
+
+    from medical_stt.stt import ConnectionClosed
+    from medical_stt.stt.deepgram_provider import is_connection_closure
+
+    assert is_connection_closure(_FakeStatusError(502)) is False
+
+    connection, errors = _start_provider_with_fake_sdk(monkeypatch)
+    connection.handlers[EventType.ERROR](_FakeStatusError(502))
+
+    assert len(errors) == 1
+    assert not isinstance(errors[0], ConnectionClosed)
+    assert errors[0].category is ErrorCategory.SERVER_DISCONNECT
+
+
+def test_a_non_closure_provider_error_is_still_a_plain_provider_error(monkeypatch):
+    from deepgram.core.events import EventType
+
+    from medical_stt.stt import ConnectionClosed
+
+    connection, errors = _start_provider_with_fake_sdk(monkeypatch)
+    connection.handlers[EventType.ERROR](_FakeStatusError(401))
+
+    assert len(errors) == 1
+    assert type(errors[0]) is ProviderError
+    assert errors[0].category is ErrorCategory.AUTH
+    assert not isinstance(errors[0], ConnectionClosed)
+
+
+def test_is_connection_closure_survives_a_missing_websockets_package(monkeypatch):
+    """The check is defensive: no websockets means no closure to recognise."""
+    import builtins
+
+    from medical_stt.stt.deepgram_provider import is_connection_closure
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name.startswith("websockets"):
+            raise ImportError("no websockets")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    assert is_connection_closure(TimeoutError("gone")) is False
