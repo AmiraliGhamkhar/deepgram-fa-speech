@@ -14,13 +14,23 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Iterator, List
+from typing import Iterator, List, Tuple
 
 _NUM = r"\d+(?:[.,]\d+)?"
 
 # Ordered from most specific to least specific; matching stops at the first
-# hit per start position (see find_numeric_spans).
+# hit per start position (see find_numeric_spans). Specificity here means
+# "how much structure does the pattern commit to", not "how long is it".
 _PATTERNS: List[re.Pattern[str]] = [
+    # Date-like patterns first: 2024-01-05, 1403/06/12, 5/1/2024. A date
+    # commits to TWO separators, which makes it more specific than a ratio
+    # ("120/80") or a range ("5-10 mg") -- neither can match a date. If a
+    # range matched first it would claim "2024-01" out of "2024-01-05" and
+    # leave the second hyphen unprotected, so a rule could then rewrite
+    # across the middle of a date.
+    re.compile(r"\b\d{1,4}[/-]\d{1,2}[/-]\d{1,4}\b"),
+    # Time-like patterns: 14:30, 8:05
+    re.compile(r"\b\d{1,2}:\d{2}\b"),
     # Blood pressure / ratio: 120/80, 10x5, 10×5 (with optional unit).
     re.compile(rf"\b{_NUM}\s*[x×/]\s*{_NUM}\s*(?:mmHg|mm|cm|ml|cc)?\b", re.IGNORECASE),
     # Range: 5-10 mg, 2 to 4 cm
@@ -41,10 +51,6 @@ _PATTERNS: List[re.Pattern[str]] = [
     ),
     # Bare percentage / decimal lab value with a trailing % sign.
     re.compile(rf"\b{_NUM}\s*%"),
-    # Date-like patterns: 2024-01-05, 1403/06/12, 5/1/2024
-    re.compile(r"\b\d{1,4}[/-]\d{1,2}[/-]\d{1,4}\b"),
-    # Time-like patterns: 14:30, 8:05
-    re.compile(r"\b\d{1,2}:\d{2}\b"),
     # A bare decimal / plain number on its own (lowest priority: only
     # protects the digits themselves, e.g. lab values "7.2").
     re.compile(rf"\b{_NUM}\b"),
@@ -77,7 +83,7 @@ def find_numeric_spans(text: str) -> List[NumericSpan]:
     return spans
 
 
-def protected_ranges(text: str) -> List[tuple]:
+def protected_ranges(text: str) -> List[Tuple[int, int]]:
     """Convenience wrapper returning plain (start, end) tuples."""
     return [(s.start, s.end) for s in find_numeric_spans(text)]
 

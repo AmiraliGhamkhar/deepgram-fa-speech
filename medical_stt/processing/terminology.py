@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Iterable, List, Sequence
+from typing import Iterable, List, Sequence, Tuple
 
 from .fst import DeterministicFST, LoadResult, Rule
 from .negation import find_negation_spans
@@ -94,6 +94,14 @@ class TerminologyEngine:
         skipped_context = sum(
             1 for r in self._all_rules if r.requires_context and not r.dangerous and not self.enable_context_dependent
         )
+        # DeterministicFST.load() is documented as single-use, and this is why:
+        # pyahocorasick accepts add_word() after make_automaton(), so reusing
+        # the instance silently unions the previous load's rules into the
+        # automaton while _all_rules/_active_rules -- and therefore rule_count
+        # and total_rule_count -- describe only this one. apply() would then
+        # rewrite text using rules the engine reports it does not have, which
+        # is the worst failure mode for an auditable clinical rewriter.
+        self._fst = DeterministicFST()
         self._load_result = self._fst.load(
             [Rule(r.source, r.target) for r in self._active_rules]
         )
@@ -123,7 +131,7 @@ class TerminologyEngine:
         markers from being touched by any rule."""
         if not text:
             return text
-        protected: List[tuple] = []
+        protected: List[Tuple[int, int]] = []
         protected.extend((s.start, s.end) for s in find_numeric_spans(text))
         protected.extend(find_negation_spans(text))
         return self._fst.apply(text, protected_ranges=protected)

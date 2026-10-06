@@ -98,3 +98,46 @@ def test_actual_corrections_yaml_loads_and_blocks_dangerous_rules():
 
     assert engine.apply("بیمار ناشتا است") == "بیمار ناشتا است"
     assert engine.apply("کاهش وزن داشته است") == "کاهش وزن داشته است"
+
+
+def test_reload_replaces_the_rule_set_instead_of_unioning_it():
+    """DeterministicFST.load() is documented as single-use.
+
+    pyahocorasick accepts add_word() after make_automaton(), so reusing the
+    automaton silently kept the first load's rules live while rule_count and
+    total_rule_count described only the second. apply() then rewrote text with
+    rules the engine reported it did not have -- unacceptable for a rewriter
+    whose whole selling point is that its rule set is auditable.
+    """
+    engine = TerminologyEngine()
+    engine.load([_rule("آی سی یو", "ICU", category="abbreviation_expansion")])
+    assert engine.apply("آی سی یو") == "ICU"
+
+    engine.load([_rule("بیوپسی", "Biopsy", category="abbreviation_expansion")])
+    assert engine.rule_count == 1
+    assert engine.total_rule_count == 1
+    assert engine._fst.rule_count == 1, "the automaton kept the previous load's rules"
+    assert engine.apply("آی سی یو") == "آی سی یو", "a dropped rule still fired"
+    assert engine.apply("بیوپسی") == "Biopsy"
+
+
+def test_reload_can_narrow_the_rule_set_to_nothing():
+    engine = TerminologyEngine()
+    engine.load([_rule("آی سی یو", "ICU", category="abbreviation_expansion")])
+    engine.load([])
+    assert engine.rule_count == 0
+    assert engine.apply("آی سی یو") == "آی سی یو"
+
+
+def test_reload_after_a_dangerous_rule_is_still_skipped():
+    engine = TerminologyEngine()
+    engine.load([_rule("آی سی یو", "ICU", category="abbreviation_expansion")])
+    engine.load(
+        [
+            _rule("بیوپسی", "Biopsy", category="abbreviation_expansion"),
+            _rule("منفی", "مثبت", category="abbreviation_expansion", dangerous=True),
+        ]
+    )
+    assert engine.rule_count == 1
+    assert engine.total_rule_count == 2
+    assert engine.apply("منفی") == "منفی", "a dangerous rule fired after a reload"
