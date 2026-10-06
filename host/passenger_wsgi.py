@@ -10,6 +10,24 @@ Why a *dedicated* loop thread rather than `asyncio.run` per request:
 and an `httpx.AsyncClient` must be created, used and closed on the *same*
 event loop. A per-request loop would break the pool or leak connections
 under load -- the exact failure this project's 50-session hardening fixed.
+The loop is handed to `ASGIMiddleware(loop=...)` explicitly: with no `loop`
+argument a2wsgi starts a second loop thread of its own, and the one built
+here would sit idle while the app ran on the other.
+
+One app, not two: importing `host.app` already builds the module-level
+`app = create_app()` (that is the fail-fast behaviour described below), so
+this module reuses it instead of calling `create_app()` again. A second app
+means a second `AsyncGrantClient` -- a whole second httpx connection pool to
+Deepgram that nothing ever closes -- plus a second metrics registry and a
+second set of rate limiters, so `/metrics` and the throttling state would
+describe an instance that is not the one serving requests.
+
+a2wsgi does not implement the ASGI lifespan protocol, so the app's startup
+log line and its shutdown handler (`grant_client.aclose()`) never run here.
+That is acceptable rather than something to work around: Passenger recycles
+by killing the process, and the OS reclaims the sockets. It is also why the
+capacity gauges and `app.state.grant_client` are built in `create_app` and
+not in `lifespan`.
 
 Passenger configuration (cPanel > Setup Python App):
 
@@ -39,11 +57,13 @@ from typing import Any, Optional
 from a2wsgi import ASGIMiddleware
 
 try:  # package import from a full checkout
+    from . import app as _host_app
     from .app import create_app
     from .core import HostSettings
 except ImportError:  # pragma: no cover - cPanel copies only the host/ dir
-    from app import create_app  # type: ignore[no-index]
-    from core import HostSettings  # type: ignore[no-index]
+    import app as _host_app  # type: ignore[no-index]
+    from app import create_app
+    from core import HostSettings
 
 
 class _EventLoopThread:
@@ -77,26 +97,39 @@ _asgi_app: Optional[Any] = None
 
 
 def _build_asgi_app() -> Any:
-    """Create the FastAPI app once, failing fast on misconfiguration."""
+    """Return the FastAPI app once, failing fast on misconfiguration.
+
+    Reuses the app `host.app` built at import time rather than constructing a
+    second one -- see the module docstring for what a second app costs.
+    `create_app` stays as the fallback for a caller that imported this module
+    without `host.app` having built one (nothing does today, but the entry
+    point must not fail because of an import-order assumption).
+    """
     global _asgi_app
     if _asgi_app is None:
-        _asgi_app = create_app(HostSettings.from_env())
+        already_built = getattr(_host_app, "app", None)
+        _asgi_app = already_built if already_built is not None else create_app(HostSettings.from_env())
     return _asgi_app
 
 
-def _bind_middleware_to_loop() -> None:
-    """Run a no-op coroutine on the adapter's loop at import time.
+def _smoke_test_loop(loop: asyncio.AbstractEventLoop) -> None:
+    """Run a no-op coroutine on the loop that will serve requests.
 
-    `a2wsgi.ASGIMiddleware` starts its own loop thread internally; the
-    touch here proves the machinery works in this process before the first
-    real request arrives.
+    Proves the loop thread is actually running in this process before the
+    first real request arrives, so a failure shows up in Passenger's boot log
+    instead of as a timeout on the clinic's first Start press.
     """
-    loop = _loop_thread.start()
     asyncio.run_coroutine_threadsafe(asyncio.sleep(0), loop).result(timeout=5)
 
 
+def _build_application() -> Any:
+    loop = _loop_thread.start()
+    application = ASGIMiddleware(_build_asgi_app(), loop=loop)
+    _smoke_test_loop(loop)
+    return application
+
+
 try:  # pragma: no cover - import-time eager construction by design
-    application = ASGIMiddleware(_build_asgi_app())
-    _bind_middleware_to_loop()
+    application = _build_application()
 except Exception:  # noqa: BLE001 - Passenger logs the traceback and refuses to boot
     raise
