@@ -46,6 +46,7 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 #   -v /secure/host/clients.txt:/srv/host/clients.txt:ro
 #
 # Graceful shutdown: uvicorn gets time to finish in-flight token requests
-# before SIGTERM takes effect (see HOST_GRACEFUL_SHUTDOWN).
+# before SIGTERM takes effect (uvicorn `timeout_graceful_shutdown=15` in
+# host/app.py:main). There is no HOST_GRACEFUL_SHUTDOWN variable.
 STOPSIGNAL SIGTERM
 CMD ["python", "-m", "host.app"]
