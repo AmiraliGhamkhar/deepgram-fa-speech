@@ -284,13 +284,23 @@ def request_is_secure(
     `X-Forwarded-Proto` is trusted *only* when the immediate peer is a
     configured reverse proxy. A direct HTTP client that forges the header
     is still rejected.
+
+    When the header carries several comma-separated hops, the **last** value
+    is the one used: that is the observation made by the proxy we actually
+    trust (the immediate peer). The leading value is whatever the connecting
+    client claimed, so trusting it would let a forged
+    `X-Forwarded-Proto: https` survive a proxy that appends rather than
+    overwrites -- see SECURITY.md ("uses the last hop rather than the
+    first") and README > Deploying the host.
     """
     if (scheme or "").lower() == "https":
         return True
     if not peer_is_trusted_proxy(peer_host, settings):
         return False
-    first = (forwarded_proto or "").split(",")[0].strip().lower()
-    return first == "https"
+    hops = [part.strip().lower() for part in (forwarded_proto or "").split(",")]
+    if not hops or not hops[-1]:
+        return False
+    return hops[-1] == "https"
 
 
 def normalize_ttl(raw: Any, settings: HostSettings) -> int:

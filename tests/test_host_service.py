@@ -206,8 +206,24 @@ def test_trusted_proxy_with_forwarded_proto_https_is_allowed():
     settings = _settings()
     assert core.request_is_secure("http", "127.0.0.1", "https", settings) is True
     assert core.request_is_secure("http", "127.0.0.1", "HTTPS", settings) is True
-    # A proxy may append to the header; the first value is the client-facing one.
-    assert core.request_is_secure("http", "::1", "https, http", settings) is True
+    # When a proxy appends its own observation, the LAST value is the one the
+    # trusted immediate peer asserted. A forged leading "https" followed by
+    # the proxy's real "http" must be rejected, not accepted.
+    assert core.request_is_secure("http", "::1", "https, http", settings) is False
+    assert core.request_is_secure("http", "::1", "http, https", settings) is True
+
+
+def test_forged_leading_forwarded_proto_cannot_fake_https_through_a_proxy():
+    """SECURITY.md: the trusted proxy's *last* hop decides, not the client's.
+
+    A common proxy config appends rather than overwrites, so the client's
+    leading value reaches the app untouched. Trusting it would let a plain
+    HTTP client forge HTTPS; only the trailing (proxy-asserted) value counts.
+    """
+    settings = _settings()
+    assert core.request_is_secure("http", "127.0.0.1", "https, http", settings) is False
+    assert core.request_is_secure("http", "127.0.0.1", "https,http", settings) is False
+    assert core.request_is_secure("http", "127.0.0.1", "https,", settings) is False
 
 
 def test_trusted_proxy_without_the_header_is_still_plaintext():
