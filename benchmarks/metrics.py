@@ -37,6 +37,7 @@ from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Sequence, Tuple
 
 from medical_stt.processing.negation import find_negation_spans
+from medical_stt.processing.normalize import normalize
 from medical_stt.processing.numbers import find_numeric_spans
 
 __all__ = [
@@ -106,12 +107,33 @@ def character_error_rate(reference: str, hypothesis: str) -> float:
     return edit_distance(ref_chars, hyp_chars) / len(ref_chars)
 
 
-#: Characters that can extend a numeric expression into a longer one: digits
-#: and the separators processing/numbers.py matches between them. Only a
-#: *digit* end of a span needs checking -- a span ending in a unit ("mmHg",
-#: "درصد") is already delimited by the unit itself, and demanding a boundary
-#: after it would reject ordinary sentence punctuation ("120/80 mmHg.").
-_NUMERIC_EXTENSION_CHARS = frozenset("0123456789.,:/%-x\u00d7")
+#: Numeric separators that may continue a number when another digit follows.
+#: A bare decimal at sentence end ("7.2.") must not be mistaken for an
+#: extended decimal; separators are continuations only when joined to a digit.
+_NUMERIC_SEPARATOR_CHARS = frozenset(".,:/-x\u00d7")
+
+
+def _is_numeric_continuation(text: str, index: int, direction: int) -> bool:
+    """Whether the adjacent character extends a numeric expression.
+
+    A digit or percent sign is always part of the adjacent value. Decimal,
+    thousands, ratio, range, time and multiplication separators continue it
+    only when another digit is directly attached on the far side. `direction`
+    points from the separator toward that far side, keeping punctuation after
+    a complete value distinct from an extended number.
+    """
+    if not 0 <= index < len(text):
+        return False
+    char = text[index]
+    if char.isdigit() or char == "%":
+        return True
+    if char.lower() not in _NUMERIC_SEPARATOR_CHARS:
+        return False
+    continuation_index = index + direction
+    return (
+        0 <= continuation_index < len(text)
+        and text[continuation_index].isdigit()
+    )
 
 #: A term counts as present only when no ASCII alphanumeric touches either
 #: side of the match. Persian characters are deliberately outside this class:
@@ -142,10 +164,12 @@ def _contains_numeric_expression(haystack: str, needle: str) -> bool:
         index = haystack.find(needle, start)
         if index < 0:
             return False
-        before = haystack[index - 1] if index > 0 else ""
-        after = haystack[index + len(needle)] if index + len(needle) < len(haystack) else ""
-        left_open = needle[0].isdigit() and before in _NUMERIC_EXTENSION_CHARS
-        right_open = needle[-1].isdigit() and after in _NUMERIC_EXTENSION_CHARS
+        left_open = needle[0].isdigit() and _is_numeric_continuation(
+            haystack, index - 1, -1
+        )
+        right_open = needle[-1].isdigit() and _is_numeric_continuation(
+            haystack, index + len(needle), +1
+        )
         if not left_open and not right_open:
             return True
         start = index + 1
@@ -182,10 +206,16 @@ def _has_latin(token: str) -> bool:
 
 
 def numeric_accuracy(reference: str, hypothesis: str) -> float:
-    spans = [span.text.strip() for span in find_numeric_spans(_normalize_for_scoring(reference))]
+    # Match the pipeline's numeric glyph canonicalization so Persian and
+    # Arabic-Indic digits/separators are compared by value, not code point.
+    normalized_reference = normalize(_normalize_for_scoring(reference))
+    normalized_hypothesis = normalize(_normalize_for_scoring(hypothesis))
+    spans = [span.text.strip() for span in find_numeric_spans(normalized_reference)]
     if not spans:
         return 1.0
-    return sum(1 for span in spans if _contains_numeric_expression(hypothesis, span)) / len(spans)
+    return sum(
+        1 for span in spans if _contains_numeric_expression(normalized_hypothesis, span)
+    ) / len(spans)
 
 
 def negation_preservation(reference: str, hypothesis: str) -> float:

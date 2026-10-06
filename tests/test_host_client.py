@@ -10,6 +10,7 @@ import urllib.request
 
 import pytest
 
+import medical_stt.host_client as host_client_module
 from medical_stt.host_client import HostSessionClient, SESSION_PATH
 from medical_stt.stt.base import ErrorCategory, ProviderError
 
@@ -135,3 +136,55 @@ def test_trailing_slash_in_base_url_is_tolerated():
 
     HostSessionClient(HOST + "/", SECRET, opener=handler).fetch_session()
     assert seen["url"] == HOST + SESSION_PATH
+
+
+def test_default_response_read_is_bounded_and_accepts_a_valid_session(monkeypatch):
+    read_sizes = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, size=-1):
+            read_sizes.append(size)
+            return _ok_response()
+
+    class Opener:
+        def open(self, _request, timeout):
+            assert timeout == 10.0
+            return Response()
+
+    monkeypatch.setattr(host_client_module, "_OPENER_FACTORY", Opener())
+    session = HostSessionClient(HOST, SECRET).fetch_session()
+
+    assert session.access_token == "jwt-token-value"
+    assert read_sizes == [host_client_module.MAX_HOST_RESPONSE_BYTES + 1]
+
+
+def test_oversized_default_response_is_rejected_after_a_bounded_read(monkeypatch):
+    read_sizes = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, size=-1):
+            read_sizes.append(size)
+            return b"x" * (size if size >= 0 else 100_000)
+
+    class Opener:
+        def open(self, _request, timeout):
+            return Response()
+
+    monkeypatch.setattr(host_client_module, "_OPENER_FACTORY", Opener())
+    with pytest.raises(ProviderError, match="oversized") as excinfo:
+        HostSessionClient(HOST, SECRET).fetch_session()
+
+    assert read_sizes == [host_client_module.MAX_HOST_RESPONSE_BYTES + 1]
+    assert SECRET not in str(excinfo.value)

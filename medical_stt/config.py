@@ -370,16 +370,32 @@ def save_host_credentials(host_url: str, host_secret: str) -> None:
 
 
 def _valid_host_url(url: str) -> Tuple[bool, str]:
-    parsed = urlparse(url)
-    if parsed.scheme == "https" and parsed.netloc:
+    try:
+        parsed = urlparse(url)
+        # A configured URL may be included in network errors and support
+        # logs. Never allow URL userinfo or query/fragment values to become
+        # a second, less-obvious place for credentials to leak.
+        if (
+            parsed.username is not None
+            or parsed.password is not None
+            or "?" in url.split("#", 1)[0]
+            or "#" in url
+        ):
+            return False, "host_url must not include credentials, a query, or a fragment"
+        if not parsed.hostname:
+            return False, "host_url is missing a host name"
+        # Accessing `.port` validates malformed/non-numeric/out-of-range ports.
+        _ = parsed.port
+    except ValueError:
+        return False, "host_url is invalid"
+
+    if parsed.scheme == "https":
         return True, ""
     if parsed.scheme == "http" and parsed.hostname in _LOCAL_HOSTS:
         # Loopback only: never relax this for a real host name.
         return True, ""
     if parsed.scheme not in ("http", "https"):
-        return False, f"host_url must start with https:// (got {url!r})"
-    if not parsed.netloc:
-        return False, f"host_url is missing a host name ({url!r})"
+        return False, "host_url must start with https://"
     return False, "host_url must use https:// (plain http is only allowed for localhost)"
 
 

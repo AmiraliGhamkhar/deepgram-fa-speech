@@ -153,9 +153,11 @@ class HostSettings:
                 "in this service's environment, never in the client."
             )
         secret = (source.get("HOST_SHARED_SECRET") or "").strip()
-        if len(secret) < 24:
-            # Short secrets make brute forcing a 401-space trivial; refuse
-            # to start rather than accept one.
+        clients_file = (source.get("HOST_CLIENTS_FILE") or "").strip()
+        if not clients_file and len(secret) < 24:
+            # The shared secret is used only by legacy single-identity mode.
+            # Registry mode authenticates each device with its own secret and
+            # must not require an unused global credential.
             raise ConfigurationError(
                 "HOST_SHARED_SECRET is not set or is shorter than 24 characters. "
                 "Generate one with: python -c \"import secrets;"
@@ -215,7 +217,7 @@ class HostSettings:
             forwarded_allow_ips=parse_forwarded_allow_ips(
                 source.get("HOST_FORWARDED_ALLOW_IPS")
             ),
-            clients_file=(source.get("HOST_CLIENTS_FILE") or "").strip(),
+            clients_file=clients_file,
             client_rate_limit_requests=max(1, _int("HOST_CLIENT_RATE_LIMIT_REQUESTS", 60)),
             client_burst=max(1, _int("HOST_CLIENT_BURST", 120)),
             global_rate_limit_requests=max(1, _int("HOST_GLOBAL_RATE_LIMIT_REQUESTS", 600)),
