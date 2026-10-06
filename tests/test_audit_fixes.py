@@ -23,6 +23,7 @@ import asyncio
 import importlib
 import json
 import os
+import secrets
 import subprocess
 import sys
 import urllib.error
@@ -347,8 +348,10 @@ def test_provision_hang_guard_bounds_collision_retries(tmp_path):
     """The CLI refuses any invocation that could collide/hang."""
     # generate_client_id truncates at 64 chars, so a 62-char prefix with
     # --start-index would mint identical ids and loop forever. The CLI
-    # prefix guard (MAX_PREFIX_LENGTH) is what makes the loop safe.
-    assert provision.MAX_PREFIX_LENGTH + 5 <= 64
+    # prefix guard (MAX_PREFIX_LENGTH) is what makes the loop safe. The
+    # budget is the *default* suffix: "-" plus token_hex(4) is 9 characters,
+    # not the 5 that --start-index's 3-digit index needs.
+    assert provision.MAX_PREFIX_LENGTH + 1 + len(secrets.token_hex(4)) <= 64
     out = tmp_path / "clients.txt"
     result = subprocess.run(
         [sys.executable, "-m", "host.provision", "--count", "3",
@@ -359,6 +362,35 @@ def test_provision_hang_guard_bounds_collision_retries(tmp_path):
     # The longest *legal* prefix must still work (boundary check).
     assert result.returncode == 0, result.stderr
     assert len(core.ClientRegistry.from_file(str(out))) == 3
+
+
+def test_provision_keeps_full_suffix_entropy_at_the_longest_legal_prefix():
+    """The prefix bound must leave the whole random suffix intact.
+
+    With MAX_PREFIX_LENGTH at 59 the default `token_hex(4)` suffix (8 hex
+    characters) plus its separator needed 9, so `generate_client_id`'s
+    `[:64]` truncation left only 4 hex digits -- 65536 possible ids instead
+    of 4.3e9. Ids then collide often enough that a large `--count` burns the
+    MAX_DEDUP_ATTEMPTS budget, and the constant's own comment described a
+    5-character suffix that the code does not produce.
+    """
+    prefix = "x" * provision.MAX_PREFIX_LENGTH
+    ids = {provision.generate_client_id(prefix) for _ in range(4000)}
+    assert len(ids) == 4000, f"suffix entropy lost: {4000 - len(ids)} collisions in 4000 draws"
+    for client_id in ids:
+        assert len(client_id) <= 64
+        assert client_id.rsplit("-", 1)[1] == client_id.rsplit("-", 1)[1][:8]
+        assert len(client_id.rsplit("-", 1)[1]) == 8, "the random suffix was truncated"
+
+
+def test_provision_at_the_old_bound_would_have_collided():
+    """Pins the number the guard exists to protect, so it cannot drift back."""
+    prefix = "x" * (provision.MAX_PREFIX_LENGTH + 4)  # the old 59
+    ids = {provision.generate_client_id(prefix) for _ in range(4000)}
+    assert len(ids) < 4000, (
+        "a prefix this long now retains full entropy; MAX_PREFIX_LENGTH may be "
+        "too conservative, or generate_client_id stopped truncating"
+    )
 
 
 # -- 04-F1: a send racing stop() is dropped, not an error -------------------

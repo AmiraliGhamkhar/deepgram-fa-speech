@@ -41,11 +41,17 @@ SECRET_BYTES = 32
 #: rather than silently produce a huge registry.
 MAX_COUNT = 5_000
 
-#: A generated id is `<safe_prefix>-<suffix>`; the fixed-width suffix and
-#: its separator need 5 characters. A longer prefix would be truncated by
-#: `generate_client_id`, making every id identical -- so it is refused
-#: up front instead of hanging the generation loop forever.
-MAX_PREFIX_LENGTH = 59  # 64 - 5
+#: A generated id is `<safe_prefix>-<suffix>`. The default suffix is
+#: `secrets.token_hex(4)` -- 8 hex characters -- and the separator is one
+#: more, so 9 of the 64 characters in `core.MAX_CLIENT_ID_LENGTH` are not the
+#: operator's to spend. A longer prefix is silently truncated by
+#: `generate_client_id`, which collapses the id space: at 59 characters only 4
+#: hex digits survive (65536 possible ids), so a large `--count` burns the
+#: collision-retry budget and eventually fails. Refused up front instead.
+#:
+#: `--start-index` uses a 3-character suffix, so this is conservative there by
+#: 5 characters; one bound for both paths is worth more than the tail room.
+MAX_PREFIX_LENGTH = 55  # 64 - 9 (separator + token_hex(4))
 
 #: Upper bound on candidate ids tried to satisfy `--count` after collisions
 #: (a random suffix that was seen before, or a truncated id). Without it, a

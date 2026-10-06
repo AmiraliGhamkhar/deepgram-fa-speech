@@ -488,12 +488,42 @@ def main() -> int:  # pragma: no cover - operational entry point
         log.error("host configuration error: %s", exc)
         return 2
     host = os.getenv("HOST_BIND", "0.0.0.0")
-    port = int(os.getenv("HOST_PORT", "8443"))
+    raw_port = os.getenv("HOST_PORT", "8443").strip()
+    try:
+        port = int(raw_port)
+    except ValueError:
+        # A bare int() traceback here reads like a crash in the service rather
+        # than a typo in one environment variable, and it is the first thing
+        # an operator hits when a panel rewrites HOST_PORT to "" or "8443 ".
+        log.error("HOST_PORT must be an integer; got %r", raw_port)
+        return 2
+    if not 1 <= port <= 65535:
+        log.error("HOST_PORT must be between 1 and 65535; got %d", port)
+        return 2
     certfile = os.getenv("HOST_TLS_CERTFILE", "")
     keyfile = os.getenv("HOST_TLS_KEYFILE", "")
 
-    if settings.allow_http and not certfile:
-        log.warning("HOST_ALLOW_HTTP is set: serving plaintext (development only)")
+    if not certfile:
+        if settings.allow_http:
+            log.warning("HOST_ALLOW_HTTP is set: serving plaintext (development only)")
+        else:
+            # Not fatal, and not a misconfiguration in the common case: a
+            # reverse proxy that terminates TLS and forwards
+            # X-Forwarded-Proto from an address in HOST_FORWARDED_ALLOW_IPS is
+            # exactly how this is meant to be deployed behind Apache or a
+            # load balancer. But when there is no such proxy the app rejects
+            # every request with 400 and the container healthcheck fails
+            # forever, which looks like a hung service rather than a missing
+            # certificate -- so say which it is, once, at startup.
+            log.warning(
+                "no TLS certificate (HOST_TLS_CERTFILE) and HOST_ALLOW_HTTP is not set: "
+                "this process serves plaintext while the app requires HTTPS, so every "
+                "request will be rejected with 400 unless a trusted reverse proxy "
+                "terminates TLS and sends X-Forwarded-Proto: https from an address in "
+                "HOST_FORWARDED_ALLOW_IPS (currently %s). Without such a proxy, set "
+                "HOST_TLS_CERTFILE/HOST_TLS_KEYFILE.",
+                ",".join(settings.forwarded_allow_ips) or "<none>",
+            )
 
     # One worker is the supported topology: the in-memory client registry and
     # limiters are per process. Scale with a reverse proxy and a shared

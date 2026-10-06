@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import logging
 import os
 import sys
 from pathlib import Path
@@ -364,3 +365,108 @@ def test_declared_oversized_body_is_counted_like_a_chunked_one(host):
     )
     assert response.status_code == 413
     assert "request_body_rejections_total 1" in client.get("/metrics").text
+
+
+# -- main(): the operational entry point ----------------------------------
+#
+# main() is the only code path a real deployment runs, and it used to be
+# untestable in practice because it called uvicorn.run() unconditionally. These
+# stub that call, so the startup diagnostics can be pinned.
+
+
+@pytest.fixture()
+def stubbed_uvicorn(monkeypatch):
+    """Import host.app with a minimal valid config and a no-op uvicorn.run."""
+    uvicorn = pytest.importorskip("uvicorn")
+    monkeypatch.setenv("DEEPGRAM_API_KEY", "dg_fake_host_side_only")
+    monkeypatch.setenv("HOST_SHARED_SECRET", SECRET)
+    for variable in (
+        "HOST_TLS_CERTFILE",
+        "HOST_TLS_KEYFILE",
+        "HOST_ALLOW_HTTP",
+        "HOST_FORWARDED_ALLOW_IPS",
+        "HOST_CLIENTS_FILE",
+        "HOST_PORT",
+        "HOST_BIND",
+    ):
+        monkeypatch.delenv(variable, raising=False)
+    calls: list = []
+    monkeypatch.setattr(uvicorn, "run", lambda *args, **kwargs: calls.append(kwargs))
+    app_module = importlib.import_module("app")
+    return app_module, calls
+
+
+def test_main_refuses_a_non_numeric_host_port(stubbed_uvicorn, monkeypatch, caplog):
+    """A typo in HOST_PORT must read as a configuration error, not a crash.
+
+    `int(os.getenv("HOST_PORT", "8443"))` raised a bare ValueError, so an
+    operator who set HOST_PORT="" in a panel saw a traceback that looked like
+    a bug in the service.
+    """
+    app_module, calls = stubbed_uvicorn
+    monkeypatch.setenv("HOST_PORT", "eight-thousand")
+    with caplog.at_level(logging.ERROR, logger="medical_stt.host"):
+        assert app_module.main() == 2
+    assert calls == [], "uvicorn must not be started with an unusable port"
+    assert any("HOST_PORT" in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.parametrize("bad_port", ["0", "-1", "65536", "99999"])
+def test_main_refuses_an_out_of_range_host_port(stubbed_uvicorn, monkeypatch, caplog, bad_port):
+    app_module, calls = stubbed_uvicorn
+    monkeypatch.setenv("HOST_PORT", bad_port)
+    with caplog.at_level(logging.ERROR, logger="medical_stt.host"):
+        assert app_module.main() == 2
+    assert calls == []
+
+
+def test_main_starts_uvicorn_with_a_valid_port(stubbed_uvicorn, monkeypatch, caplog):
+    app_module, calls = stubbed_uvicorn
+    monkeypatch.setenv("HOST_PORT", "9001")
+    with caplog.at_level(logging.ERROR, logger="medical_stt.host"):
+        assert app_module.main() == 0
+    assert len(calls) == 1
+    assert calls[0]["port"] == 9001
+
+
+def test_main_warns_when_plaintext_serving_will_reject_every_request(
+    stubbed_uvicorn, caplog
+):
+    """No certificate and no HOST_ALLOW_HTTP: the app 400s everything.
+
+    This is legitimate behind a TLS-terminating proxy, which is why it is a
+    warning and not a refusal -- but with no such proxy the container
+    healthcheck fails forever and the service looks hung rather than
+    misconfigured, so the startup log has to say which it is.
+    """
+    app_module, calls = stubbed_uvicorn
+    with caplog.at_level(logging.WARNING, logger="medical_stt.host"):
+        assert app_module.main() == 0
+    assert len(calls) == 1, "a proxy deployment is valid; it must still start"
+    message = " ".join(record.getMessage() for record in caplog.records)
+    assert "HOST_TLS_CERTFILE" in message
+    assert "X-Forwarded-Proto" in message
+    assert "400" in message
+
+
+def test_main_says_so_when_plaintext_is_deliberate(stubbed_uvicorn, monkeypatch, caplog):
+    app_module, _ = stubbed_uvicorn
+    monkeypatch.setenv("HOST_ALLOW_HTTP", "1")
+    with caplog.at_level(logging.WARNING, logger="medical_stt.host"):
+        assert app_module.main() == 0
+    message = " ".join(record.getMessage() for record in caplog.records)
+    assert "HOST_ALLOW_HTTP is set" in message
+    assert "X-Forwarded-Proto" not in message
+
+
+def test_main_is_quiet_about_tls_when_a_certificate_is_configured(
+    stubbed_uvicorn, monkeypatch, caplog
+):
+    app_module, calls = stubbed_uvicorn
+    monkeypatch.setenv("HOST_TLS_CERTFILE", "/etc/ssl/host.crt")
+    monkeypatch.setenv("HOST_TLS_KEYFILE", "/etc/ssl/host.key")
+    with caplog.at_level(logging.WARNING, logger="medical_stt.host"):
+        assert app_module.main() == 0
+    assert calls[0]["ssl_certfile"] == "/etc/ssl/host.crt"
+    assert calls[0]["ssl_keyfile"] == "/etc/ssl/host.key"
+    assert not [r for r in caplog.records if "HOST_TLS_CERTFILE" in r.getMessage()]
