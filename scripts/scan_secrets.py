@@ -40,6 +40,12 @@ _SKIP_DIRS = {
 class Pattern:
     name: str
     regex: re.Pattern
+    #: Capture group holding the credential itself. `0` (the default) means the
+    #: whole match *is* the credential. An assignment pattern must name the
+    #: value group so that placeholder detection sees the value rather than
+    #: `NAME=value`, and so that one leaked credential produces one
+    #: fingerprint no matter which variable name or file it is found under.
+    group: int = 0
 
 
 PATTERNS: Tuple[Pattern, ...] = (
@@ -53,6 +59,23 @@ PATTERNS: Tuple[Pattern, ...] = (
         ),
     ),
     Pattern("private_key", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
+    # This project's own credentials. `host/provision.py` mints a 256-bit
+    # `secrets.token_urlsafe(32)` client secret (43 characters of
+    # [A-Za-z0-9_-]) and `HOST_SHARED_SECRET`/`HOST_METRICS_ADMIN_TOKEN` are
+    # operator-chosen strings. None of them has a recognizable prefix, so none
+    # of the patterns above can ever match one: a pasted `.env`, an `export`
+    # line in a README, a shell one-liner in a support thread or a CI log was
+    # completely invisible to the project's own history gate. The `*.secret`
+    # filename rule covers the files provision.py writes; this covers the
+    # credential appearing anywhere else, next to the name that holds it.
+    Pattern(
+        "host_credential_assignment",
+        re.compile(
+            r"(?i)\b(?:HOST_SHARED_SECRET|HOST_METRICS_ADMIN_TOKEN"
+            r"|MEDICALSTT_HOST_SECRET)\s*[=:]\s*[\"']?([A-Za-z0-9_-]{20,})"
+        ),
+        group=1,
+    ),
 )
 
 #: Filenames that are credentials by construction, whatever their contents.
@@ -134,23 +157,29 @@ def is_placeholder(path: str, value: str) -> bool:
     return path.endswith(TEMPLATE_SUFFIXES) and len(stripped) < 24
 
 
-def _assignment_values(line: str) -> List[str]:
-    """Values on the right-hand side of `NAME=value` / `NAME: value`."""
-    match = re.match(r"\s*[\"']?[A-Za-z_][A-Za-z0-9_ .-]*[\"']?\s*[=:]\s*(.+)$", line)
-    return [match.group(1).strip()] if match else []
-
-
 def scan_text(text: str, path: str, location: str) -> List[Finding]:
     findings: List[Finding] = []
     for pattern in PATTERNS:
         for match in pattern.regex.finditer(text):
-            value = match.group(0)
-            if pattern.name == "deepgram_key_legacy":
-                candidate = re.split(r"[=:\"'\s]+", value)[-1]
-                if is_placeholder(path, candidate):
+            if pattern.group:
+                value = match.group(pattern.group)
+                if is_placeholder(path, value):
                     continue
-            if is_placeholder(path, value.split("=")[-1]):
-                continue
+            else:
+                value = match.group(0)
+                if pattern.name == "deepgram_key_legacy":
+                    # The whole match is `deepgram_api_key = "<hex>"`, so the
+                    # placeholder test needs the value alone. This stays a
+                    # special case on purpose: the fingerprint below is over
+                    # the whole match, and scripts/secret_scan_baseline.txt
+                    # tracks the SECURITY.md incident by exactly that
+                    # fingerprint. Re-pointing it at a value group would
+                    # silently un-track a known leaked key.
+                    candidate = re.split(r"[=:\"'\s]+", value)[-1]
+                    if is_placeholder(path, candidate):
+                        continue
+                if is_placeholder(path, value.split("=")[-1]):
+                    continue
             findings.append(
                 Finding(location, path, pattern.name, redact(value), fingerprint(value))
             )

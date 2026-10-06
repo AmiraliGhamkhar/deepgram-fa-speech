@@ -164,3 +164,113 @@ def test_blank_lines_at_the_edges_are_removed():
     pasted = _paste("\n\nمتن\n\n")
     assert pasted.strip("\n").endswith("متن")
     assert pasted.startswith("\u200f")
+
+
+# -- word separator between utterances ------------------------------------
+#
+# LiveMedicalSTT pastes each finalized utterance followed by a single space.
+# normalize_injected_whitespace strips trailing whitespace on every line (a
+# property tests/test_formatting_ownership.py pins), so without re-attaching
+# that separator three consecutive dictations fused into one unbroken run --
+# "فشار خون120/80 mmHgبیمار تب ندارد" -- inside the target EMR field.
+
+
+def _paste_via_injector(text: str) -> str:
+    backend = DryRunBackend()
+    injector = TextInjector(backend=backend, paste_settle_seconds=0.0)
+    assert injector.paste_text(text) is True
+    return backend.pasted[-1]
+
+
+def test_paste_text_keeps_the_callers_word_separator():
+    assert _paste_via_injector("فشار خون ").endswith(" ")
+
+
+def test_consecutive_utterances_stay_separate_tokens():
+    backend = DryRunBackend()
+    injector = TextInjector(backend=backend, paste_settle_seconds=0.0)
+    for utterance in ("فشار خون 120/80 mmHg", "بیمار تب ندارد"):
+        assert injector.paste_text(utterance + " ") is True
+    joined = "".join(backend.pasted)
+    assert "mmHg \u200fبیمار" in joined, f"utterances fused: {joined!r}"
+
+
+def test_paste_text_without_trailing_space_adds_none():
+    assert not _paste_via_injector("فشار خون").endswith(" ")
+
+
+def test_paste_text_collapses_a_run_of_trailing_spaces_to_one_separator():
+    assert _paste_via_injector("گزارش   ") == "\u200fگزارش "
+
+
+def test_paste_text_does_not_downgrade_a_trailing_newline_to_a_space():
+    """A line break is a stronger separator than a space and must survive as is."""
+    pasted = _paste_via_injector("Diagnosis\nHbA1c 7.2\n")
+    assert pasted.endswith("7.2"), f"unexpected tail: {pasted!r}"
+    assert pasted.count("\n") == 1
+
+
+def test_paste_text_still_refuses_whitespace_only_input():
+    backend = DryRunBackend()
+    injector = TextInjector(backend=backend, paste_settle_seconds=0.0)
+    assert injector.paste_text("   ") is False
+    assert backend.pasted == []
+
+
+# -- backend failures must not escape the provider callback thread --------
+
+
+class _RaisingBackend(DryRunBackend):
+    """Raises a non-OSError, like the real optional dependencies do.
+
+    pyperclip raises PyperclipException (an Exception) when no clipboard
+    helper is installed; pyautogui raises FailSafeException (an Exception)
+    when the pointer hits a screen corner. Neither is an OSError.
+    """
+
+    def __init__(self, exc: Exception) -> None:
+        super().__init__()
+        self._exc = exc
+
+    def send_unicode_text(self, text: str) -> bool:
+        raise self._exc
+
+    def send_backspaces(self, count: int) -> bool:
+        raise self._exc
+
+    def paste_text(self, text: str, restore_clipboard: bool, settle_seconds: float) -> bool:
+        raise self._exc
+
+
+class _ClipboardUnavailable(RuntimeError):
+    """Stand-in for pyperclip.PyperclipException."""
+
+
+def test_paste_text_reports_a_library_exception_instead_of_raising():
+    injector = TextInjector(backend=_RaisingBackend(_ClipboardUnavailable("no clipboard helper")))
+    assert injector.paste_text("گزارش") is False
+    assert injector.last_error is not None and "no clipboard helper" in injector.last_error
+
+
+def test_type_text_reports_a_library_exception_instead_of_raising():
+    injector = TextInjector(backend=_RaisingBackend(_ClipboardUnavailable("no clipboard helper")))
+    assert injector.type_text("گزارش") is False
+    assert injector.last_error is not None
+
+
+def test_send_backspaces_reports_a_library_exception_instead_of_raising():
+    injector = TextInjector(backend=_RaisingBackend(_ClipboardUnavailable("failsafe triggered")))
+    assert injector.send_backspaces(3) is False
+    assert injector.last_error is not None
+
+
+def test_interim_typing_survives_a_library_exception():
+    """Interim updates type on the provider callback thread too.
+
+    An exception escaping here killed that thread, so dictation stopped
+    silently in the middle of a consult with no error surfaced to the UI.
+    """
+    injector = TextInjector(backend=_RaisingBackend(_ClipboardUnavailable("no clipboard helper")))
+    injector.type_delta_from_partial("بیمار")
+    injector.type_delta_from_partial("بیمار تب")
+    assert injector.last_error is not None

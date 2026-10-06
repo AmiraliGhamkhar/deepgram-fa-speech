@@ -53,6 +53,7 @@ try:  # allows `python host/app.py` from a checkout
         HostSettings,
         RateLimiter,
         TokenBucketRateLimiter,
+        auth_failure_key,
         authenticate_client,
         grant_session_async,
         new_session_id,
@@ -68,6 +69,7 @@ except ImportError:  # pragma: no cover - direct script execution
         HostSettings,
         RateLimiter,
         TokenBucketRateLimiter,
+        auth_failure_key,
         authenticate_client,
         grant_session_async,
         new_session_id,
@@ -151,10 +153,31 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
     )
     inflight = _InflightLimiter(resolved.max_inflight_grants)
 
+    #: One-shot flag, so a deployment that cannot attribute failed
+    #: authentication is reported once instead of on every rejected request.
+    unattributable_failure_warned = [False]
+
+    # Capacity facts, published as soon as the app exists rather than in
+    # `lifespan`: a WSGI deployment (host/passenger_wsgi.py, via a2wsgi) never
+    # runs the ASGI lifespan protocol, so anything set only there would read
+    # as a permanent zero on cPanel.
+    metrics.set_gauge("inflight_grants_capacity", inflight.capacity)
+    metrics.set_gauge("registry_clients", len(registry))
+    metrics.set_gauge("inflight_grants", inflight.in_flight)
+
+    if not resolved.metrics_admin_token:
+        # Not fatal -- a loopback-only or proxy-shielded deployment may
+        # reasonably leave it open -- but it is a fact an operator should see
+        # once at startup rather than discover from a scrape in the wild.
+        log.warning(
+            "HOST_METRICS_ADMIN_TOKEN is not set: /metrics is readable by "
+            "anyone who can reach this port. It exposes no credential and no "
+            "transcript, but it does expose traffic volume and the number of "
+            "registered clients."
+        )
+
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        metrics.set_gauge("deepgram_connections_active", 0)
-        metrics.set_gauge("active_sessions", 0)
         log.info(
             "host ready: clients=%d client_burst=%d global_burst=%d max_inflight=%d",
             len(registry), resolved.client_burst, resolved.global_burst, resolved.max_inflight_grants,
@@ -242,7 +265,10 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
         """
         if resolved.metrics_admin_token:
             if not _token_matches(authorization, resolved.metrics_admin_token):
-                metrics.increment("auth_failures_total")
+                # Counted separately from `auth_failures_total`: a scraper
+                # with a stale token must not look like somebody brute
+                # forcing session credentials.
+                metrics.increment("metrics_auth_failures_total")
                 return JSONResponse({"detail": "invalid credentials"}, status_code=401)
         return PlainTextResponse(
             request.app.state.metrics.render(), media_type="text/plain; version=0.0.4"
@@ -254,18 +280,22 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
         authorization: Optional[str] = Header(default=None),
         x_client_id: Optional[str] = Header(default=None),
     ) -> Any:
-        peer = request.client.host if request.client else "unknown"
+        # `None` when the server supplied no peer address (a WSGI/Passenger
+        # environ without REMOTE_PORT, for example); never a placeholder that
+        # would silently merge every such request into one bucket.
+        peer = request.client.host if request.client else None
 
-        # -- abuse guard: a locked-out address is refused without any work ----
-        auth_key = f"auth:{peer}"
-        locked, lock_retry_after = auth_failure_limiter.is_locked(auth_key)
-        if locked:
-            metrics.increment("rate_limited_total")
-            return JSONResponse(
-                {"detail": "too many failed authentication attempts"},
-                status_code=429,
-                headers={"Retry-After": str(lock_retry_after)},
-            )
+        # -- abuse guard: a locked-out identity is refused without any work ---
+        auth_key = auth_failure_key(peer, x_client_id)
+        if auth_key is not None:
+            locked, lock_retry_after = auth_failure_limiter.is_locked(auth_key)
+            if locked:
+                metrics.increment("rate_limited_total")
+                return JSONResponse(
+                    {"detail": "too many failed authentication attempts"},
+                    status_code=429,
+                    headers={"Retry-After": str(lock_retry_after)},
+                )
 
         identity = authenticate_client(authorization, x_client_id, registry)
         if identity is None:
@@ -273,10 +303,25 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
             # Charging every request would make a hospital's 50 legitimate
             # colleagues exhaust each other's budget on a shared NAT address,
             # which is precisely the bug this work fixes.
-            _allowed, retry_after = auth_failure_limiter.allow(auth_key)
+            retry_after = 0
+            if auth_key is not None:
+                _allowed, retry_after = auth_failure_limiter.allow(auth_key)
+            elif not unattributable_failure_warned[0]:
+                # Said once, not per request: this is a deployment property,
+                # not something the caller can act on each time.
+                unattributable_failure_warned[0] = True
+                log.warning(
+                    "failed authentication cannot be attributed to a peer "
+                    "address or a client id, so no brute-force lockout is "
+                    "applied to it (authentication is still enforced). Run "
+                    "behind a server that supplies REMOTE_ADDR/REMOTE_PORT, or "
+                    "provision client ids, to re-enable the lockout."
+                )
             metrics.increment("auth_failures_total")
             # Never log the presented credential or the client id.
-            log.warning("rejected unauthenticated session request from %s", peer)
+            log.warning(
+                "rejected unauthenticated session request from %s", peer or "unknown"
+            )
             headers = {"Retry-After": str(retry_after)} if retry_after else None
             return JSONResponse(
                 {"detail": "invalid credentials"}, status_code=401, headers=headers
@@ -294,7 +339,7 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
             metrics.increment("rate_limited_total")
             log.warning(
                 "rate limit hit client_id=%s peer=%s retry_after=%ds",
-                identity.client_id, peer, retry_after,
+                identity.client_id, peer or "unknown", retry_after,
             )
             return JSONResponse(
                 {"detail": "too many session requests"},
@@ -316,6 +361,10 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
         if declared is not None:
             try:
                 if int(declared) > resolved.max_request_body_bytes:
+                    metrics.increment("request_body_rejections_total")
+                    log.warning(
+                        "session refused reason=declared_body_over_cap bytes=%s", declared
+                    )
                     return JSONResponse({"detail": "request body too large"}, status_code=413)
             except ValueError:
                 return JSONResponse({"detail": "invalid request"}, status_code=400)
@@ -362,6 +411,7 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
 
         started = time.monotonic()
         metrics.increment("token_requests_total")
+        metrics.set_gauge("inflight_grants", inflight.in_flight)
         try:
             token, expires_in = await grant_session_async(
                 resolved, ttl, request.app.state.grant_client
@@ -371,11 +421,17 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
             metrics.observe("token_request_latency", elapsed)
             metrics.increment("token_request_failures_total")
             metrics.increment("session_failures_total")
+            if exc.status in (503, 504):
+                # Upstream unreachable or too slow: an operator problem with
+                # Deepgram, as opposed to a 502 (our own key is wrong) or a
+                # 429 we shed ourselves.
+                metrics.increment("deepgram_connection_failures_total")
             # The message never contains the Deepgram key or its body.
             log.error("session_error session_id=%s status=%s", session_id, exc.status)
             return JSONResponse({"detail": str(exc)}, status_code=exc.status)
         finally:
             inflight.release()
+            metrics.set_gauge("inflight_grants", inflight.in_flight)
 
         elapsed = time.monotonic() - started
         metrics.observe("token_request_latency", elapsed)
@@ -432,12 +488,42 @@ def main() -> int:  # pragma: no cover - operational entry point
         log.error("host configuration error: %s", exc)
         return 2
     host = os.getenv("HOST_BIND", "0.0.0.0")
-    port = int(os.getenv("HOST_PORT", "8443"))
+    raw_port = os.getenv("HOST_PORT", "8443").strip()
+    try:
+        port = int(raw_port)
+    except ValueError:
+        # A bare int() traceback here reads like a crash in the service rather
+        # than a typo in one environment variable, and it is the first thing
+        # an operator hits when a panel rewrites HOST_PORT to "" or "8443 ".
+        log.error("HOST_PORT must be an integer; got %r", raw_port)
+        return 2
+    if not 1 <= port <= 65535:
+        log.error("HOST_PORT must be between 1 and 65535; got %d", port)
+        return 2
     certfile = os.getenv("HOST_TLS_CERTFILE", "")
     keyfile = os.getenv("HOST_TLS_KEYFILE", "")
 
-    if settings.allow_http and not certfile:
-        log.warning("HOST_ALLOW_HTTP is set: serving plaintext (development only)")
+    if not certfile:
+        if settings.allow_http:
+            log.warning("HOST_ALLOW_HTTP is set: serving plaintext (development only)")
+        else:
+            # Not fatal, and not a misconfiguration in the common case: a
+            # reverse proxy that terminates TLS and forwards
+            # X-Forwarded-Proto from an address in HOST_FORWARDED_ALLOW_IPS is
+            # exactly how this is meant to be deployed behind Apache or a
+            # load balancer. But when there is no such proxy the app rejects
+            # every request with 400 and the container healthcheck fails
+            # forever, which looks like a hung service rather than a missing
+            # certificate -- so say which it is, once, at startup.
+            log.warning(
+                "no TLS certificate (HOST_TLS_CERTFILE) and HOST_ALLOW_HTTP is not set: "
+                "this process serves plaintext while the app requires HTTPS, so every "
+                "request will be rejected with 400 unless a trusted reverse proxy "
+                "terminates TLS and sends X-Forwarded-Proto: https from an address in "
+                "HOST_FORWARDED_ALLOW_IPS (currently %s). Without such a proxy, set "
+                "HOST_TLS_CERTFILE/HOST_TLS_KEYFILE.",
+                ",".join(settings.forwarded_allow_ips) or "<none>",
+            )
 
     # One worker is the supported topology: the in-memory client registry and
     # limiters are per process. Scale with a reverse proxy and a shared

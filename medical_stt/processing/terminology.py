@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Iterable, List, Sequence
+from typing import Iterable, List, Tuple
 
 from .fst import DeterministicFST, LoadResult, Rule
 from .negation import find_negation_spans
@@ -94,6 +94,14 @@ class TerminologyEngine:
         skipped_context = sum(
             1 for r in self._all_rules if r.requires_context and not r.dangerous and not self.enable_context_dependent
         )
+        # DeterministicFST.load() is documented as single-use, and this is why:
+        # pyahocorasick accepts add_word() after make_automaton(), so reusing
+        # the instance silently unions the previous load's rules into the
+        # automaton while _all_rules/_active_rules -- and therefore rule_count
+        # and total_rule_count -- describe only this one. apply() would then
+        # rewrite text using rules the engine reports it does not have, which
+        # is the worst failure mode for an auditable clinical rewriter.
+        self._fst = DeterministicFST()
         self._load_result = self._fst.load(
             [Rule(r.source, r.target) for r in self._active_rules]
         )
@@ -120,20 +128,31 @@ class TerminologyEngine:
 
     def apply(self, text: str) -> str:
         """Rewrite `text`, protecting numeric expressions and negation
-        markers from being touched by any rule."""
+        markers from being touched by any rule.
+
+        Word boundaries are required as well, and this is the single most
+        important safety property in the pipeline. Aho-Corasick matches
+        substrings, so without it a rule for a whole word fires inside a
+        longer one. The shipped rule set contains `مش` -> `Mesh`, `پا` ->
+        `Foot`, `دست` -> `Hand`, `امی` -> `MI`, `دما` -> `T` and `تنفس` ->
+        `RR`, and Persian builds words by attachment, so substring matching
+        turned ordinary dictation into this:
+
+            مشکل تنفسی   ->  Meshکل RRی        ("respiratory problem")
+            پاسخ دهید    ->  Footسخ دهید      ("please answer")
+            امید به زندگی ->  MIد به زندگی    ("life expectancy")
+            دستگاه تنفس  ->  Handگاه RR        ("ventilator")
+
+        The third one is the dangerous shape: `MI` (myocardial infarction)
+        injected into a sentence about life expectancy, then pasted into the
+        clinician's record. Preserving the spoken word is always safe;
+        rewriting part of one never is.
+        """
         if not text:
             return text
-        protected: List[tuple] = []
+        protected: List[Tuple[int, int]] = []
         protected.extend((s.start, s.end) for s in find_numeric_spans(text))
         protected.extend(find_negation_spans(text))
-        return self._fst.apply(text, protected_ranges=protected)
-
-
-def load_rules_from_yaml_data(data) -> Sequence[dict]:
-    """Extract the `rules` list from parsed YAML, tolerating both the
-    categorized dict-list shape and a bare list."""
-    if isinstance(data, dict):
-        return data.get("rules") or []
-    if isinstance(data, list):
-        return data
-    return []
+        return self._fst.apply(
+            text, protected_ranges=protected, require_word_boundaries=True
+        )

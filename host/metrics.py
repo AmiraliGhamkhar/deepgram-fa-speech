@@ -3,19 +3,29 @@
 Deliberately dependency-free: this deployment does not need a Prometheus
 server, a statsd agent, or an OpenTelemetry collector, and adding one would
 be more moving parts than the service itself. What it does need is a way to
-answer operational questions during an incident:
+answer operational questions during an incident about *token issuance*,
+which is the only thing this service does:
 
-    active_sessions, session_starts_total, session_success_total,
-    session_failures_total, session_reconnects_total, token_requests_total,
-    token_request_failures_total, token_request_latency,
-    deepgram_connections_active, deepgram_connection_failures,
-    audio_queue_depth, audio_queue_drops_total, session_duration,
-    first_interim_latency, final_transcript_latency
+    session_starts_total, session_success_total, session_failures_total,
+    token_requests_total, token_request_failures_total,
+    token_request_latency, deepgram_connection_failures_total,
+    auth_failures_total, metrics_auth_failures_total, rate_limited_total,
+    request_body_rejections_total, inflight_grants, inflight_grants_capacity,
+    registry_clients
 
 so this module implements counters, gauges and latency histograms and
 renders them in the Prometheus text exposition format (a plain string, so an
 operator can curl the endpoint or point a real Prometheus at it later with
 no code change).
+
+**Only series this process can actually observe are declared.** Per-session
+audio and transcript timings (`active_sessions`, `audio_queue_depth`,
+`session_duration`, `first_interim_latency`, ...) live on the desktop
+client: the host mints a token and never sees the stream, so publishing them
+here would emit a permanent, plausible-looking zero that a dashboard would
+read as "no sessions active" during a fully busy clinic. They are
+deliberately absent -- see `LiveMedicalSTT.session_health` for the
+client-side equivalent.
 
 **Privacy invariant (non-negotiable):** this module stores counters and
 durations only. It must never be given a token, a secret, a client
@@ -29,15 +39,15 @@ from __future__ import annotations
 import math
 import threading
 import time
-from typing import Callable, Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List, Tuple
 
 #: Above this many distinct client ids, further ids collapse into an
 #: ``other`` bucket instead of creating an unbounded number of time series.
 MAX_LABELLED_CLIENTS = 2_000
 
-#: Latency buckets, in seconds. Chosen around the acceptance target
-#: (p95 < 2s for token acquisition) so the bucket boundary lines up with the
-#: threshold the load test asserts.
+#: Latency buckets, in seconds. The 2.0 boundary lines up with the
+#: acceptance target for token acquisition (p95 < 2s), so a scrape can tell
+#: "inside target" from "outside target" without adding buckets.
 LATENCY_BUCKETS: Tuple[float, ...] = (
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0,
 )
@@ -101,14 +111,6 @@ class Metrics:
         with self._lock:
             self._gauges.setdefault(name, {})[key] = float(value)
 
-    def add_gauge(self, name: str, delta: float, **labels: str) -> None:
-        if not self._accept_labels(labels):
-            return
-        key = self._label_key(labels)
-        with self._lock:
-            series = self._gauges.setdefault(name, {})
-            series[key] = series.get(key, 0.0) + delta
-
     def observe(self, name: str, value: float, **labels: str) -> None:
         if not self._accept_labels(labels):
             return
@@ -121,16 +123,17 @@ class Metrics:
                 series[key] = histogram
             histogram.observe(value)
 
-    def timer(self, name: str, **labels: str) -> "_Timer":
-        """Context manager recording elapsed wall time into a histogram."""
-        return _Timer(self, name, labels)
-
     def _accept_labels(self, labels: Dict[str, str]) -> bool:
-        """Bound the per-client label cardinality.
+        """Bound the per-client label cardinality, in place.
 
         A client id that is already tracked passes. A new one is admitted
-        until the cap, after which it is folded into ``other`` -- so a flood
+        until the cap, after which it is rewritten to ``other`` -- so a flood
         of fabricated ids cannot create unbounded time series.
+
+        Rewritten, not dropped: discarding the sample would make the counters
+        *under-report* exactly when the host is under the most abuse, which is
+        when they are being read. Folding keeps the total correct and costs
+        one extra series.
         """
         client_id = labels.get("client_id")
         if not client_id:
@@ -139,7 +142,8 @@ class Metrics:
             if client_id in self._tracked_clients:
                 return True
             if len(self._tracked_clients) >= self._max_labelled_clients:
-                return False
+                labels["client_id"] = _OVERFLOW_LABEL
+                return True
             self._tracked_clients.add(client_id)
             return True
 
@@ -169,9 +173,19 @@ class Metrics:
     def quantiles(self, name: str, quantiles: Iterable[float] = (0.5, 0.95, 0.99)) -> Dict[str, float]:
         """Approximate quantiles from the bucket boundaries.
 
-        Reported for the load test and tests. Interpolation within the
-        bucket is deliberately naive -- the point is a stable, comparable
-        number, not a statistically exact estimator.
+        Bucket counts are *cumulative* (that is what the Prometheus text
+        format requires, and what `_Histogram.observe` records), so the
+        estimate is the first boundary whose cumulative count reaches
+        `q * count`. Re-accumulating them -- summing an already cumulative
+        series -- silently reports a far smaller latency than was measured:
+        for observations {0.001, 0.02, 0.3, 1.5, 40} it returned p95=0.05s
+        instead of 30s, which would let a capacity gate pass a system that
+        is missing its target by an order of magnitude.
+
+        Resolution is the bucket boundary, not an interpolation inside it:
+        the point is a stable, comparable number. An observation above the
+        largest boundary is reported *as* the largest boundary, i.e. the
+        estimate never claims to be faster than the evidence allows.
         """
         wanted = sorted(float(q) for q in quantiles)
         with self._lock:
@@ -181,6 +195,8 @@ class Metrics:
             merged = _Histogram()
             for histogram in series.values():
                 buckets, total, count = histogram.snapshot()
+                # Summing cumulative counts across label sets gives the
+                # cumulative counts of the union.
                 for index, (_upper, hits) in enumerate(buckets):
                     merged._counts[index] += hits
                 merged._sum += total
@@ -193,11 +209,9 @@ class Metrics:
         result: Dict[str, float] = {}
         for q in wanted:
             target = q * count
-            cumulative = 0
             estimate = buckets[-1][0] if buckets else 0.0
-            for upper, hits in buckets:
-                cumulative += hits
-                if cumulative >= target:
+            for upper, cumulative_hits in buckets:
+                if cumulative_hits >= target:
                     estimate = upper
                     break
             result[f"p{int(q * 100)}"] = round(estimate, 6)
@@ -241,35 +255,6 @@ class Metrics:
         return "\n".join(lines) + "\n"
 
 
-class _Timer:
-    """Context manager returned by `Metrics.timer`."""
-
-    def __init__(
-        self,
-        metrics: Metrics,
-        name: str,
-        labels: Dict[str, str],
-        clock: Callable[[], float] = time.monotonic,
-    ) -> None:
-        self._metrics = metrics
-        self._name = name
-        self._labels = labels
-        self._clock = clock
-        self._started = 0.0
-
-    def __enter__(self) -> "_Timer":
-        self._started = self._clock()
-        return self
-
-    def __exit__(self, *_exc: object) -> None:
-        self._metrics.observe(self._name, self._clock() - self._started, **self._labels)
-
-    @property
-    def elapsed(self) -> float:
-        """Seconds since `__enter__` (usable without exiting the block)."""
-        return self._clock() - self._started
-
-
 def _format_labels(key: Tuple[Tuple[str, str], ...]) -> str:
     if not key:
         return ""
@@ -294,37 +279,43 @@ def _as_number(value: float) -> str:
 
 
 #: Names the host always publishes, so `/metrics` is stable even before the
-#: first request arrives and a dashboard does not show gaps.
+#: first request arrives and a dashboard does not show gaps. Every one of
+#: these is a series this process actually updates -- see the module
+#: docstring for why client-side series are deliberately not declared here.
 DECLARED_COUNTERS: Tuple[str, ...] = (
     "session_starts_total",
     "session_success_total",
     "session_failures_total",
-    "session_reconnects_total",
     "token_requests_total",
     "token_request_failures_total",
     "deepgram_connection_failures_total",
-    "audio_queue_drops_total",
     "auth_failures_total",
+    "metrics_auth_failures_total",
     "rate_limited_total",
     "request_body_rejections_total",
 )
 
 DECLARED_GAUGES: Tuple[str, ...] = (
-    "active_sessions",
-    "deepgram_connections_active",
-    "audio_queue_depth",
+    #: Deepgram grant requests currently in flight, and the cap they are
+    #: shed against (`HOST_MAX_INFLIGHT_GRANTS`).
+    "inflight_grants",
+    "inflight_grants_capacity",
+    #: Client identities the host can authenticate.
+    "registry_clients",
 )
 
 DECLARED_HISTOGRAMS: Tuple[str, ...] = (
     "token_request_latency",
-    "session_duration",
-    "first_interim_latency",
-    "final_transcript_latency",
 )
 
 
 def new_metrics(max_labelled_clients: int = MAX_LABELLED_CLIENTS) -> Metrics:
-    """A registry pre-seeded with the declared series at zero."""
+    """A registry pre-seeded with the declared counters and gauges at zero.
+
+    Histograms are not pre-seeded: an empty `token_request_latency` renders
+    no series at all, whereas pre-seeding one would publish `_count 0` with
+    no buckets, which Prometheus rejects as an inconsistent histogram.
+    """
     metrics = Metrics(max_labelled_clients=max_labelled_clients)
     for name in DECLARED_COUNTERS:
         metrics.increment(name, 0)

@@ -164,7 +164,7 @@ set -a; . host/.env; set +a
 | `HOST_CLIENT_BURST` | no | `120` | Per-client burst capacity. |
 | `HOST_GLOBAL_RATE_LIMIT_REQUESTS` | no | `600` | Global sustained rate per window. |
 | `HOST_GLOBAL_BURST` | no | `1200` | Global burst capacity. |
-| `HOST_AUTH_FAILURE_LIMIT` | no | `20` | Failed auths per IP per window. |
+| `HOST_AUTH_FAILURE_LIMIT` | no | `20` | Failed-auth budget per window, keyed on the peer address, or on the validated `client_id` when the server supplies no peer address. |
 | `HOST_RATE_LIMIT_WINDOW_SECONDS` | no | `60` | Window for all of the above. |
 | `HOST_RATE_LIMIT_REQUESTS` | no | — | **Ignored.** This was the old per-IP fixed-window budget. Session requests are now limited per authenticated `client_id`, so it has nothing to apply to. It is still accepted (so existing configs keep loading) and the service logs a warning when it is set, but changing it has no effect. |
 | `HOST_GRANT_TIMEOUT_SECONDS` | no | `10` | Deepgram read/write/pool timeout. |
@@ -175,7 +175,7 @@ set -a; . host/.env; set +a
 | `HOST_MAX_REQUEST_BODY_BYTES` | no | `4096` | Request body cap (413 beyond). |
 | `HOST_METRICS_ADMIN_TOKEN` | no | — | If set, `/metrics` requires it. |
 | `HOST_TLS_CERTFILE` / `HOST_TLS_KEYFILE` | no* | — | PEM certificate and key. |
-| `HOST_BIND` / `HOST_PORT` | no | `0.0.0.0` / `8443` | Listen address. |
+| `HOST_BIND` / `HOST_PORT` | no | `0.0.0.0` / `8443` | Listen address. Read only by `python -m host.app`; a WSGI host (cPanel/Passenger) owns its own listener and ignores both. |
 | `HOST_FORWARDED_ALLOW_IPS` | no | `127.0.0.1` | Which peers may set `X-Forwarded-Proto`. |
 | `HOST_ALLOW_HTTP` | no | `0` | `1` serves plaintext. **Development only.** |
 
@@ -292,23 +292,45 @@ it by giving the key to a client.
 
 `GET /metrics` (Prometheus text format, no exporter dependency). Set
 `HOST_METRICS_ADMIN_TOKEN` to require `Authorization: Bearer <token>`;
-`/healthz` and `/readyz` stay open for load balancers.
+`/healthz` and `/readyz` stay open for load balancers. **Without that token
+`/metrics` is readable by anyone who can reach the port** — it carries no
+credential and no transcript, but it does disclose traffic volume and the
+registered client count, so set it on any host that is not loopback-only.
 
-Published series:
+Published series — every one of them is a value this process actually
+updates:
 
-| Metric | Type |
-|---|---|
-| `active_sessions`, `deepgram_connections_active`, `audio_queue_depth` | gauge |
-| `session_starts_total`, `session_success_total`, `session_failures_total`, `session_reconnects_total` | counter |
-| `token_requests_total`, `token_request_failures_total`, `auth_failures_total`, `rate_limited_total` | counter |
-| `deepgram_connection_failures_total`, `audio_queue_drops_total` | counter |
-| `token_request_latency`, `session_duration`, `first_interim_latency`, `final_transcript_latency` | histogram |
+| Metric | Type | Meaning |
+|---|---|---|
+| `inflight_grants` | gauge | Deepgram grant requests in flight right now |
+| `inflight_grants_capacity` | gauge | `HOST_MAX_INFLIGHT_GRANTS`; past it, 503 |
+| `registry_clients` | gauge | client identities the host can authenticate |
+| `session_starts_total` | counter | authenticated session requests received |
+| `session_success_total` | counter | tokens issued |
+| `session_failures_total` | counter | requests that produced no token |
+| `token_requests_total`, `token_request_failures_total` | counter | upstream grant attempts / failures |
+| `deepgram_connection_failures_total` | counter | grant failed because Deepgram was unreachable or too slow (503/504) |
+| `auth_failures_total` | counter | rejected `POST /v1/session` credentials |
+| `metrics_auth_failures_total` | counter | rejected `/metrics` admin tokens (counted separately, so a stale scraper does not look like credential stuffing) |
+| `rate_limited_total` | counter | 429s issued (client, global, or brute-force budget) |
+| `request_body_rejections_total` | counter | bodies refused over `HOST_MAX_REQUEST_BODY_BYTES` |
+| `token_request_latency` | histogram | seconds per upstream grant, cumulative buckets |
+
+Per-session audio and transcript timings are **not** published here, by
+design: the host mints a token and never sees the stream, so `active_sessions`,
+`audio_queue_depth` or `session_duration` would be a permanent, plausible
+zero that a dashboard reads as "clinic idle". The client-side equivalents
+are on `LiveMedicalSTT.session_health` and in the app log.
 
 Alerts worth having:
 
 * `rate_limited_total` rising above ~0 — legitimate clients are being
   refused; check `HOST_CLIENT_BURST` against your real startup surge.
+* `inflight_grants` sitting at `inflight_grants_capacity` — Deepgram is
+  slower than your arrival rate and the host is shedding load.
 * `token_request_latency` p95 > 2s — Deepgram or the pool is the bottleneck.
+  Read it from the cumulative buckets (`histogram_quantile`), not from an
+  average of `token_request_latency_sum / _count`.
 * `auth_failures_total` spiking — credential stuffing or a stale device.
 
 Metrics contain counters, durations and client ids. **Never** a token, a

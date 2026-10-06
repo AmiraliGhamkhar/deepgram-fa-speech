@@ -104,12 +104,31 @@ class DeterministicFST:
     def ready(self) -> bool:
         return self._ready
 
-    def apply(self, text: str, protected_ranges: Sequence[Tuple[int, int]] = ()) -> str:
+    def apply(
+        self,
+        text: str,
+        protected_ranges: Sequence[Tuple[int, int]] = (),
+        require_word_boundaries: bool = False,
+    ) -> str:
         """Rewrite `text` using longest-match rules, left to right.
 
         `protected_ranges` is an optional list of (start, end) character
         spans (e.g. numeric expressions, negation markers) that must not be
         touched even if a rule would otherwise match inside them.
+
+        `require_word_boundaries` additionally drops a match that is glued to
+        a word character on either side, so a rule for a whole word cannot
+        fire inside a longer one. Off by default: this class is a general
+        longest-match rewriter and its substring semantics are pinned by
+        tests/test_fst.py. Terminology rewriting turns it on -- see
+        `_is_word_char` for why a clinical rewriter has to.
+
+        Filtering happens after overlap resolution rather than before, which
+        is equivalent here: if a match is rejected because a word character
+        touches its start, every shorter match at that same start is rejected
+        for the same reason, and if it is rejected because of its end, the
+        shorter match ends inside the same run of word characters. So no
+        boundary-valid match is ever lost by resolving overlaps first.
         """
         if not text or not self._ready or not self._has_words:
             return text
@@ -117,6 +136,8 @@ class DeterministicFST:
         matches = self._longest_matches(text)
         if protected_ranges:
             matches = [m for m in matches if not _overlaps_any(m, protected_ranges)]
+        if require_word_boundaries:
+            matches = [m for m in matches if _is_whole_word(text, m[0], m[1])]
 
         return self._render(text, matches)
 
@@ -155,6 +176,30 @@ class DeterministicFST:
             cursor = end
         out.append(text[cursor:])
         return "".join(out)
+
+
+#: Characters that continue a word beyond what `str.isalnum()` covers.
+#:
+#: `str.isalnum()` is Unicode-aware, so it already counts Persian and Arabic
+#: letters and both the ASCII and the Persian/Arabic-Indic digits as word
+#: characters. The zero-width joiners are added explicitly because a
+#: ZWNJ-joined Persian compound is ONE word: "میلی‌جیوه" is millimetre-of-
+#: mercury, not "میلی" next to "جیوه". Treating the ZWNJ as a boundary would
+#: let a rule rewrite the second half of a compound and emit "میلی‌Mercury".
+_WORD_JOINERS = "\u200c\u200d"
+
+
+def _is_word_char(ch: str) -> bool:
+    # The empty string must be False: `"" in _WORD_JOINERS` is True, and an
+    # absent neighbour is a boundary, not a continuation.
+    return bool(ch) and (ch.isalnum() or ch in _WORD_JOINERS)
+
+
+def _is_whole_word(text: str, start: int, end: int) -> bool:
+    """True if text[start:end] is a complete word, not a fragment of one."""
+    before = text[start - 1] if start > 0 else ""
+    after = text[end] if end < len(text) else ""
+    return not _is_word_char(before) and not _is_word_char(after)
 
 
 def _overlaps_any(match: Tuple[int, int, str], ranges: Sequence[Tuple[int, int]]) -> bool:

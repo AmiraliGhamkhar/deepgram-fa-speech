@@ -78,16 +78,43 @@ _ZWNJ_DUPLICATED_RE = re.compile(ZWNJ + "{2,}")
 # exclude '/', '.', ':', '-' from this table because those are load-bearing
 # in numeric expressions (e.g. "120/80", "7.2", "10:00", ranges) and must be
 # left completely alone here; numeric protection happens in numbers.py.
-_PUNCT_NO_SPACE_BEFORE = "،؛؟!,;:?!"
-_PUNCT_SPACE_AFTER = "،؛؟!,;?!"
+_PUNCT_NO_SPACE_BEFORE = "،؛؟!,;:"
+_PUNCT_SPACE_AFTER = "،؛؟!,;"
+
+
+def _nearest_non_space(text: str, index: int, step: int) -> str:
+    """First non-space character at/after `index` walking in `step`, or ""."""
+    i = index + step
+    while 0 <= i < len(text) and text[i] == " ":
+        i += step
+    return text[i] if 0 <= i < len(text) else ""
 
 
 def _looks_numeric_context(text: str, index: int) -> bool:
     """True if the character at `index` sits inside/adjacent to a digit
-    run, so punctuation-spacing rules must not touch it."""
+    run, so punctuation-spacing rules must not touch it.
+
+    Two cases, deliberately asymmetric:
+
+    * a digit *immediately* on either side -- "120/80", "7.2", "14:30" --
+      where the mark is part of the number itself;
+    * spaces on both sides but a digit beyond each -- "10 : 00", "دوز 5 - 10"
+      -- where ASR spaced out a mark that is still load-bearing inside a
+      numeric expression.
+
+    The second case requires digits on BOTH sides. One-sided adjacency through
+    a space is ordinary prose ("تعداد : 3 عدد") where the typographic fix is
+    wanted. Checking only immediate neighbours turned a dictated time
+    "10 : 00" into "10: 00" -- neither a valid time nor valid prose, and a
+    numeric value silently corrupted on its way into a clinical record.
+    """
     left = text[index - 1] if index > 0 else ""
     right = text[index + 1] if index + 1 < len(text) else ""
-    return left.isdigit() or right.isdigit()
+    if left.isdigit() or right.isdigit():
+        return True
+    return _nearest_non_space(text, index, -1).isdigit() and _nearest_non_space(
+        text, index, +1
+    ).isdigit()
 
 
 def _fix_punctuation_spacing(text: str) -> str:

@@ -60,3 +60,54 @@ def test_date_like_pattern_protected():
 def test_time_like_pattern_protected():
     spans = find_numeric_spans("ساعت 14:30 مراجعه کرد")
     assert any(s.text == "14:30" for s in spans)
+
+
+# -- whole-span protection ------------------------------------------------
+#
+# find_numeric_spans exists so no terminology rule can match *part* of a
+# clinical numeric expression. A date has two separators and is therefore more
+# specific than a ratio or a range, but it used to be tried last: the range
+# pattern claimed "2024-01" out of "2024-01-05" and the bare-number pattern
+# claimed "05", leaving the second hyphen unprotected.
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "2024-01-05",
+        "1403/06/12",
+        "5/1/2024",
+        "تاریخ 2024-01-05 مراجعه کرد",
+        "تاریخ 1403/06/12 مراجعه کرد",
+    ],
+)
+def test_a_date_is_protected_as_one_contiguous_span(text):
+    digits_and_separators = [
+        (i, ch) for i, ch in enumerate(text) if ch.isdigit() or ch in "-/:"
+    ]
+    if not digits_and_separators:
+        pytest.skip("no date in this sample")
+    first, last = digits_and_separators[0][0], digits_and_separators[-1][0]
+    spans = find_numeric_spans(text)
+    covering = [s for s in spans if s.start <= first and s.end > last]
+    assert len(covering) == 1, f"date split across spans: {[(s.start, s.end, s.text) for s in spans]}"
+    # Every separator inside the date must be inside the protected span, not
+    # just its digits -- that is what stops a rule rewriting across the middle.
+    span = covering[0]
+    for i, ch in digits_and_separators:
+        assert span.start <= i < span.end, f"{ch!r} at {i} unprotected in {span.text!r}"
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("120/80 mmHg", "120/80 mmHg"),
+        ("5-10 mg", "5-10 mg"),
+        ("10x5", "10x5"),
+        ("14:30", "14:30"),
+        ("2 to 4 cm", "2 to 4 cm"),
+    ],
+)
+def test_moving_dates_first_did_not_steal_ratios_ranges_or_times(text, expected):
+    """A date needs two separators, so single-separator forms are untouched."""
+    assert any(s.text == expected for s in find_numeric_spans(text))

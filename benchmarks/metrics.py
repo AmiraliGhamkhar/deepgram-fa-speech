@@ -14,14 +14,24 @@ Definitions (documented because "WER" is not portable between tools):
 * Character error rate uses the same alignment over code points.
 * Numeric accuracy extracts clinical numeric expressions from the reference
   (processing/numbers.py, the same extractor the pipeline protects) and
-  requires each one to appear verbatim in the hypothesis. This is stricter
-  than WER on purpose: "120/8" versus "120/80" must not be averaged away.
+  requires each one to appear in the hypothesis as a *complete* expression.
+  This is stricter than WER on purpose: "120/8" versus "120/80" must not be
+  averaged away.
 * Medical-term recall and English-term recognition are recall-only: they
   ask whether the terms the speaker said survived, not whether the model
-  invented extra ones (precision is visible through WER/CER).
+  invented extra ones (precision is visible through WER/CER). A term counts
+  as present only when it is not embedded in a longer word, so the
+  abbreviation "IV" is not credited to "DRIVE" and "MI" is not credited to
+  "ADMINISTRATION".
+
+All three of those use boundary-aware containment (`_contains_*` below)
+rather than `str.__contains__`, because a substring test scores a truncated
+digit or an abbreviation swallowed by a longer Latin word as a perfect hit --
+the exact false positives a clinical benchmark exists to catch.
 """
 from __future__ import annotations
 
+import re
 import unicodedata
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Sequence, Tuple
@@ -96,11 +106,56 @@ def character_error_rate(reference: str, hypothesis: str) -> float:
     return edit_distance(ref_chars, hyp_chars) / len(ref_chars)
 
 
+#: Characters that can extend a numeric expression into a longer one: digits
+#: and the separators processing/numbers.py matches between them. Only a
+#: *digit* end of a span needs checking -- a span ending in a unit ("mmHg",
+#: "درصد") is already delimited by the unit itself, and demanding a boundary
+#: after it would reject ordinary sentence punctuation ("120/80 mmHg.").
+_NUMERIC_EXTENSION_CHARS = frozenset("0123456789.,:/%-x\u00d7")
+
+#: A term counts as present only when no ASCII alphanumeric touches either
+#: side of the match. Persian characters are deliberately outside this class:
+#: Persian terms keep exactly the containment semantics they always had, and
+#: only Latin abbreviations -- where "IV" hides inside "DRIVE" -- get stricter.
+_ALNUM_CLASS = "0-9A-Za-z"
+
+
+def _term_pattern(term: str) -> "re.Pattern[str]":
+    return re.compile(rf"(?<![{_ALNUM_CLASS}]){re.escape(term)}(?![{_ALNUM_CLASS}])")
+
+
+def _contains_term(haystack: str, term: str) -> bool:
+    """True if `term` occurs in `haystack` as a whole word/abbreviation."""
+    return bool(term) and _term_pattern(term).search(haystack) is not None
+
+
+def _contains_numeric_expression(haystack: str, needle: str) -> bool:
+    """True if the numeric expression `needle` occurs whole in `haystack`.
+
+    Every occurrence is tested, not just the first: a hypothesis can mention
+    the truncated form before the real one ("120/8 یعنی 120/80").
+    """
+    if not needle:
+        return False
+    start = 0
+    while True:
+        index = haystack.find(needle, start)
+        if index < 0:
+            return False
+        before = haystack[index - 1] if index > 0 else ""
+        after = haystack[index + len(needle)] if index + len(needle) < len(haystack) else ""
+        left_open = needle[0].isdigit() and before in _NUMERIC_EXTENSION_CHARS
+        right_open = needle[-1].isdigit() and after in _NUMERIC_EXTENSION_CHARS
+        if not left_open and not right_open:
+            return True
+        start = index + 1
+
+
 def medical_term_recall(reference: str, hypothesis: str, terms: Iterable[str]) -> float:
-    wanted = [t for t in terms if t and t in reference]
+    wanted = [t for t in terms if _contains_term(reference, t)]
     if not wanted:
         return 1.0
-    hits = sum(1 for term in wanted if term in hypothesis)
+    hits = sum(1 for term in wanted if _contains_term(hypothesis, term))
     return hits / len(wanted)
 
 
@@ -109,13 +164,16 @@ def english_term_recall(reference: str, hypothesis: str) -> float:
     latin = [token for token in tokens(reference) if _has_latin(token)]
     if not latin:
         return 1.0
-    hyp_text = _normalize_for_scoring(hypothesis)
+    remaining = _normalize_for_scoring(hypothesis)
     hits = 0
-    remaining = hyp_text
     for token in latin:
-        if token in remaining:
-            hits += 1
-            remaining = remaining.replace(token, "", 1)
+        match = _term_pattern(token).search(remaining)
+        if match is None:
+            continue
+        hits += 1
+        # Consume one occurrence, as before, so a reference that repeats a
+        # token requires the hypothesis to repeat it too.
+        remaining = remaining[: match.start()] + remaining[match.end():]
     return hits / len(latin)
 
 
@@ -127,7 +185,7 @@ def numeric_accuracy(reference: str, hypothesis: str) -> float:
     spans = [span.text.strip() for span in find_numeric_spans(_normalize_for_scoring(reference))]
     if not spans:
         return 1.0
-    return sum(1 for span in spans if span in hypothesis) / len(spans)
+    return sum(1 for span in spans if _contains_numeric_expression(hypothesis, span)) / len(spans)
 
 
 def negation_preservation(reference: str, hypothesis: str) -> float:

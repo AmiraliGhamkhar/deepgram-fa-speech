@@ -94,3 +94,41 @@ def test_punctuation_spacing_does_not_touch_numeric_colon():
     # 'time' style colon must not gain a space (numeric-adjacent).
     result = normalize("ساعت 14:30 مراجعه کرد")
     assert "14:30" in result
+
+
+# -- spaced-out punctuation inside numeric expressions --------------------
+
+
+def test_spaced_time_colon_is_left_alone():
+    """ASR often spaces around punctuation; a time must survive it intact.
+
+    The old immediate-neighbour check saw a space on both sides of ':' and
+    decided it was prose, collapsing "10 : 00" to "10: 00" -- neither a valid
+    time nor valid prose, and a numeric value corrupted on the way into a
+    clinical record.
+    """
+    assert normalize("ساعت 10 : 00 مراجعه کرد") == "ساعت 10 : 00 مراجعه کرد"
+
+
+def test_spaced_range_hyphen_is_left_alone():
+    assert normalize("دوز 5 - 10 mg") == "دوز 5 - 10 mg"
+
+
+def test_prose_colon_before_a_number_is_still_tightened():
+    """Only a digit on BOTH sides counts as a numeric expression.
+
+    One-sided adjacency through a space is ordinary prose, and the
+    typographic fix there is wanted.
+    """
+    assert normalize("تعداد : 3 عدد") == "تعداد: 3 عدد"
+
+
+def test_prose_colon_between_words_is_still_tightened():
+    assert normalize("یادداشت : مهم") == "یادداشت: مهم"
+
+
+def test_punctuation_tables_have_no_duplicate_entries():
+    from medical_stt.processing.normalize import _PUNCT_NO_SPACE_BEFORE, _PUNCT_SPACE_AFTER
+
+    for table in (_PUNCT_NO_SPACE_BEFORE, _PUNCT_SPACE_AFTER):
+        assert len(table) == len(set(table)), f"duplicated marks in {table!r}"

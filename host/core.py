@@ -643,6 +643,37 @@ def _is_sha256_hex(value: str) -> bool:
     return len(value) == 64 and all(ch in "0123456789abcdef" for ch in value)
 
 
+def auth_failure_key(peer_host: Optional[str], client_id: Optional[str]) -> Optional[str]:
+    """Brute-force budget key for one request, or None when unattributable.
+
+    The failed-authentication limiter only slows down someone guessing
+    secrets if it can tell the guesser apart from the clinicians it is
+    protecting. A budget shared by everybody is not a security control, it
+    is a denial of service: 20 bad requests from anywhere would lock every
+    provisioned device out for a whole window.
+
+    Attribution order:
+
+    1. the immediate peer address, when the server supplied one;
+    2. otherwise the presented (validated) client id. A WSGI/Passenger
+       deployment can omit the peer address entirely, because `a2wsgi`
+       populates `scope["client"]` only when *both* `REMOTE_ADDR` and
+       `REMOTE_PORT` are present in the environ;
+    3. otherwise nothing. The failure is still counted and logged, but no
+       lockout is applied, because there is no key that would not equally
+       apply to every legitimate legacy client.
+
+    Authentication itself is enforced identically in all three cases: this
+    function decides only who an *abuse* budget is charged to.
+    """
+    if peer_host:
+        return f"auth:{peer_host}"
+    normalized = normalize_client_id(client_id)
+    if normalized:
+        return f"auth-id:{normalized}"
+    return None
+
+
 def authenticate_client(
     authorization_header: Optional[str],
     client_id: Optional[str],
@@ -819,6 +850,11 @@ class AsyncGrantClient:
                 max_connections=max_connections,
                 max_keepalive_connections=max_keepalive_connections,
             ),
+            # Explicit, not left to the library default: this request carries
+            # the Deepgram API key in an Authorization header, so a redirect
+            # must never be followed to a host nobody configured. A token
+            # endpoint has no legitimate reason to redirect.
+            follow_redirects=False,
         )
         self._closed = False
 

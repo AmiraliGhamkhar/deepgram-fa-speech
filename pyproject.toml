@@ -16,6 +16,25 @@ ignore_missing_imports = true
 warn_unused_ignores = true
 no_implicit_optional = true
 exclude = ["tests/", "scripts/"]
+# host/ has no __init__.py -- cPanel copies it as a flat directory, so its
+# modules must also import as top-level names. Without explicit bases mypy
+# refuses the package-relative imports in host/app.py and
+# host/passenger_wsgi.py ("No parent module -- cannot perform relative
+# import") and silently checks nothing.
+explicit_package_bases = true
+mypy_path = "."
+
+[[tool.mypy.overrides]]
+# These two modules support both import layouts at once: package-relative in a
+# full checkout, flat top-level when only host/ is deployed. The fallback
+# branch is therefore a redefinition when the relative import resolves, and an
+# unresolvable module when it does not -- in either mode one of the two
+# diagnostics is spurious, and the `type: ignore[no-index]` comments that are
+# load-bearing in flat mode read as unused in package mode. Exactly these two
+# codes are disabled, and only for these two modules; every other host module
+# is checked in full.
+module = ["host.app", "host.passenger_wsgi"]
+disable_error_code = ["no-redef", "unused-ignore"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

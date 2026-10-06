@@ -33,18 +33,47 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libportaudio2
 
       - name: Install dependencies
+        # host/requirements-dev.txt is installed here too, on purpose. Several
+        # host suites (test_host_app.py, test_audit_fixes.py,
+        # test_host_concurrency.py) begin with pytest.importorskip("fastapi"),
+        # so with only the client dependencies installed they skipped *whole
+        # modules* and this job still reported green. The step below fails the
+        # build if that ever happens again.
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements-dev.txt
+          pip install -r requirements-dev.txt -r host/requirements-dev.txt
 
       - name: Run unit + regression tests
-        run: pytest tests/ -v --cov=medical_stt --cov-report=term-missing
+        shell: bash
+        run: |
+          set -o pipefail
+          pytest tests/ -v -rs --cov=medical_stt --cov-report=term-missing 2>&1 | tee pytest.log
+
+      - name: Fail if any suite was skipped for a missing dependency
+        shell: bash
+        run: |
+          # importorskip turns an uninstalled package into a silent green job.
+          # The only skips this repository allows are the environment-gated
+          # live/load/soak suites, whose reasons never mention an import, so
+          # any "could not import" line means a suite did not run at all.
+          if grep -E "could not import" pytest.log; then
+            echo "::error title=Suite silently skipped::A test module was skipped because a dependency is missing from the install step above."
+            exit 1
+          fi
 
       - name: Lint (ruff)
-        run: ruff check medical_stt tests scripts host
+        # Whole repository: `benchmarks/` and `run.py` were outside the
+        # previous path list, so a W292 in run.py went unnoticed.
+        run: ruff check .
 
       - name: Type check (mypy)
-        run: mypy medical_stt host/core.py
+        # host/app.py, host/metrics.py, host/provision.py and
+        # host/passenger_wsgi.py were outside the previous invocation -- which
+        # is how four stale `type: ignore` comments survived there. `host` is
+        # checked as a package (see explicit_package_bases in pyproject.toml);
+        # naming the files individually makes mypy reject the package-relative
+        # imports and check nothing.
+        run: mypy medical_stt host benchmarks
 
   host-test:
     name: Host service + 50-client concurrency
@@ -69,6 +98,17 @@ jobs:
 
       - name: Run host service tests
         run: pytest tests/test_host_service.py tests/test_host_client.py -v
+
+      - name: Run ASGI-level host suites
+        # These need fastapi/httpx/a2wsgi, so they belong to this job and not
+        # to the dependency-light one above. test_audit_fixes.py in particular
+        # is the regression pin for the whole host remediation list, and it
+        # used to be excluded from every job's explicit file list -- it only
+        # ran in the `test` job, where importorskip silently skipped it.
+        run: >-
+          pytest tests/test_host_app.py tests/test_host_metrics.py
+          tests/test_host_docs.py tests/test_audit_fixes.py
+          tests/test_passenger_wsgi.py -v
 
       - name: Run 50-client concurrency suite
         # The load and soak tests are opt-in via environment variables and
@@ -123,6 +163,25 @@ jobs:
               ForEach-Object { Write-Host "::error title=Windows self-test::$($_)" }
           }
           exit $code
+
+  dependency-audit:
+    name: Dependency audit (known CVEs)
+    runs-on: ubuntu-latest
+    # Advisories are published after a dependency is pinned, so a green build
+    # yesterday says nothing about today. This job resolves both requirement
+    # files (client and host) against the advisory database on every push.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pip-audit
+        run: python -m pip install --upgrade pip && pip install "pip-audit>=2.7,<3.0"
+
+      - name: Audit client + host dependencies
+        run: pip-audit -r requirements.txt -r host/requirements.txt --strict
 
   secret-scan:
     name: Secret scan

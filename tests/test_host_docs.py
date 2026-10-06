@@ -2,9 +2,9 @@
 
 The `.env.example` templates ship with empty placeholders and are the
 canonical list, but they are easy to forget when a setting is added. This
-test fails CI when the code reads a variable that `host/README.md` does not
-document, so an operator cannot read through the documentation and find a
-setting silently missing.
+test fails CI when the code reads a variable that neither `host/README.md`
+nor `host/.env.example` documents, so an operator cannot read through either
+and find a setting silently missing.
 
 It also pins the two claims that are easy to regress silently:
 
@@ -19,7 +19,9 @@ from typing import Set
 
 ROOT = Path(__file__).resolve().parent.parent
 HOST_README = ROOT / "host" / "README.md"
+HOST_ENV_EXAMPLE = ROOT / "host" / ".env.example"
 ROOT_README = ROOT / "README.md"
+CPANEL_DOC = ROOT / "docs" / "CPANEL_HOSTING.md"
 
 #: Modules that read configuration from the environment.
 CONFIG_SOURCES = ("host/core.py", "host/app.py", "host/provision.py")
@@ -82,6 +84,46 @@ def test_every_host_env_var_is_documented():
     )
 
 
+def test_every_host_env_var_is_in_the_env_template():
+    """`.env.example` is the file an operator actually copies.
+
+    The README table above was already enforced; the template was not, and 12
+    variables the service reads were absent from it -- including
+    HOST_METRICS_ADMIN_TOKEN, HOST_CLIENTS_FILE, HOST_MAX_INFLIGHT_GRANTS and
+    HOST_MAX_REQUEST_BODY_BYTES. An operator deploying from the template alone
+    could not discover them, and could not tell that the ones they did see
+    were the whole story.
+    """
+    read = _env_vars_read_by_host()
+    template = HOST_ENV_EXAMPLE.read_text(encoding="utf-8")
+    mentioned = set(re.findall(r"\b[A-Z][A-Z0-9_]{3,}\b", template))
+    missing = sorted(read - mentioned)
+    assert not missing, (
+        "host/.env.example does not mention these environment variables: "
+        + ", ".join(missing)
+    )
+
+
+def test_env_template_marks_the_inert_rate_limit_variable():
+    """The template must not present a retired setting as tunable.
+
+    The README table already has to say "Ignored"; the template is the more
+    likely place for an operator to uncomment a line and expect an effect.
+    """
+    template = HOST_ENV_EXAMPLE.read_text(encoding="utf-8")
+    assert "HOST_RATE_LIMIT_REQUESTS" in template, (
+        "the variable is still accepted for compatibility, so removing it "
+        "from the template without a migration note would be worse than "
+        "listing it"
+    )
+    index = template.index("HOST_RATE_LIMIT_REQUESTS")
+    preceding = template[max(0, index - 400):index].lower()
+    assert "inert" in preceding, (
+        "HOST_RATE_LIMIT_REQUESTS must be labelled inert immediately above "
+        "its line in host/.env.example"
+    )
+
+
 def test_client_credentials_are_documented():
     """The client id must be discoverable without reading the host source."""
     readme = HOST_README.read_text(encoding="utf-8")
@@ -109,6 +151,88 @@ def test_deprecated_rate_limit_var_is_flagged_not_silently_ignored():
     assert "ignored" in row or "no longer" in row, (
         "the settings table must mark HOST_RATE_LIMIT_REQUESTS as not in "
         f"effect; row was: {rows[0]}"
+    )
+
+
+def test_readme_capacity_numbers_point_at_the_harness():
+    """The README must not quote measurements it cannot keep current.
+
+    The "Measured" table used to hard-code `p95 < 0.01s` and `+0.65 MB RSS`,
+    neither of which scripts/measure_capacity.py had ever produced: its mock
+    upstream adds a 50 ms delay, so sub-10 ms is impossible, and RSS growth
+    across 250 sessions measures roughly 1-1.5 MB. A stale figure presented as
+    a measurement gets repeated by whoever reads it.
+    """
+    text = ROOT_README.read_text(encoding="utf-8")
+    lowered = text.lower()
+    assert "scripts/measure_capacity.py" in text, (
+        "the capacity section must name the harness that produces the numbers"
+    )
+    for stale in ("< 0.01s", "+0.65 mb"):
+        assert stale not in lowered, f"README still quotes the stale figure {stale!r}"
+
+
+# -- the cPanel/Passenger guide ------------------------------------------
+#
+# That guide is the deployment path a2wsgi exists for, and three of its claims
+# described a server that is not the one running: a boot log line the ASGI
+# lifespan emits (and a2wsgi never runs), an Apache header as the thing that
+# makes HTTPS work (the WSGI scheme is checked first, and the header is
+# ignored unless the peer is a configured proxy -- which under mod_passenger it
+# is not), and HOST_BIND as a recommended setting (read only by
+# `python -m host.app`, which Passenger never runs).
+
+
+def test_cpanel_doc_does_not_promise_the_lifespan_boot_line():
+    """a2wsgi does not implement the ASGI lifespan protocol.
+
+    `host ready: clients=...` is logged from the lifespan handler, so under
+    Passenger it is never printed. The guide used to present it as the sign of
+    a healthy boot, which sends an operator hunting for a line that cannot
+    appear -- and, worse, implies its absence is the fault.
+    """
+    text = CPANEL_DOC.read_text(encoding="utf-8")
+    assert "host ready: clients=1" not in text, (
+        "the guide still promises the lifespan log line as a healthy-boot check"
+    )
+    assert "lifespan" in text.lower(), (
+        "the guide must say why that line is absent, not merely omit it"
+    )
+    # And it must offer a check that does work under Passenger.
+    assert "/healthz" in text
+
+
+def test_cpanel_doc_marks_the_inert_listener_variables():
+    """HOST_BIND/HOST_PORT are read only by the uvicorn entry point."""
+    text = CPANEL_DOC.read_text(encoding="utf-8")
+    for variable in ("HOST_BIND", "HOST_PORT"):
+        rows = [
+            line for line in text.splitlines()
+            if line.startswith("|") and f"`{variable}`" in line
+        ]
+        assert rows, f"{variable} is missing from the environment table"
+        assert "inert" in rows[0].lower(), (
+            f"the table must say {variable} has no effect under Passenger; "
+            f"row was: {rows[0]}"
+        )
+
+
+def test_cpanel_doc_does_not_call_the_forwarded_header_the_fix():
+    """The scheme from `wsgi.url_scheme` is checked before any header.
+
+    Under mod_passenger `REMOTE_ADDR` is the end client, so a
+    `X-Forwarded-Proto` header from it is deliberately ignored: trusting it
+    would let any client on the internet forge HTTPS. The guide used to call
+    that header "required", which is both wrong and unsafe to act on.
+    """
+    text = CPANEL_DOC.read_text(encoding="utf-8")
+    lowered = text.lower()
+    assert "wsgi.url_scheme" in text, "the guide must name what is checked first"
+    assert "host_allow_http" in lowered, (
+        "the guide must give the setting that actually works on shared hosting"
+    )
+    assert "end client" in lowered, (
+        "the guide must explain why the peer is not loopback under Passenger"
     )
 
 

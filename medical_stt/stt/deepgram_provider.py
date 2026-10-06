@@ -28,12 +28,39 @@ import threading
 from typing import Any, Callable, List, Optional
 
 from ..config import Settings, keyterm_parameter, validate_model_language
-from .base import ErrorCategory, OnError, OnTranscript, ProviderError, STTProvider, TranscriptEvent, WordInfo
+from .base import (
+    ConnectionClosed,
+    ErrorCategory,
+    OnError,
+    OnTranscript,
+    ProviderError,
+    STTProvider,
+    TranscriptEvent,
+    WordInfo,
+)
 
 log = logging.getLogger("medical_stt.stt.deepgram")
 
 #: A callable that returns a fresh short-lived Deepgram session token.
 TokenProvider = Callable[[], str]
+
+
+def is_connection_closure(exc: BaseException) -> bool:
+    """True when the provider's own exception says the socket closed.
+
+    `ErrorCategory.SERVER_DISCONNECT` cannot answer this on its own: it is
+    also what an upstream HTTP 5xx classifies to, and a 502 from the token
+    endpoint is not a closed WebSocket. `stt.base.ConnectionClosed` is
+    exported in `medical_stt.stt.__all__`, so it has to mean something -- a
+    consumer that catches an exception the provider never raises gets a
+    silently dead handler.
+    """
+    try:
+        import websockets.exceptions as ws_exc
+    except ImportError:  # pragma: no cover - defensive only
+        return False
+    # ConnectionClosedOK and ConnectionClosedError both derive from this.
+    return isinstance(exc, ws_exc.ConnectionClosed)
 
 
 def classify_deepgram_exception(exc: BaseException) -> ErrorCategory:
@@ -302,12 +329,20 @@ class DeepgramProvider(STTProvider):
                         on_transcript(event)
 
                 def _on_provider_error(exc: object) -> None:
-                    category = classify_deepgram_exception(exc if isinstance(exc, BaseException) else Exception(str(exc)))
-                    on_error(ProviderError(category, str(exc), cause=exc if isinstance(exc, BaseException) else None))
+                    cause = exc if isinstance(exc, BaseException) else Exception(str(exc))
+                    category = classify_deepgram_exception(cause)
+                    if is_connection_closure(cause):
+                        on_error(ConnectionClosed(category, str(exc), cause=cause))
+                    else:
+                        on_error(ProviderError(category, str(exc), cause=cause))
 
                 def _on_close(_: object) -> None:
                     if not self._stop_event.is_set():
-                        on_error(ProviderError(ErrorCategory.SERVER_DISCONNECT, "Deepgram connection closed"))
+                        on_error(
+                            ConnectionClosed(
+                                ErrorCategory.SERVER_DISCONNECT, "Deepgram connection closed"
+                            )
+                        )
 
                 connection.on(EventType.OPEN, lambda _: log.info("deepgram_connected"))
                 connection.on(EventType.MESSAGE, _on_message)

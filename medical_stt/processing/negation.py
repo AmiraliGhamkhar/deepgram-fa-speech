@@ -24,17 +24,57 @@ from typing import List, Tuple
 # alternation sorted by length below.
 NEGATION_MARKERS: Tuple[str, ...] = (
     "وجود ندارد",
+    # Past tense of the above. Clinical dictation reports what *was* found,
+    # so the past forms are at least as common as the present ones, and a
+    # list that only covered the present tense silently stopped protecting
+    # exactly the sentences it existed for:
+    #     بیمار شکایتی نداشت      ("the patient had no complaint")
+    #     تب نداشت                  ("there was no fever")
+    #     هیچ توده‌ای دیده نشد    ("no mass was seen")
+    #     آنژیوگرافی انجام نشد      ("the angiography was not performed")
+    "وجود نداشت",
     "مشاهده نشد",
     "منفی است",
     "رد می‌شود",
     "رد میشود",
     "رد شد",
+    "رد گردید",
     "شواهدی از",
     "بدون",
+    "فاقد",
+    "هیچ",
     "ندارد",
+    "نداشت",
     "نیست",
+    "نبود",
+    "نشد",
+    "نشود",
+    "نمی‌شود",
+    "نمیشود",
     "منفی",
+    # "Denies" -- `نفی کرد`, `نفی شد`, and the noun-phrase `نفی سابقه` that
+    # Persian notes use for "denies a history of". The bare stem covers all of
+    # them; the verb forms would be redundant entries.
+    "نفی",
 )
+
+# Every marker above is matched as a substring, so each was checked against
+# the 945 distinct Persian tokens in this repository's data, fixtures and
+# documentation for words it would match inside. One listed marker has a known
+# collision, discussed below, and one tempting marker was left out because of
+# one.
+#
+# `رد` on its own was deliberately NOT added, though it looks tempting: it
+# occurs inside `درصد` ("percent") and `مرداد` (a month name), so it would flag
+# an ordinary measurement as a negated finding. Only the complete verb forms
+# `رد شد` and `رد گردید` are listed.
+#
+# `نفی` is the one listed marker with a known collision -- it matches inside
+# `نفیس` ("exquisite"). It stays, because the collision errs in the only safe
+# direction for a guard like this: a false positive protects three more
+# characters from rewriting and tells a consumer to be more careful, whereas
+# the alternative (listing only `نفی کرد` / `نفی شد`) would miss the
+# noun-phrase `نفی سابقه` that Persian clinical notes actually use.
 
 _SORTED_MARKERS = sorted(NEGATION_MARKERS, key=len, reverse=True)
 _NEGATION_RE = re.compile("|".join(re.escape(m) for m in _SORTED_MARKERS))

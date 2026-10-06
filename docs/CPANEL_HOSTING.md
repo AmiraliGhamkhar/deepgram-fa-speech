@@ -120,13 +120,17 @@ cPanel → Setup Python App → your app → **Environment variables** (or
 | `DEEPGRAM_API_KEY` | your Deepgram key (Member permission) | **yes** |
 | `HOST_CLIENTS_FILE` | `/home/USER/secure/clients.txt` | multi-clinician |
 | `HOST_SHARED_SECRET` | 24+ random chars, *legacy mode only* | if no registry |
-| `HOST_ALLOW_HTTP` | `1` | **yes (cPanel only)** — Apache terminates TLS for you |
-| `HOST_FORWARDED_ALLOW_IPS` | `127.0.0.1` | **yes (cPanel only)** |
+| `HOST_ALLOW_HTTP` | `1` | **only if step 7's check says Apache reports `http`** — see below |
+| `HOST_FORWARDED_ALLOW_IPS` | *(usually leave unset)* | no — inert on most cPanel hosts, see step 7 |
 | `HOST_METRICS_ADMIN_TOKEN` | `python -c "import secrets;print(secrets.token_urlsafe(32))"` | recommended |
-| `HOST_BIND` | `127.0.0.1` | recommended |
+| `HOST_BIND` | *(leave unset)* | no — **inert here**; read only by `python -m host.app`, which Passenger never runs. Apache/Passenger own the listener. |
+| `HOST_PORT` | *(leave unset)* | no — **inert here**, same reason |
 | `HOST_MAX_REQUEST_BODY_BYTES` | `4096` (default) | no |
 
 Do **not** set `HOST_TLS_CERTFILE`/`HOST_TLS_KEYFILE` — Apache owns TLS.
+With neither a certificate nor `HOST_ALLOW_HTTP`, `create_app` logs a warning
+at import time explaining that every request will be rejected with 400; under
+Passenger that warning is the boot diagnostic to look for (see step 8).
 
 Generate the shared secret with:
 
@@ -134,21 +138,64 @@ Generate the shared secret with:
 python -c "import secrets; print(secrets.token_urlsafe(32))"
 ```
 
-## 7. Make Apache forward the HTTPS flag and disable buffering
+## 7. Make sure the app can tell that the request arrived over HTTPS
 
-Passenger runs the app on loopback; Apache proxies it. Two Apache rules
-are **required** or the app will reject (or mis-handle) requests:
-`X-Forwarded-Proto: https` (the app refuses plaintext without it) and
-`Connection close`-friendly buffering off for the tiny JSON responses.
+The app refuses a plaintext request. It decides in this exact order
+(`host/core.py::request_is_secure`):
 
-Create/edit `.htaccess` **in the document root of the subdomain**
-(`~/apps/medical-stt/host/public` or as cPanel shows for the app URL):
+1. **the WSGI scheme** — `wsgi.url_scheme`, which becomes the ASGI
+   `scope["scheme"]`. If Apache reports `https` here, the request is accepted
+   and *nothing else matters*. PEP 3333 requires a server to report the
+   scheme it received, and Apache terminates TLS in front of Passenger, so on
+   most cPanel hosts this is already `https` and there is nothing to do.
+2. **`X-Forwarded-Proto`** — consulted *only* if step 1 was not `https`, and
+   honoured **only when the immediate peer address is listed in
+   `HOST_FORWARDED_ALLOW_IPS`** (loopback by default). When the header carries
+   several hops, the **last** one is used.
+
+Step 2 is where cPanel differs from a uvicorn-behind-nginx deployment, and it
+is the reason `HOST_FORWARDED_ALLOW_IPS=127.0.0.1` is *not* the fix it looks
+like. mod_passenger runs the app inside the Apache process, so `REMOTE_ADDR`
+is the **end client's** address, not loopback. A forwarded-proto header from
+that peer is deliberately ignored — trusting it would let any client on the
+internet forge `X-Forwarded-Proto: https` and have a plaintext request
+accepted. Verified through `host/passenger_wsgi.py` with no
+`HOST_ALLOW_HTTP`:
+
+| `wsgi.url_scheme` | `REMOTE_ADDR` | `X-Forwarded-Proto` | result |
+|---|---|---|---|
+| `https` | end client | *(any)* | **200** — step 1 accepted it |
+| `http` | end client | `https` | **400** — peer is not a configured proxy |
+| `http` | `127.0.0.1` | `https` | **200** — step 2 accepted it |
+| `http` | *(absent)* | `https` | **400** — a2wsgi sets `scope["client"]` only when both `REMOTE_ADDR` and `REMOTE_PORT` are present |
+
+**So: find out which row you are in before changing anything.** Add this to
+`passenger_wsgi.py`'s directory temporarily, or run it in cPanel → Terminal
+against your live app:
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' https://stt.example.com/healthz
+# 200 -> Apache reports https. Leave HOST_ALLOW_HTTP unset. You are done.
+# 400 -> Apache reports http to Passenger. Read on.
+```
+
+If it is 400, set **`HOST_ALLOW_HTTP=1`**. That is the supported answer on
+shared hosting: it bypasses the scheme check because Apache has already
+enforced TLS on the public side, and the app is not reachable directly. It is
+safe *only* for that reason — never set it on a host that is reachable over
+plaintext, and never as a substitute for TLS on a VPS.
+
+Adding the Apache header below is still worthwhile as belt-and-braces (it
+costs nothing and is ignored when the peer is not trusted), but on a
+Passenger host it is **not** what makes the deployment work, and an earlier
+version of this guide said it was required:
 
 ```apache
-# --- Medical STT host: proxy rules (required) -----------------------
-# Tell the app the request arrived over HTTPS (Apache already terminated
-# TLS). Without this the app returns 400 "HTTPS is required".
+# --- Medical STT host: Passenger settings -----------------------------
 <IfModule mod_headers.c>
+  # Harmless belt-and-braces. Honoured only if the peer address is in
+  # HOST_FORWARDED_ALLOW_IPS; under mod_passenger the peer is the end
+  # client, so this is normally ignored. See the table above.
   RequestHeader set X-Forwarded-Proto "https"
 </IfModule>
 
@@ -158,11 +205,15 @@ PassengerStartupFile passenger_wsgi.py
 PassengerAppEnv production
 ```
 
-If your host does not allow `RequestHeader` in `.htaccess`, open a ticket
-asking them to add `RequestHeader set X-Forwarded-Proto "https"` to the
-vhost — without it the app **cannot** distinguish HTTPS from plaintext
-and will 400 every request (or you must keep `HOST_ALLOW_HTTP=1`, which
-is safe **only** because Apache enforces TLS on the public side).
+Create/edit `.htaccess` **in the document root of the subdomain**
+(`~/apps/medical-stt/host/public` or as cPanel shows for the app URL).
+
+One more cPanel-specific wrinkle: if your panel's WSGI environ omits
+`REMOTE_PORT`, a2wsgi cannot build `scope["client"]` at all, so the app sees
+*no* peer address. That is fine for authentication and for serving requests,
+but it means failed-authentication lockout cannot be attributed to an IP —
+the host then attributes it to the validated `client_id` instead and logs a
+one-line warning at startup saying so. See `host/README.md` > Rate limiting.
 
 ## 8. Restart the app
 
@@ -174,14 +225,26 @@ tail -f ~/apps/medical-stt/host/stdout.log 2>/dev/null || \
 tail -f ~/logs/medical-stt.log
 ```
 
-A healthy boot prints:
+**Do not look for a `host ready: clients=...` line.** That message is emitted
+from the ASGI *lifespan* handler, and a2wsgi does not implement the lifespan
+protocol — under Passenger it is never printed, by design. Its absence is not
+a failure. (It is also why `app.state.grant_client` and the capacity gauges
+are built in `create_app` rather than at startup, so `/readyz` and `/metrics`
+report real values here.)
+
+What a healthy boot *does* look like: no traceback, and step 9's `curl`
+returns `{"status":"ok"}`. These warnings are normal and informational:
 
 ```
-host ready: clients=1 client_burst=120 global_burst=1200 max_inflight=100
+HOST_METRICS_ADMIN_TOKEN is not set: /metrics is readable by anyone who can
+    reach this port. ...            # set the token, or accept it knowingly
+HOST_RATE_LIMIT_REQUESTS is ignored: session requests are now limited per
+    authenticated client_id ...     # remove the retired variable
 ```
 
 A traceback naming `ConfigurationError` means an environment variable is
-missing — recheck step 6, then Restart.
+missing — recheck step 6, then Restart. A warning that every request will be
+rejected with 400 means step 7 applies to you.
 
 ## 9. Verify from the server
 
@@ -225,8 +288,8 @@ a specific cause.
 | 3 | Startup file correct? | Setup Python App: `passenger_wsgi.py`, expose `application` | Wrong file → Passenger boots nothing → 502 on every request |
 | 4 | Dependencies in the app's venv? | `source .../venv/bin/activate && pip list` | `ModuleNotFoundError: fastapi` / `a2wsgi` |
 | 5 | Registry file readable? | `ls -l ~/secure/clients.txt` (owned by your user, mode 600) | `ConfigurationError: cannot read the client registry ...` in the log |
-| 6 | Hit the app directly, bypassing Apache | `curl -s http://127.0.0.1:<passenger_port>/healthz` (port from `passenger-status`) | Works directly but 502 via Apache → Apache/Passenger proxy misconfig, not the app |
-| 7 | `.htaccess` X-Forwarded-Proto rule present? | step 7 | 400 "HTTPS is required" (not 502 — but commonly confused with it) |
+| 6 | Is the Passenger process alive at all? | `passenger-status` (or the panel's status) | **Stopped / not listed** → it crashed at import; row 2 has the reason. Note that `curl http://127.0.0.1:<port>/healthz` is *not* a clean liveness test here: Passenger does not necessarily listen on a TCP port, and a plaintext request returns **400 by design** unless `HOST_ALLOW_HTTP=1` — which reads like a broken app and is not one |
+| 7 | Can the app tell the request was HTTPS? | step 7's `curl -w '%{http_code}'` check | **400** "HTTPS is required" (not 502 — but commonly confused with it). Work through step 7's decision table; on a Passenger host the fix is normally `HOST_ALLOW_HTTP=1`, **not** the `.htaccess` header |
 | 8 | Resource limits? | cPanel → Resource Usage | `passenger` hitting the entry-process or memory LVE limit — raise the limit or reduce concurrency |
 | 9 | WSGI timeout? | long `curl` to `/v1/session` (>60 s) | Deepgram unreachable **from the host** (firewall) → the grant times out; fix egress to `api.deepgram.com:443` |
 

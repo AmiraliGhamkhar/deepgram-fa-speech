@@ -107,3 +107,50 @@ def test_rule_count_reflects_deduplicated_sources():
     result = fst.load([Rule("a", "A"), Rule("a", "A"), Rule("b", "B")])
     assert result.rules_loaded == 2
     assert fst.rule_count == 2
+
+
+# -- optional word-boundary requirement -----------------------------------
+#
+# Off by default: this class is a general longest-match rewriter and the
+# substring semantics above are its contract. Terminology rewriting turns it
+# on, because a rule for a whole word must not fire inside a longer one.
+
+
+def test_word_boundaries_are_not_required_by_default():
+    fst = load_rules_from_pairs([("ab", "X")])
+    assert fst.apply("zabz") == "zXz"
+
+
+def test_require_word_boundaries_rejects_a_match_inside_a_longer_word():
+    fst = load_rules_from_pairs([("ab", "X")])
+    assert fst.apply("zabz", require_word_boundaries=True) == "zabz"
+    assert fst.apply("ab", require_word_boundaries=True) == "X"
+    assert fst.apply("z ab z", require_word_boundaries=True) == "z X z"
+
+
+def test_require_word_boundaries_accepts_punctuation_and_string_ends():
+    fst = load_rules_from_pairs([("قلب", "Heart")])
+    for text in ("قلب", "قلب.", "(قلب)", "قلب،", "و قلب"):
+        assert "Heart" in fst.apply(text, require_word_boundaries=True), text
+
+
+def test_require_word_boundaries_treats_a_zwnj_compound_as_one_word():
+    """A ZWNJ joins Persian words; it is not a boundary.
+
+    میلی‌جیوه is one unit, so a rule for its second half must not fire --
+    otherwise the output is "میلی‌Mercury".
+    """
+    fst = load_rules_from_pairs([("جیوه", "Mercury")])
+    assert fst.apply("میلی\u200cجیوه", require_word_boundaries=True) == "میلی\u200cجیوه"
+    assert fst.apply("میلی جیوه", require_word_boundaries=True) == "میلی Mercury"
+
+
+def test_require_word_boundaries_counts_persian_digits_as_word_characters():
+    fst = load_rules_from_pairs([("دوز", "Dose")])
+    assert fst.apply("دوز۵", require_word_boundaries=True) == "دوز۵"
+    assert fst.apply("دوز ۵", require_word_boundaries=True) == "Dose ۵"
+
+
+def test_require_word_boundaries_still_honours_protected_ranges():
+    fst = load_rules_from_pairs([("120", "ONE_TWENTY")])
+    assert fst.apply("BP 120", protected_ranges=[(3, 6)], require_word_boundaries=True) == "BP 120"

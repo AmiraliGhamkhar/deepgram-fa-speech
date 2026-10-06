@@ -234,12 +234,36 @@ pytest tests/ -q     # includes the 50-client concurrency suite
 
 ### Measured (mocked Deepgram, 50 clients, this repository)
 
-| Threshold | Target | Measured |
-|---|---|---|
-| 50 simultaneous session requests | ≥99% success | 50/50 (100%), 0 × 429 |
-| Token acquisition p95 | < 2s | < 0.01s (local mock) |
-| Event loop during token issuance | not blocked | 50 × 50ms grants in < 0.15s, not 2.5s |
-| 50 sessions, 30-min soak | no growth | +0.65 MB RSS, 0 drops, 0 leaks |
+The numbers are produced by a harness, not recorded here, so they cannot go
+stale. `scripts/measure_capacity.py` prints one PASS/FAIL line per criterion
+and exits non-zero if any of them fails:
+
+```bash
+python scripts/measure_capacity.py
+```
+
+| Criterion | Threshold the harness enforces |
+|---|---|
+| 50 simultaneous session requests | ≥99% success, and 0 × 429 |
+| Token acquisition p95 | < 2 s |
+| Event loop during token issuance | not blocked — compared against the 2.5 s a serialized implementation would take |
+| Memory growth per session batch | no growth trend across 250 sessions |
+| Active sessions after shutdown | 0 in-flight grants |
+| Rate limiter state | one bounded bucket per client, never more |
+
+Exact milliseconds and megabytes depend on the machine, so they are
+deliberately not quoted here. An earlier revision of this table did quote
+them, and the figures it quoted were not what the harness had measured — its
+mock upstream adds a 50 ms delay, so any claim of a single-digit-millisecond
+p95 is arithmetically impossible, and the memory row attributed a 250-session
+batch result to a 30-minute soak that this script does not run. A stale figure
+presented as a measurement is worse than no figure at all, because it is the
+one a reader repeats. `tests/test_host_docs.py` fails CI if a hard-coded
+capacity figure comes back.
+
+The same distinction applies to the soak: `tests/test_soak.py` is the 30-minute
+50-client run, and it is opt-in (`MEDICAL_STT_SOAK=1`) because it must never
+execute in CI.
 
 Latency figures come from mocked Deepgram on this machine and are **not**
 a claim about production speech-to-text latency. Measure those against the

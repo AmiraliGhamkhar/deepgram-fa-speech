@@ -107,3 +107,98 @@ def test_every_rule_declares_a_known_category():
     for rule in load_correction_rules_raw():
         assert rule.get("category") in VALID_CATEGORIES, rule
         assert rule.get("to") not in (None, ""), rule
+
+
+# -- a rule for a whole word must not fire inside a longer one ------------
+#
+# Same policy as above, different mechanism. Aho-Corasick matches substrings,
+# and Persian builds words by attachment, so a short rule source -- `مش`,
+# `پا`, `دست`, `امی`, `دما`, `تنفس` are all in the shipped set -- used to fire
+# inside ordinary words. The output went straight into the clinician's record.
+#
+#     مشکل تنفسی    ->  Meshکل RRی       ("respiratory problem")
+#     پاسخ دهید     ->  Footسخ دهید     ("please answer")
+#     دستگاه تنفس   ->  Handگاه RR       ("ventilator")
+#     امید به زندگی ->  MIد به زندگی    ("life expectancy")
+#
+# The last one is the dangerous shape: a clinical abbreviation that was never
+# spoken, injected into a sentence about something else.
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "مشخص شد",              # contains مش -> Mesh
+        "مشکل تنفسی دارد",      # contains مش and تنفس
+        "مشاوره پزشکی انجام شد",
+        "منافق",                # contains ناف -> Umbilicus
+        "پاسخ دهید",            # contains پا -> Foot
+        "پایان جلسه",
+        "پاره شد",
+        "دستور دارو صادر شد",   # contains دست -> Hand
+        "دستی بررسی شد",
+        "امید به زندگی",        # contains امی -> MI
+        "بیمار امیدوار است",
+        "نافه",
+        "خالی از درد",          # contains خال -> Nevus
+        "دماسنج",               # contains دما -> T
+        "هیپوگلیسمی",           # contains هیپ -> Hip
+        "سنگریزه",
+        "رحمت",
+        "گچی",
+        "پینس",
+    ],
+)
+def test_a_word_containing_a_short_rule_source_is_preserved(opt_in_engine, text):
+    """Even with every opt-in rule enabled, a fragment is not a word."""
+    assert process(opt_in_engine, text) == normalize(text)
+
+
+def test_no_clinical_abbreviation_is_injected_into_an_unrelated_word(opt_in_engine):
+    """The failure mode that matters clinically.
+
+    `امی` is the spoken form of "MI", and `امید` (hope) contains it. Injecting
+    a diagnosis that was never spoken into a sentence about life expectancy is
+    not a formatting problem.
+    """
+    for text in ("امید به زندگی", "بیمار امیدوار است", "پایداری همودینامیک"):
+        result = process(opt_in_engine, text)
+        assert "MI" not in result, f"{text!r} became {result!r}"
+        assert "Mesh" not in result and "Foot" not in result and "Hand" not in result
+
+
+@pytest.mark.parametrize(
+    "text,expected_fragment",
+    [
+        ("بیمار در آی سی یو بستری است", "ICU"),
+        ("سکته قلبی داشته است", "MI"),
+        ("نوار قلب گرفته شد", "ECG"),
+        ("بیوپسی انجام شد", "Biopsy"),
+        ("کبد چرب دارد", "Fatty liver"),  # longest match wins over کبد -> Liver
+    ],
+)
+def test_whole_word_terminology_rewrites_still_fire(opt_in_engine, text, expected_fragment):
+    """Requiring a boundary must not stop the rewrites that were the point."""
+    assert expected_fragment in process(opt_in_engine, text)
+
+
+def test_a_zwnj_compound_is_one_word_and_is_not_rewritten_inside(opt_in_engine):
+    """میلی‌جیوه is millimetre-of-mercury, not میلی next to جیوه."""
+    text = "فشار خون 120/80 میلی\u200cجیوه است"
+    result = process(opt_in_engine, text)
+    assert "میلی\u200cجیوه" in result, f"the compound was split: {result!r}"
+
+
+def test_numeric_and_negation_protection_still_hold_with_boundaries(opt_in_engine):
+    """The two older protections are independent of the new one."""
+    result = process(opt_in_engine, "فشار خون 120/80 میلی\u200cجیوه و تب ندارد")
+    assert "120/80" in result
+    assert "ندارد" in result
+
+
+def test_dangerous_rules_are_still_blocked_after_the_boundary_change(opt_in_engine):
+    """The boundary fix must not become a reason to re-enable them."""
+    for text in ("بیمار ناشتا است", "کاهش وزن داشته است", "کم شدن درد"):
+        result = process(opt_in_engine, text)
+        assert "NPO" not in result
+        assert "DC" not in result
