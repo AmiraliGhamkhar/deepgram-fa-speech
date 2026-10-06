@@ -42,6 +42,27 @@ def normalize_injected_whitespace(text: str) -> str:
     return "\n".join(lines).strip("\n")
 
 
+def _trailing_separator(text: str) -> str:
+    """The word separator a caller appended after an utterance, if it did.
+
+    `LiveMedicalSTT` pastes every finalized utterance followed by a single
+    space so consecutive dictations cannot fuse into one token
+    ("فشار خون120/80بیمار" instead of "فشار خون 120/80 بیمار"). But
+    `normalize_injected_whitespace` strips trailing whitespace from every line
+    *by design* -- that is what keeps pasted transcripts free of ragged
+    margins, and tests/test_formatting_ownership.py pins it -- so the
+    separator has to be re-attached after normalizing, not passed through it.
+
+    Returns "" when the caller supplied no trailing whitespace, or when that
+    whitespace was a line break: a newline is already a stronger separator
+    than a space, and the normalizer preserves it.
+    """
+    trailing = text[len(text.rstrip()):]
+    if not trailing or "\n" in trailing or "\r" in trailing:
+        return ""
+    return " "
+
+
 class InjectionError(Exception):
     """Raised when a caller opts into strict-mode injection and the
     underlying backend reports failure."""
@@ -146,12 +167,26 @@ class TextInjector:
         return index
 
     def type_text(self, text: str) -> bool:
-        """Type text via synthetic Unicode key events."""
+        """Type text via synthetic Unicode key events.
+
+        Every backend call below is wrapped in a broad `except Exception`, not
+        `except OSError`. The backends delegate to third-party OS bindings that
+        raise whatever suits them -- `pyperclip.PyperclipException` when no
+        clipboard helper is installed, `pyautogui.FailSafeException` when the
+        pointer hits a screen corner, `WinError` variants from ctypes -- and
+        none of those are `OSError`. This method runs on the speech provider's
+        callback thread, so an exception that escaped here would kill that
+        thread and end dictation silently mid-consult. The contract callers
+        rely on is "returns False and records `last_error`", so the boundary
+        enforces it for any failure mode. The try blocks wrap *only* the
+        backend delegation; our own text handling stays outside them, so a bug
+        in this class is still loud.
+        """
         if not text:
             return False
         try:
             ok = self.backend.send_unicode_text(text)
-        except OSError as exc:
+        except Exception as exc:  # noqa: BLE001 - see the docstring
             self.last_error = str(exc)
             log.warning("type_text failed: %s", exc)
             return False
@@ -176,15 +211,17 @@ class TextInjector:
         processing.bidi.to_injected -- never a forced RLE/PDF embedding
         around the whole string (see processing/bidi.py for why).
         """
+        separator = _trailing_separator(text)
         text = normalize_injected_whitespace(text)
         if not text:
             return False
+        text += separator
 
         text = to_injected(text)
 
         try:
             ok = self.backend.paste_text(text, self.restore_clipboard, self.paste_settle_seconds)
-        except OSError as exc:
+        except Exception as exc:  # noqa: BLE001 - see the note on type_text
             self.last_error = str(exc)
             log.warning("paste_text failed: %s", exc)
             return False
@@ -199,7 +236,7 @@ class TextInjector:
             return True
         try:
             ok = self.backend.send_backspaces(count)
-        except OSError as exc:
+        except Exception as exc:  # noqa: BLE001 - see the note on type_text
             self.last_error = str(exc)
             log.warning("send_backspaces failed: %s", exc)
             return False
