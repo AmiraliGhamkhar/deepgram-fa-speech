@@ -164,7 +164,7 @@ set -a; . host/.env; set +a
 | `HOST_CLIENT_BURST` | no | `120` | Per-client burst capacity. |
 | `HOST_GLOBAL_RATE_LIMIT_REQUESTS` | no | `600` | Global sustained rate per window. |
 | `HOST_GLOBAL_BURST` | no | `1200` | Global burst capacity. |
-| `HOST_AUTH_FAILURE_LIMIT` | no | `20` | Failed auths per IP per window. |
+| `HOST_AUTH_FAILURE_LIMIT` | no | `20` | Failed-auth budget per window, keyed on the peer address, or on the validated `client_id` when the server supplies no peer address. |
 | `HOST_RATE_LIMIT_WINDOW_SECONDS` | no | `60` | Window for all of the above. |
 | `HOST_RATE_LIMIT_REQUESTS` | no | — | **Ignored.** This was the old per-IP fixed-window budget. Session requests are now limited per authenticated `client_id`, so it has nothing to apply to. It is still accepted (so existing configs keep loading) and the service logs a warning when it is set, but changing it has no effect. |
 | `HOST_GRANT_TIMEOUT_SECONDS` | no | `10` | Deepgram read/write/pool timeout. |
@@ -175,7 +175,7 @@ set -a; . host/.env; set +a
 | `HOST_MAX_REQUEST_BODY_BYTES` | no | `4096` | Request body cap (413 beyond). |
 | `HOST_METRICS_ADMIN_TOKEN` | no | — | If set, `/metrics` requires it. |
 | `HOST_TLS_CERTFILE` / `HOST_TLS_KEYFILE` | no* | — | PEM certificate and key. |
-| `HOST_BIND` / `HOST_PORT` | no | `0.0.0.0` / `8443` | Listen address. |
+| `HOST_BIND` / `HOST_PORT` | no | `0.0.0.0` / `8443` | Listen address. Read only by `python -m host.app`; a WSGI host (cPanel/Passenger) owns its own listener and ignores both. |
 | `HOST_FORWARDED_ALLOW_IPS` | no | `127.0.0.1` | Which peers may set `X-Forwarded-Proto`. |
 | `HOST_ALLOW_HTTP` | no | `0` | `1` serves plaintext. **Development only.** |
 

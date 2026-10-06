@@ -2,9 +2,9 @@
 
 The `.env.example` templates ship with empty placeholders and are the
 canonical list, but they are easy to forget when a setting is added. This
-test fails CI when the code reads a variable that `host/README.md` does not
-document, so an operator cannot read through the documentation and find a
-setting silently missing.
+test fails CI when the code reads a variable that neither `host/README.md`
+nor `host/.env.example` documents, so an operator cannot read through either
+and find a setting silently missing.
 
 It also pins the two claims that are easy to regress silently:
 
@@ -19,6 +19,7 @@ from typing import Set
 
 ROOT = Path(__file__).resolve().parent.parent
 HOST_README = ROOT / "host" / "README.md"
+HOST_ENV_EXAMPLE = ROOT / "host" / ".env.example"
 ROOT_README = ROOT / "README.md"
 
 #: Modules that read configuration from the environment.
@@ -79,6 +80,46 @@ def test_every_host_env_var_is_documented():
     assert not missing, (
         "host/README.md does not mention these environment variables: "
         + ", ".join(missing)
+    )
+
+
+def test_every_host_env_var_is_in_the_env_template():
+    """`.env.example` is the file an operator actually copies.
+
+    The README table above was already enforced; the template was not, and 12
+    variables the service reads were absent from it -- including
+    HOST_METRICS_ADMIN_TOKEN, HOST_CLIENTS_FILE, HOST_MAX_INFLIGHT_GRANTS and
+    HOST_MAX_REQUEST_BODY_BYTES. An operator deploying from the template alone
+    could not discover them, and could not tell that the ones they did see
+    were the whole story.
+    """
+    read = _env_vars_read_by_host()
+    template = HOST_ENV_EXAMPLE.read_text(encoding="utf-8")
+    mentioned = set(re.findall(r"\b[A-Z][A-Z0-9_]{3,}\b", template))
+    missing = sorted(read - mentioned)
+    assert not missing, (
+        "host/.env.example does not mention these environment variables: "
+        + ", ".join(missing)
+    )
+
+
+def test_env_template_marks_the_inert_rate_limit_variable():
+    """The template must not present a retired setting as tunable.
+
+    The README table already has to say "Ignored"; the template is the more
+    likely place for an operator to uncomment a line and expect an effect.
+    """
+    template = HOST_ENV_EXAMPLE.read_text(encoding="utf-8")
+    assert "HOST_RATE_LIMIT_REQUESTS" in template, (
+        "the variable is still accepted for compatibility, so removing it "
+        "from the template without a migration note would be worse than "
+        "listing it"
+    )
+    index = template.index("HOST_RATE_LIMIT_REQUESTS")
+    preceding = template[max(0, index - 400):index].lower()
+    assert "inert" in preceding, (
+        "HOST_RATE_LIMIT_REQUESTS must be labelled inert immediately above "
+        "its line in host/.env.example"
     )
 
 

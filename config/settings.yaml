@@ -16,6 +16,15 @@ utterance_end_ms: 1200
 # host_url must be https://. Plain http:// is accepted only for localhost
 # development.
 host_url: "https://stt.example.com"
+# Identifies *which* device is talking to the host, so the host can rate limit
+# per clinician instead of per hospital NAT address, and so one compromised
+# device can be revoked without re-provisioning the whole clinic. Not a
+# credential -- the secret stays in the DPAPI-protected store -- which is why
+# it is safe to keep here. Issued per device by `python -m host.provision`
+# (see host/README.md). Required whenever the host is configured with a client
+# registry, which is the supported setup for more than one clinician.
+# Per-machine override: MEDICALSTT_HOST_CLIENT_ID.
+host_client_id: ""
 host_timeout_seconds: 10.0
 # The session token only has to outlive the WebSocket handshake; 30s is
 # Deepgram's own default.
