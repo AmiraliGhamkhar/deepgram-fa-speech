@@ -17,9 +17,9 @@ dictating clinician. All commands are PowerShell (5.1 or 7.x).
 |---|---|---|
 | Windows | 10 or 11 (x64) | `winver` |
 | PowerShell | 5.1 or 7+ | `$PSVersionTable.PSVersion` |
-| Python | 3.10 – 3.12 | `python --version` |
+| Python | 3.10 – 3.12 (Nuitka) or 3.11 (verified PyInstaller fallback) | `python --version` |
 | Git | any recent | `git --version` |
-| C compiler | MSVC Build Tools (Nuitka needs it) | `cl` resolves in a VS dev shell, or install via Visual Studio Installer → "Desktop development with C++" |
+| C compiler | MSVC Build Tools — required for the Nuitka build only; the PyInstaller fallback below needs none | `cl` resolves in a VS dev shell, or install via Visual Studio Installer → "Desktop development with C++" |
 | Tkinter | ships with python.org installers | `python -c "import tkinter"` |
 
 Notes:
@@ -89,9 +89,24 @@ fix it before building.
 
 ## 5. Build the application
 
+Preferred (harder to unpack, per `scripts/build_windows.ps1`):
+
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\build_windows.ps1
 ```
+
+No-C-compiler fallback (verified on this machine with Python 3.11, which
+has no MSVC `cl.exe`): PyInstaller `--onedir --windowed` via a local,
+git-ignored `MedicalSTT.spec` kept on the build machine:
+
+```powershell
+python -m pip install pyinstaller
+python -m PyInstaller MedicalSTT.spec -y --clean
+```
+
+Both produce `dist\MedicalSTT\MedicalSTT.exe` plus its support folder — copy
+the whole folder to the target machine. Neither bakes in any credential:
+verify with `python scripts\scan_secrets.py` (must print `clean`).
 
 What the script does, in order:
 
@@ -141,6 +156,33 @@ signtool verify /pa /v dist\MedicalSTT\MedicalSTT.exe
 
 Use an OV or EV certificate; an EV cert removes SmartScreen warnings
 immediately, an OV builds reputation over installs.
+
+### Local HTTPS host (verified on this machine)
+
+The host is the only place the Deepgram API key exists — passed as the
+`DEEPGRAM_API_KEY` process env var, never written to a file or baked into
+the `.exe`. For a loopback setup, keep all secrets outside the repo:
+
+```powershell
+# one-time: self-signed cert + first device
+python -m pip install cryptography
+python scripts\make_local_cert.py  # writes %USERPROFILE%\.medical-stt\secure\
+python -m host.provision --client-id doctor-01 `
+  --out $env:USERPROFILE\.medical-stt\secure\clients.txt `
+  --secrets-dir $env:USERPROFILE\.medical-stt\device-secrets
+
+# every run: key lives in this process only (use a FRESH console key)
+$env:DEEPGRAM_API_KEY='<fresh-key>'
+$env:HOST_CLIENTS_FILE="$env:USERPROFILE\.medical-stt\secure\clients.txt"
+$env:HOST_TLS_CERTFILE="$env:USERPROFILE\.medical-stt\secure\localhost-cert.pem"
+$env:HOST_TLS_KEYFILE="$env:USERPROFILE\.medical-stt\secure\localhost-key.pem"
+python -m host.app  # serves https://127.0.0.1:8443
+```
+
+Verify: `https://127.0.0.1:8443/healthz` → `{"status":"ok"}`,
+`/readyz` → `{"status":"ready"}`. In the app window below, use host
+`https://127.0.0.1:8443` (accept the self-signed cert once), client
+`doctor-01`, and that device's secret — it is DPAPI-protected on save.
 
 ## 6. Install on a clinician's machine
 

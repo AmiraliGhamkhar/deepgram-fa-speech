@@ -50,3 +50,10 @@ Thumbs.db
 *.log
 logs/
 *.tmp
+
+# --- Local build outputs (never commit) ---
+# Nuitka and PyInstaller outputs; the tree must stay secret-clean so the
+# build script and CI can prove no credential is baked into any artifact.
+MedicalSTT.spec
+*.spec.README.md
+

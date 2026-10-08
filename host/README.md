@@ -222,6 +222,31 @@ export HOST_TLS_KEYFILE=/etc/letsencrypt/live/stt.example.com/privkey.pem
 python -m host.app
 ```
 
+### Option A2 — local loopback host on Windows (verified)
+
+Single-machine setup. Keep every secret outside the repo
+(`%USERPROFILE%\.medical-stt\`, git-ignored by `*.pem` / `*.secret` /
+`clients.txt`) and pass the Deepgram key as a process env var only — a
+fresh console key, never a value that touched chat or git:
+
+```powershell
+python -m pip install cryptography
+python scripts\make_local_cert.py  # self-signed localhost + 127.0.0.1
+python -m host.provision --client-id doctor-01 `
+  --out $env:USERPROFILE\.medical-stt\secure\clients.txt `
+  --secrets-dir $env:USERPROFILE\.medical-stt\device-secrets
+
+$env:DEEPGRAM_API_KEY='<fresh-key>'
+$env:HOST_CLIENTS_FILE="$env:USERPROFILE\.medical-stt\secure\clients.txt"
+$env:HOST_TLS_CERTFILE="$env:USERPROFILE\.medical-stt\secure\localhost-cert.pem"
+$env:HOST_TLS_KEYFILE="$env:USERPROFILE\.medical-stt\secure\localhost-key.pem"
+python -m host.app  # https://127.0.0.1:8443
+```
+
+`/healthz` → `{"status":"ok"}`, `/readyz` → `{"status":"ready"}`.
+Point the app at `https://127.0.0.1:8443` (accept the self-signed cert
+once) with client `doctor-01` and that device's secret.
+
 ### Option B — behind a reverse proxy (recommended)
 
 Terminate TLS in nginx/Caddy and forward to a loopback port. Set

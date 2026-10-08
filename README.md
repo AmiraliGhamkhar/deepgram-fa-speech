@@ -289,6 +289,11 @@ install, and a Start-failure troubleshooting table) lives in
 powershell -ExecutionPolicy Bypass -File scripts\build_windows.ps1
 ```
 
+No-C-compiler fallback (verified with Python 3.11): a local, git-ignored
+`MedicalSTT.spec` builds the same app with PyInstaller `--onedir
+--windowed` — `python -m PyInstaller MedicalSTT.spec -y --clean`.
+See `docs/WINDOWS_POWERSHELL.md` for the full procedure.
+
 This produces **`dist\MedicalSTT\`** — a complete folder that runs on a
 clean Windows 10/11 machine with **zero Python installed**.
 
@@ -326,7 +331,8 @@ Get-ChildItem -Recurse dist\MedicalSTT -Filter "libportaudio*.dll"
 Zero results means the microphone will fail on a clean machine.
 
 Nuitka compiles to C rather than shipping a PyInstaller archive, which is
-harder to unpack and inspect. `--onefile` is deliberately **not** used: a
+harder to unpack and inspect, and is therefore the documented builder.
+`--onefile` is deliberately **not** used in either path: a
 folder build starts faster, avoids self-extraction to `%TEMP%`, and
 triggers far fewer antivirus false positives.
 
@@ -336,9 +342,12 @@ triggers far fewer antivirus false positives.
 2. Run `MedicalSTT.exe` once. It creates
    `%APPDATA%\MedicalSTT\` with a `settings.yaml` template and a log file.
 3. In the floating window, enter:
-   - **میزبان (host)** — e.g. `https://stt.example.com`
-   - **کلید مشترک (shared secret)** — the same value as
-     `HOST_SHARED_SECRET`
+   - **میزبان (host)** — e.g. `https://stt.example.com`, or
+     `https://127.0.0.1:8443` for the local loopback host in
+     `docs/WINDOWS_POWERSHELL.md` (accept the self-signed cert once);
+   - **کلید مشترک (shared secret)** — the per-device secret from
+     `python -m host.provision` (the `<id>.secret` file), or the value of
+     `HOST_SHARED_SECRET` for a legacy single-clinician host.
 
    Press **ذخیره تنظیمات**. The secret is immediately protected with
    Windows DPAPI and written to `host_secret.dpapi`; the field is then
