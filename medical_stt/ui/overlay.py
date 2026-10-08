@@ -168,24 +168,25 @@ class TranscriptOverlay:
             self._label.config(anchor="nw", justify="left")
 
     def set_partial(self, text: str) -> None:
-        def _() -> None:
-            display = to_display(text) if text else "..."
-            self._apply_text_alignment(text or "")
-            if self._label:
-                self._label.config(text=display, fg="#cdd6f4")
-            if self._status:
-                self._status.config(text="\u25cf در حال شنیدن...", fg="#a6e3a1", anchor="e")
-
-        self._ui(_)
+        self._show(text, text_fg="#cdd6f4", status="\u25cf در حال شنیدن...", status_fg="#a6e3a1")
 
     def set_done(self, text: str) -> None:
+        self._show(text, text_fg="#89b4fa", status="\u2713 تایپ شد", status_fg="#89b4fa")
+
+    def _show(self, text: str, *, text_fg: str, status: str, status_fg: str) -> None:
+        """Render `text` plus its status line from the Tk thread.
+
+        `set_partial` and `set_done` differ only in colours and status text;
+        the body lives here once so the two paths cannot drift apart.
+        """
+
         def _() -> None:
             display = to_display(text) if text else "..."
             self._apply_text_alignment(text or "")
             if self._label:
-                self._label.config(text=display, fg="#89b4fa")
+                self._label.config(text=display, fg=text_fg)
             if self._status:
-                self._status.config(text="\u2713 تایپ شد", fg="#89b4fa", anchor="e")
+                self._status.config(text=status, fg=status_fg, anchor="e")
 
         self._ui(_)
 

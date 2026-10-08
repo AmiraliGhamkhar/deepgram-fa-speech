@@ -164,25 +164,21 @@ class HostSettings:
                 "print(secrets.token_urlsafe(32))\""
             )
 
-        def _int(name: str, fallback: int) -> int:
+        def _number(name: str, fallback: Any, convert: Callable[[str], Any]) -> Any:
             raw = source.get(name)
             if not raw:
                 return fallback
             try:
-                return int(raw)
+                return convert(raw)
             except ValueError:
                 log.warning("ignoring non-numeric %s=%r", name, raw)
                 return fallback
 
+        def _int(name: str, fallback: int) -> int:
+            return _number(name, fallback, int)
+
         def _float(name: str, fallback: float) -> float:
-            raw = source.get(name)
-            if not raw:
-                return fallback
-            try:
-                return float(raw)
-            except ValueError:
-                log.warning("ignoring non-numeric %s=%r", name, raw)
-                return fallback
+            return _number(name, fallback, float)
 
         max_ttl = min(_int("HOST_MAX_TTL_SECONDS", MAX_TTL_SECONDS), MAX_TTL_SECONDS)
         default_ttl = _int("HOST_DEFAULT_TTL_SECONDS", DEFAULT_TTL_SECONDS)

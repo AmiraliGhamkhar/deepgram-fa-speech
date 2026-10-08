@@ -37,6 +37,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -106,14 +107,23 @@ def make_backup(root: Path, backup_path: Path) -> None:
     git("bundle", "create", str(backup_path), "--all", root=root)
 
 
-def rewrite(root: Path, paths: Sequence[str], patterns: Sequence[str], keep_backup: bool) -> None:
+def rewrite(root: Path, paths: Sequence[str], patterns: Sequence[str]) -> None:
     config_path = root / ".git" / "medical-stt-scrub-config.json"
     config_path.write_text(
         json.dumps({"paths": list(paths), "patterns": list(patterns)}), encoding="utf-8"
     )
     env = dict(os.environ)
     env[CONFIG_ENV_VAR] = str(config_path)
-    tree_filter = f'{sys.executable} "{SELF}" --apply-tree'
+    # filter-branch re-runs the tree filter through `sh -c`, and on Git for
+    # Windows that shell eats backslashes: "C:\\x\\y.py" reaches sh as
+    # "Cx y.py" and dies with "command not found". Forward slashes are accepted
+    # by Python on Windows and need no escaping in a POSIX shell, and
+    # shlex.quote keeps paths with spaces intact through the extra quoting
+    # layer.
+    tree_filter = (
+        f"{shlex.quote(Path(sys.executable).as_posix())} "
+        f"{shlex.quote(SELF.as_posix())} --apply-tree"
+    )
 
     print("Rewriting all refs (git filter-branch)...")
     result = subprocess.run(
@@ -236,7 +246,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         stashed = True
 
     try:
-        rewrite(root, args.path, args.replace, keep_backup=True)
+        rewrite(root, args.path, args.replace)
     finally:
         if stashed:
             pop = subprocess.run(

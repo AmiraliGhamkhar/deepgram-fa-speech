@@ -63,11 +63,6 @@ def _trailing_separator(text: str) -> str:
     return " "
 
 
-class InjectionError(Exception):
-    """Raised when a caller opts into strict-mode injection and the
-    underlying backend reports failure."""
-
-
 class TextInjector:
     """Decides what to type/paste; delegates the "how" to an InjectionBackend."""
 

@@ -43,9 +43,6 @@ class TerminologyRule:
     dangerous: bool = False
     specialty: str = ""
 
-    def is_safe_default(self) -> bool:
-        return not self.dangerous and self.category in SAFE_CATEGORIES
-
 
 def parse_rules(raw_items: Iterable[dict]) -> List[TerminologyRule]:
     """Parse raw YAML rule dicts into TerminologyRule, tolerating the

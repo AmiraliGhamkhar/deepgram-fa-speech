@@ -128,7 +128,11 @@ def test_dangerous_term_not_injected(monkeypatch):
     assert "ناشتا" in backend.pasted[-1]
 
 
-def test_config_error_raised_when_host_secret_missing(monkeypatch):
+def test_config_error_raised_when_host_secret_missing(monkeypatch, tmp_path):
+    # Point the app data dir at an empty directory: on a machine where the
+    # real profile already holds a DPAPI-protected secret, the lookup would
+    # succeed and hide the missing-secret path this test exists to pin.
+    monkeypatch.setenv("MEDICALSTT_APP_DATA_DIR", str(tmp_path))
     monkeypatch.delenv("MEDICALSTT_HOST_SECRET", raising=False)
     from medical_stt import app as app_module
     from medical_stt.config import ConfigError

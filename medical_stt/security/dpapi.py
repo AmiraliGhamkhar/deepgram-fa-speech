@@ -119,9 +119,6 @@ class _BlobHolder:
     def pointer(self) -> Any:
         return ctypes.byref(self.blob)
 
-    def keep_alive(self) -> "_BlobHolder":  # pragma: no cover - clarity
-        return self
-
 
 def _copy_out(out_blob: _DATA_BLOB, kernel32: Any) -> bytes:
     try:

@@ -220,8 +220,18 @@ def test_token_issuance_does_not_block_the_event_loop(monkeypatch, tmp_path):
         f"token issuance looks serialized: {elapsed:.2f}s for {CLIENT_COUNT} "
         f"x {grant_latency}s grants (blocking would be ~{serialized:.2f}s)"
     )
-    # The loop stayed responsive: it ran the heartbeat throughout.
-    assert ticks > 10, "the event loop was blocked during token issuance"
+    # The loop stayed responsive: it serviced timer callbacks during the run.
+    # The budget is a rate (10 ticks/s) with a small floor, not a fixed count:
+    # `asyncio.sleep(0.005)` actually waits ~15ms on Windows and the loop is
+    # CPU-saturated here, so a free loop measures 4-8 ticks over a 60-280ms
+    # run -- the old fixed `> 10` was unreachable on that platform while a
+    # blocking control run measures 0 ticks (the ready queue drains before
+    # timers are ever consulted). Serialization itself is pinned above.
+    min_ticks = max(3, elapsed * 10)
+    assert ticks >= min_ticks, (
+        f"the event loop was blocked during token issuance: {ticks} heartbeat "
+        f"ticks in {elapsed:.3f}s (a free loop manages at least {min_ticks:.0f})"
+    )
 
 
 def test_concurrent_token_latency_p95_is_within_target(monkeypatch, tmp_path):

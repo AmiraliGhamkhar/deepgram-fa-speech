@@ -20,7 +20,6 @@ detect -- not about absolute throughput.
 from __future__ import annotations
 
 import os
-import resource
 import threading
 import time
 from typing import List
@@ -36,6 +35,11 @@ from medical_stt.stt.base import (
     STTProvider,
     TranscriptEvent,
 )
+
+# `resource` (ru_maxrss) does not exist on Windows, and this module sits in
+# pytest's `testpaths`, so importing it unconditionally breaks collection of
+# the whole suite there. The soak is Unix-only anyway -- skip it as a module.
+resource = pytest.importorskip("resource")
 
 CLIENT_COUNT = int(os.getenv("MEDICAL_STT_SOAK_CLIENTS", "50"))
 MINUTES = float(os.getenv("MEDICAL_STT_SOAK_MINUTES", "30"))

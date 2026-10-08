@@ -1,7 +1,18 @@
+# Dev tools for this project's CI (ruff, mypy, pytest).
+# Install once:  pip install -r requirements-dev.txt
+# Then:          ruff check medical_stt tests scripts host
+#                mypy medical_stt host/core.py
+#                pytest tests/ -q
+#
+# `-r requirements.txt` first: CI and a fresh checkout must get the runtime
+# dependencies too, or the test suite fails on imports instead of running.
 -r requirements.txt
 
 pytest>=8.0,<9.0
+# CI runs `pytest --cov=medical_stt` (see .github/workflows/ci.yml); without
+# pytest-cov that invocation aborts before collecting a single test.
 pytest-cov>=5.0,<6.0
 mypy>=1.10,<2.0
-ruff>=0.6,<1.0
+# mypy fails on `import yaml` without these stubs, and mypy is a CI gate.
 types-PyYAML>=6.0
+ruff>=0.6,<1.0

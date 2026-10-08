@@ -278,7 +278,7 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
     async def create_session(
         request: Request,
         authorization: Optional[str] = Header(default=None),
-        x_client_id: Optional[str] = Header(default=None),
+        x_client_id: Optional[str] = Header(default=None, alias=CLIENT_ID_HEADER),
     ) -> Any:
         # `None` when the server supplied no peer address (a WSGI/Passenger
         # environ without REMOTE_PORT, for example); never a placeholder that
