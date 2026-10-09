@@ -348,3 +348,42 @@ def test_asr_replacement_rejects_empty_side(tmp_path, monkeypatch):
     )
     with pytest.raises(ConfigError, match="non-empty"):
         module.load_asr_replacements()
+
+
+def test_asr_replacement_rejects_latin_target_for_persian_source(tmp_path, monkeypatch):
+    """A Persian spelling fix must not introduce an English term.
+
+    The target flows through the *provider* verbatim, bypassing the local
+    terminology engine's category/context/dangerous guards; an English term
+    belongs in data/corrections.yaml instead (documented contract of
+    load_asr_replacements and data/asr_replacements.yaml).
+    """
+    module = _write_replacements(
+        tmp_path, monkeypatch, "replacements:\n  - from: '\u0622\u06cc \u0633\u06cc \u06cc\u0648'\n    to: 'ICU'\n"
+    )
+    with pytest.raises(ConfigError, match="Latin/English"):
+        module.load_asr_replacements()
+
+
+def test_asr_replacement_rejects_unit_target_for_persian_source(tmp_path, monkeypatch):
+    """A unit target (e.g. 'mg') must be rejected for a Persian source."""
+    module = _write_replacements(
+        tmp_path, monkeypatch, "replacements:\n  - from: '\u0645\u06cc\u0644\u06cc \u06af\u0631\u0645'\n    to: 'mg'\n"
+    )
+    with pytest.raises(ConfigError, match="Latin/English"):
+        module.load_asr_replacements()
+
+
+def test_asr_replacement_allows_a_persian_spelling_fix(tmp_path, monkeypatch):
+    module = _write_replacements(
+        tmp_path, monkeypatch, "replacements:\n  - from: '\u0647\u0627\u06cc\u067e\u0631\u062a\u0645\u0634\u0646'\n    to: '\u0647\u0627\u06cc\u067e\u0631\u062a\u0646\u0634\u0646'\n"
+    )
+    assert module.load_asr_replacements() == ["\u0647\u0627\u06cc\u067e\u0631\u062a\u0645\u0634\u0646:\u0647\u0627\u06cc\u067e\u0631\u062a\u0646\u0634\u0646"]
+
+
+def test_asr_replacement_ascii_placeholders_stay_allowed(tmp_path, monkeypatch):
+    """Purely-ASCII pairs (no non-ASCII source) are not a Persian fix."""
+    module = _write_replacements(
+        tmp_path, monkeypatch, "replacements:\n  - from: 'x'\n    to: 'y'\n"
+    )
+    assert module.load_asr_replacements() == ["x:y"]
