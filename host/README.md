@@ -103,15 +103,21 @@ rather than the source address:
 
 | Layer | Key | Default sustained | Default burst |
 |---|---|---|---|
-| Per client | `client_id` | 60 / window | 120 |
+| Per client | `client_id` | 6 / window | 10 |
 | Global | `global` | 600 / window | 1200 |
 | Auth failures | source IP | 20 / window | fixed window |
 
 A token bucket is used rather than a fixed window because **50 clinicians
 pressing Start at the same moment is legitimate traffic that must succeed**.
-The bucket makes a burst available immediately while bounding the sustained
-rate, so a looping client is throttled without a shared NAT address being
-penalised.
+That surge is 50 *devices* spending one token each, so it is absorbed by the
+**global** bucket; the per-client bucket is deliberately small. Every token
+is a potential Deepgram stream drawn from the pool the whole clinic shares
+(see [Deepgram's concurrency limits](#deepgrams-concurrency-limits)), and one
+looping or compromised device must not be able to open dozens of them in a
+second. A clinician needs one token per Start plus the occasional reconnect
+-- the client's own backoff saturates at 15-30 s between attempts -- so a
+burst of 10 and 6 per minute never throttles a person, and a shared NAT
+address is never penalised.
 
 The per-IP limiter is retained **only for failed authentication**. That is
 the one case where a shared address must not exempt anyone: 20 failed
@@ -131,16 +137,48 @@ than rejected, so an existing configuration keeps loading.
 Defaults are chosen for the 50-session target with headroom:
 
 ```bash
-HOST_CLIENT_RATE_LIMIT_REQUESTS=60    # per clinician, per 60s window
-HOST_CLIENT_BURST=120                 # > 50, so a startup surge never 429s
+HOST_CLIENT_RATE_LIMIT_REQUESTS=6     # per device, per 60s window
+HOST_CLIENT_BURST=10                  # one device can hold at most ~10 streams
 HOST_GLOBAL_RATE_LIMIT_REQUESTS=600
-HOST_GLOBAL_BURST=1200
+HOST_GLOBAL_BURST=1200                # > 50, so a startup surge never 429s
 HOST_AUTH_FAILURE_LIMIT=20
 ```
 
-A clinician requests one token per session start, so a sustained rate of
-60/minute is ~60× what normal use needs; the bucket exists to catch a
-misbehaving client, not a busy one.
+A clinician requests one token per session start (and one per reconnect),
+so 6/minute sustained is several times what a person can generate; the
+per-client bucket exists to catch a misbehaving device, not a busy one, and
+to bound how much of the shared Deepgram pool a single device can take.
+
+### Deepgram's concurrency limits
+
+The host limits *token requests*; the number of *streams* that may be open
+at once is decided by Deepgram, **per project**, and the host cannot see
+it. Published limits for Nova-3 streaming (verify against
+[Deepgram's rate-limit page](https://developers.deepgram.com/reference/api-rate-limits)
+for your plan):
+
+| Plan | Concurrent streams |
+|---|---|
+| Pay-as-you-go | 150 in every region |
+| Growth | 225 in the US, 150 in the EU, AU and IN regions |
+| Enterprise | by contract |
+
+Three facts matter for a deployment:
+
+* **All API keys of one project share one pool.** Creating a second key does
+  not add capacity.
+* **Secondary projects on a self-serve account are capped at 1 stream.**
+  Deploy on the account's primary project; "a separate project for the
+  clinic" on an existing pay-as-you-go account gives every second clinician
+  a 429.
+* Pay-as-you-go and Growth limits cannot be raised; only Enterprise can.
+
+When the pool is full, Deepgram rejects the WebSocket handshake with
+**429**. The host never sees that: it already issued the token and counted
+`session_success_total`. The client classifies it as a rate limit, shows
+"ظرفیت سرویس گفتار پر است" and retries with backoff until a slot frees. If
+that message appears while fewer than 50 clinicians are dictating, check
+which project the key belongs to before anything else.
 
 ## Environment variables
 
@@ -156,12 +194,13 @@ set -a; . host/.env; set +a
 | Variable | Required | Default | Meaning |
 |----------|----------|---------|---------|
 | `DEEPGRAM_API_KEY` | **yes** | — | The Deepgram key. Exists only here. |
+| `DEEPGRAM_REGION` | no | `us` | Deepgram region the grant request goes to: `us`, `eu`, `au` or `in`. Tokens are valid in every region, so this only decides where the host's own traffic terminates; the client has its own `deepgram_region` setting for the audio. Unknown values refuse to start. |
 | `HOST_CLIENTS_FILE` | no* | — | `client_id:sha256hex` registry. *Required for many clinicians. |
 | `HOST_SHARED_SECRET` | if no registry | — | Legacy single identity. |
 | `HOST_DEFAULT_TTL_SECONDS` | no | `30` | Requested token lifetime. |
 | `HOST_MAX_TTL_SECONDS` | no | `3600` | Upper bound a client may request. |
-| `HOST_CLIENT_RATE_LIMIT_REQUESTS` | no | `60` | Per-client sustained rate per window. |
-| `HOST_CLIENT_BURST` | no | `120` | Per-client burst capacity. |
+| `HOST_CLIENT_RATE_LIMIT_REQUESTS` | no | `6` | Per-client sustained rate per window. |
+| `HOST_CLIENT_BURST` | no | `10` | Per-client burst capacity; bounds how many Deepgram streams one device can open at once. |
 | `HOST_GLOBAL_RATE_LIMIT_REQUESTS` | no | `600` | Global sustained rate per window. |
 | `HOST_GLOBAL_BURST` | no | `1200` | Global burst capacity. |
 | `HOST_AUTH_FAILURE_LIMIT` | no | `20` | Failed-auth budget per window, keyed on the peer address, or on the validated `client_id` when the server supplies no peer address. |
@@ -353,8 +392,9 @@ are on `LiveMedicalSTT.session_health` and in the app log.
 
 Alerts worth having:
 
-* `rate_limited_total` rising above ~0 — legitimate clients are being
-  refused; check `HOST_CLIENT_BURST` against your real startup surge.
+* `rate_limited_total` rising above ~0 — a device is looping (expected to
+  be throttled) or, if many client ids are affected, `HOST_GLOBAL_BURST` is
+  below your real startup surge.
 * `inflight_grants` sitting at `inflight_grants_capacity` — Deepgram is
   slower than your arrival rate and the host is shedding load.
 * `token_request_latency` p95 > 2s — Deepgram or the pool is the bottleneck.
@@ -412,7 +452,9 @@ That distinction matters. Whether this application can mint tokens and open
 WebSockets is something the test proves. Whether your Deepgram plan allows
 50 simultaneous streams is a commercial property of your account — the test
 reports it rather than hiding it or working around it. Confirm your
-project's concurrency allowance before promising 50 users.
+project's concurrency allowance before promising 50 users: see
+[Deepgram's concurrency limits](#deepgrams-concurrency-limits) above for the
+published per-project numbers and the secondary-project trap.
 
 ## Operational notes
 

@@ -105,7 +105,11 @@ def decide(
 
     delay = exponential_backoff_delay(policy, attempt)
     if error.category is ErrorCategory.RATE_LIMIT:
-        delay = _positive_jitter(max(delay, policy.rate_limit_delay), policy, policy.max_retry_after_seconds)
+        # Floored at `rate_limit_delay`, jittered upwards, but never beyond
+        # the configured backoff ceiling: without a server hint there is no
+        # reason to wait longer than `max_delay`.
+        floor = max(delay, policy.rate_limit_delay)
+        delay = _positive_jitter(floor, policy, max(policy.max_delay, floor))
     return ReconnectDecision(True, delay, f"retryable error category: {error.category.value}")
 
 

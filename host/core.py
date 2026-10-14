@@ -40,8 +40,26 @@ log = logging.getLogger("medical_stt.host")
 DEFAULT_TTL_SECONDS = 30
 MAX_TTL_SECONDS = 3600
 
-#: Deepgram's token endpoint.
+#: Deepgram's token endpoint (default region). Regional hosts accept the
+#: same key and mint tokens that are valid in every region; see
+#: https://developers.deepgram.com/reference/regional-endpoints
+DEEPGRAM_REGION_HOSTS = {
+    "us": "api.deepgram.com",
+    "eu": "api.eu.deepgram.com",
+    "au": "api.au.deepgram.com",
+    "in": "api.in.deepgram.com",
+}
 DEEPGRAM_GRANT_URL = "https://api.deepgram.com/v1/auth/grant"
+
+
+def deepgram_grant_url(region: str) -> str:
+    """The grant endpoint for a region; always https."""
+    try:
+        return f"https://{DEEPGRAM_REGION_HOSTS[region]}/v1/auth/grant"
+    except KeyError:
+        raise ConfigurationError(
+            f"DEEPGRAM_REGION must be one of {sorted(DEEPGRAM_REGION_HOSTS)}, got {region!r}"
+        ) from None
 
 #: Peers that may be trusted to set `X-Forwarded-Proto` when TLS is
 #: terminated by a reverse proxy. Loopback only by default: the proxy is
@@ -101,6 +119,10 @@ class HostSettings:
 
     deepgram_api_key: str
     shared_secret: str
+    #: Deepgram region the grant request goes to (`us`, `eu`, `au`, `in`).
+    #: The token it returns is valid in every region, so this only decides
+    #: where the host's own traffic terminates.
+    deepgram_region: str = "us"
     default_ttl_seconds: int = DEFAULT_TTL_SECONDS
     max_ttl_seconds: int = MAX_TTL_SECONDS
     rate_limit_requests: int = 30
@@ -118,11 +140,16 @@ class HostSettings:
     clients_file: str = ""
 
     # -- rate limiting (Phase 4B) ---------------------------------------
-    #: Per-client sustained rate, in requests per window.
-    client_rate_limit_requests: int = 60
-    #: Per-client burst. Sized above the 50-clinician startup surge so a
-    #: legitimate morning peak never gets a 429.
-    client_burst: int = 120
+    #: Per-client sustained rate, in requests per window. A clinician needs
+    #: one token per Start plus the occasional reconnect (the client's own
+    #: backoff saturates at 15-30 s between attempts), so this is generous
+    #: for a person and tight for a loop.
+    client_rate_limit_requests: int = 6
+    #: Per-client burst. Every token is a potential Deepgram stream drawn
+    #: from the pool the whole clinic shares, so one device must not be
+    #: able to open dozens of them in a second. The morning surge is
+    #: absorbed by the *global* bucket, not this one.
+    client_burst: int = 10
     #: Global sustained ceiling across all clients.
     global_rate_limit_requests: int = 600
     #: Global burst. Must comfortably exceed the target session count.
@@ -191,6 +218,8 @@ class HostSettings:
         max_ttl = min(_int("HOST_MAX_TTL_SECONDS", MAX_TTL_SECONDS), MAX_TTL_SECONDS)
         default_ttl = _int("HOST_DEFAULT_TTL_SECONDS", DEFAULT_TTL_SECONDS)
         window = max(1, _int("HOST_RATE_LIMIT_WINDOW_SECONDS", 60))
+        region = (source.get("DEEPGRAM_REGION") or "us").strip().lower()
+        deepgram_grant_url(region)  # refuse to start on an unknown region
 
         # `HOST_RATE_LIMIT_REQUESTS` was the old per-IP fixed-window budget.
         # Session requests are now limited per authenticated client_id, so
@@ -211,6 +240,7 @@ class HostSettings:
         return cls(
             deepgram_api_key=api_key,
             shared_secret=secret,
+            deepgram_region=region,
             default_ttl_seconds=max(5, min(default_ttl, max_ttl)),
             max_ttl_seconds=max(5, max_ttl),
             rate_limit_requests=max(1, _int("HOST_RATE_LIMIT_REQUESTS", 30)),
@@ -222,8 +252,8 @@ class HostSettings:
                 source.get("HOST_FORWARDED_ALLOW_IPS")
             ),
             clients_file=clients_file,
-            client_rate_limit_requests=max(1, _int("HOST_CLIENT_RATE_LIMIT_REQUESTS", 60)),
-            client_burst=max(1, _int("HOST_CLIENT_BURST", 120)),
+            client_rate_limit_requests=max(1, _int("HOST_CLIENT_RATE_LIMIT_REQUESTS", 6)),
+            client_burst=max(1, _int("HOST_CLIENT_BURST", 10)),
             global_rate_limit_requests=max(1, _int("HOST_GLOBAL_RATE_LIMIT_REQUESTS", 600)),
             global_burst=max(1, _int("HOST_GLOBAL_BURST", 1200)),
             auth_failure_limit=max(1, _int("HOST_AUTH_FAILURE_LIMIT", 20)),
@@ -243,6 +273,10 @@ class HostSettings:
             ),
             metrics_admin_token=(source.get("HOST_METRICS_ADMIN_TOKEN") or "").strip(),
         )
+
+    @property
+    def grant_url(self) -> str:
+        return deepgram_grant_url(self.deepgram_region)
 
     def build_client_registry(self) -> "ClientRegistry":
         """Load the provisioned client registry.
@@ -518,7 +552,7 @@ def grant_session(
     """
     send = transport or _httpx_grant
     payload = send(
-        DEEPGRAM_GRANT_URL, settings.deepgram_api_key, ttl_seconds, settings.grant_timeout_seconds
+        settings.grant_url, settings.deepgram_api_key, ttl_seconds, settings.grant_timeout_seconds
     )
     token, expires_in = parse_token_response(payload)
     log.info("issued a Deepgram session token (ttl_requested=%ds)", ttl_seconds)
@@ -844,9 +878,11 @@ class AsyncGrantClient:
         max_connections: int = 100,
         max_keepalive_connections: int = 20,
         client: Any = None,
+        grant_url: str = DEEPGRAM_GRANT_URL,
     ) -> None:
         import httpx
 
+        self._grant_url = grant_url
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(
             timeout=httpx.Timeout(
@@ -882,7 +918,7 @@ class AsyncGrantClient:
 
         try:
             response = await self._client.post(
-                DEEPGRAM_GRANT_URL,
+                self._grant_url,
                 headers={
                     "Authorization": f"Token {api_key}",
                     "Content-Type": "application/json",

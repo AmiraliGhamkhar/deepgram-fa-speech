@@ -182,8 +182,9 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         log.info(
-            "host ready: clients=%d client_burst=%d global_burst=%d max_inflight=%d",
+            "host ready: clients=%d client_burst=%d global_burst=%d max_inflight=%d deepgram_region=%s",
             len(registry), resolved.client_burst, resolved.global_burst, resolved.max_inflight_grants,
+            resolved.deepgram_region,
         )
         try:
             yield
@@ -209,6 +210,7 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
         pool_timeout=resolved.grant_timeout_seconds,
         max_connections=resolved.grant_max_connections,
         max_keepalive_connections=resolved.grant_max_keepalive_connections,
+        grant_url=resolved.grant_url,
     )
     app.state.settings = resolved
     app.state.metrics = metrics

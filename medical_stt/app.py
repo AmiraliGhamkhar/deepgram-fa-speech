@@ -62,6 +62,17 @@ SENDER_JOIN_TIMEOUT_SECONDS = 2.0
 #: reach the session that follows them.
 PROVIDER_JOIN_TIMEOUT_SECONDS = 4.0
 
+#: Seconds without a single captured frame before the microphone is
+#: reported silent and the provider is kept alive instead. Deepgram closes a
+#: stream that carries no audio (1011 NET-0001/NET-0002) after ~10 s; a
+#: KeepAlive every 3-5 s resets that timer, so both thresholds are 3 s.
+AUDIO_SILENCE_SECONDS = 3.0
+KEEP_ALIVE_INTERVAL_SECONDS = 3.0
+
+#: Warnings the session loop sets and later clears itself.
+MIC_SILENT_WARNING = "میکروفون صدایی ارسال نمی‌کند؛ دستگاه ضبط را بررسی کنید"
+CAPACITY_WARNING = "ظرفیت سرویس گفتار پر است؛ تا آزاد شدن ظرفیت دوباره تلاش می‌شود"
+
 
 def load_sounddevice() -> Any:
     try:
@@ -162,6 +173,7 @@ class LiveMedicalSTT:
         self._audio_q = BoundedAudioQueue(maxsize=max(1, math.floor(3.2 / self.settings.block_duration)))
         self.phase = "connecting"
         self.warning = ""
+        self._reset_capture_watch()
         self._recovery: deque[str] = deque(maxlen=16)
         self._recovery_lock = threading.Lock()
         self._recovery_truncated = False
@@ -253,6 +265,13 @@ class LiveMedicalSTT:
             message += " — ظرفیت بازیابی پر شده؛ بخشی از متن در دسترس نیست"
         self.warning = message
         self.overlay.set_warning(message)
+
+    def _clear_warning(self, message: str) -> None:
+        """Withdraw `message` once its cause is gone, without clobbering a
+        different warning that was raised in the meantime."""
+        if self.warning.startswith(message):
+            self.warning = ""
+            self.overlay.set_warning("")
 
     # -- transcript handling --------------------------------------------
 
@@ -429,6 +448,48 @@ class LiveMedicalSTT:
                 stats.dropped_total, stats.depth, stats.consecutive_drops, stats.degraded,
             )
 
+    def _reset_capture_watch(self) -> None:
+        stats = self._audio_q.stats()
+        self._captured_seen = stats.put_total + stats.dropped_total
+        self._last_capture_at = time.monotonic()
+        self._last_keep_alive_at = 0.0
+        self._mic_silent = False
+
+    def _watch_capture(self, provider: STTProvider) -> None:
+        """Detect a microphone that has stopped delivering frames.
+
+        A device that goes quiet (unplugged, grabbed by another application,
+        driver stall) produces no error here, only silence; Deepgram then
+        closes the stream after ~10 s and the clinician would see nothing
+        but an endless "reconnecting". The warning names the real cause and
+        a KeepAlive holds the stream open; both are withdrawn as soon as
+        frames arrive again. Runs on the session thread, never the callback.
+        """
+        stats = self._audio_q.stats()
+        captured = stats.put_total + stats.dropped_total  # a dropped frame was still captured
+        now = time.monotonic()
+        if captured != self._captured_seen:
+            self._captured_seen = captured
+            self._last_capture_at = now
+            if self._mic_silent:
+                self._mic_silent = False
+                log.info("microphone audio resumed")
+                self._clear_warning(MIC_SILENT_WARNING)
+            return
+        if now - self._last_capture_at < AUDIO_SILENCE_SECONDS:
+            return
+        if not self._mic_silent:
+            self._mic_silent = True
+            log.warning("no audio captured for %.0fs; keeping the stream alive", AUDIO_SILENCE_SECONDS)
+            self._warn(MIC_SILENT_WARNING)
+        if now - self._last_keep_alive_at >= KEEP_ALIVE_INTERVAL_SECONDS:
+            self._last_keep_alive_at = now
+            try:
+                provider.keep_alive()
+            except ProviderError as exc:
+                # A dead connection is reported by the provider thread itself.
+                log.debug("keep-alive not sent: %s", exc)
+
     # -- session lifecycle -------------------------------------------------
 
     def _reset_session_state(self) -> None:
@@ -589,8 +650,11 @@ class LiveMedicalSTT:
                 channels=s.channels, dtype="int16", callback=self._on_audio,
             ):
                 self.phase = "recording"
+                self._clear_warning(CAPACITY_WARNING)
+                self._reset_capture_watch()
                 while not self._stop.wait(0.1) and not self._shutdown.is_set():
                     self._report_audio_health()  # independent of queue emptiness / blocked sends
+                    self._watch_capture(provider)
         except KeyboardInterrupt:
             self.request_stop()
         except OSError as exc:
@@ -669,6 +733,11 @@ class LiveMedicalSTT:
                         consecutive_failures = 0
                     consecutive_failures += 1
                     self.phase = "reconnecting"
+                    if exc.category is ErrorCategory.RATE_LIMIT:
+                        # Deepgram's concurrent-stream cap (or the host's
+                        # limiter) refused this device: say so instead of
+                        # showing a generic "reconnecting" indefinitely.
+                        self._warn(CAPACITY_WARNING)
                     # `exc.retry_after` is honored when the host sent one, so
                     # a rate-limited client slows down when told to instead of
                     # guessing -- which is what would otherwise turn 50
