@@ -172,6 +172,9 @@ set -a; . host/.env; set +a
 | `HOST_GRANT_MAX_CONNECTIONS` | no | `100` | HTTP pool size. |
 | `HOST_GRANT_MAX_KEEPALIVE_CONNECTIONS` | no | `20` | Pool keepalive size. |
 | `HOST_MAX_INFLIGHT_GRANTS` | no | `100` | Concurrent grants; beyond this, 503. |
+| `HOST_MAX_ACTIVE_REQUESTS` | no | `128` | Total admitted session requests, including body readers; excess gets 503. |
+| `HOST_REQUEST_BODY_TIMEOUT_SECONDS` | no | `2.0` | Wall-clock limit to read a session body; expiry gets 408. |
+| `HOST_GRANT_DEADLINE_SECONDS` | no | `7.0` | Whole upstream grant deadline (all HTTP phases); expiry gets 504. |
 | `HOST_MAX_REQUEST_BODY_BYTES` | no | `4096` | Request body cap (413 beyond). |
 | `HOST_METRICS_ADMIN_TOKEN` | no | — | If set, `/metrics` requires it. |
 | `HOST_TLS_CERTFILE` / `HOST_TLS_KEYFILE` | no* | — | PEM certificate and key. |
@@ -390,7 +393,11 @@ MEDICAL_STT_SOAK=1 pytest tests/test_soak.py -v -s
 Opt-in, **real** Deepgram — the only test that spends credit:
 
 ```bash
-MEDICAL_STT_LOAD_TEST=1 DEEPGRAM_API_KEY=… pytest tests/test_live_load.py -m loadtest -v -s
+# Set MEDICALSTT_HOST_URL and provisioned credentials through your secure
+# environment; do NOT put secrets in shell history. For distinct devices,
+# MEDICAL_STT_LOAD_CLIENTS_FILE points to an external *.secret JSON list
+# of {"client_id": ..., "secret": ...} objects (at least 50 entries).
+MEDICAL_STT_LOAD_TEST=1 pytest tests/test_live_load.py -m loadtest -v -s
 ```
 
 It opens 10, then 25, then 50 concurrent Nova-3 `fa` streams and reports
@@ -416,3 +423,45 @@ project's concurrency allowance before promising 50 users.
 - Rotating one device's secret means re-running `host/provision` for it and
   replacing both its registry line and its DPAPI blob. Rotating the
   Deepgram key requires no client change at all.
+
+## Performance-audit hardening (2026-10-14)
+
+- Session bodies must be JSON objects; `ttl_seconds`, when supplied, must be
+  an integer from 5 through `HOST_MAX_TTL_SECONDS`. Invalid input returns
+  422, excessive bytes 413, and an incomplete body 400. Never mint a token
+  after an invalid/disconnected request.
+- The 2 s body + 7 s grant budgets leave a small network allowance inside the
+  desktop's default 10 s host timeout. Set the client's budget above their
+  sum plus your measured network margin if deployment requires longer waits.
+- Effective grant concurrency is the smaller of `HOST_MAX_INFLIGHT_GRANTS`
+  and `HOST_GRANT_MAX_CONNECTIONS`; increase both intentionally, not blindly.
+- `session_http_requests_total`, `session_http_outcomes_total{status=...}`,
+  `session_http_latency`, and `active_session_requests` describe the entire
+  route, including rejected input, capacity rejection and cancellation.
+  `token_requests_total` / `token_request_failures_total` describe actual
+  upstream attempts only; `grant_capacity_rejections_total` is separate.
+  Legacy `session_*` counters describe internal grant flow and must not be
+  used as all-request success ratios.
+- Failed-auth lockout still throttles bad credentials, but valid credentials
+  bypass that budget so a broken device/attacker cannot lock out colleagues
+  sharing a hospital NAT. Per-device and global authenticated limits still apply.
+- `/readyz` is **local pool readiness**, not a Deepgram reachability or
+  account-key check. Alert separately on recent grant failures. Do not spend
+  a token on every readiness probe.
+- **Production:** configure `HOST_METRICS_ADMIN_TOKEN` or block `/metrics` at
+  the gateway; the compatibility default is intentionally still optional.
+- One worker is the supported deployment. A registry shared on disk is NOT
+  shared rate-limit/capacity state. Multiple workers/replicas require gateway
+  or distributed rate limits and deliberate metric aggregation.
+- Registry updates/revocation require worker restart. Revoking a device
+  prevents new tokens, not streams already authenticated directly to Deepgram.
+- Passenger has a best-effort same-loop pool-close hook for normal process
+  exit. Abrupt process termination still relies on OS socket cleanup; measure
+  worker/thread ceilings and graceful-drain behavior on your actual host.
+- Set proxy header/body read timeouts and connection limits as well as the
+  application bounds. Restrict direct backend access. The Docker loopback
+  probe supplies HTTPS metadata only from its trusted local peer; if you
+  override `HOST_FORWARDED_ALLOW_IPS`, retain loopback for that probe or use
+  native TLS. Test direct-TLS and reverse-proxy deployments separately.
+- HTTP request logging remains synchronous. Benchmark the production log sink
+  before adding a logging queue; the audit did not demonstrate it as a bottleneck.

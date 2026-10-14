@@ -15,6 +15,7 @@ synchronized 50-request spike. Two properties prevent that:
 from __future__ import annotations
 
 import random
+import math
 from dataclasses import dataclass
 from typing import Optional, Protocol
 
@@ -81,7 +82,7 @@ def decide(
         # cannot accidentally drop it by forgetting the argument.
         retry_after = getattr(error, "retry_after", None)
 
-    if retry_after is not None and retry_after > 0:
+    if retry_after is not None and math.isfinite(retry_after) and retry_after > 0:
         # Honor the server, but not unconditionally: an upstream (or a
         # misconfigured proxy) claiming "retry in 6 hours" must not leave a
         # clinician unable to dictate. The wait is clamped from above by
@@ -94,6 +95,7 @@ def decide(
             max(float(retry_after), exponential_backoff_delay(policy, attempt)),
             policy.max_retry_after_seconds,
         )
+        honored = _positive_jitter(honored, policy, policy.max_retry_after_seconds)
         return ReconnectDecision(
             True,
             honored,
@@ -103,7 +105,7 @@ def decide(
 
     delay = exponential_backoff_delay(policy, attempt)
     if error.category is ErrorCategory.RATE_LIMIT:
-        delay = max(delay, policy.rate_limit_delay)
+        delay = _positive_jitter(max(delay, policy.rate_limit_delay), policy, policy.max_retry_after_seconds)
     return ReconnectDecision(True, delay, f"retryable error category: {error.category.value}")
 
 
@@ -120,10 +122,20 @@ def exponential_backoff_delay(
     spread across a full window instead of clustering either side of it.
     """
     attempt = max(1, attempt)
-    raw = policy.base_delay * (2 ** (attempt - 1))
-    capped = min(policy.max_delay, raw)
+    base = max(0.0, policy.base_delay)
+    ceiling = max(0.0, policy.max_delay)
+    if base == 0 or ceiling == 0:
+        return 0.0
+    # Compare exponents before exponentiation; unlimited retries must not overflow.
+    capped = ceiling if attempt - 1 >= math.log2(ceiling / base) else base * (2 ** (attempt - 1))
     jitter = min(max(policy.jitter, 0.0), 1.0)
     if jitter <= 0:
         return capped
     floor = capped * (1.0 - jitter)
     return max(0.0, rng.uniform(floor, capped))
+
+
+def _positive_jitter(floor: float, policy: ReconnectPolicy, cap: float) -> float:
+    """Spread retries without waking before the server's required minimum."""
+    width = min(max(0.0, cap - floor), floor * min(1.0, max(0.0, policy.jitter)))
+    return floor + _default_rng.uniform(0.0, width) if width else floor

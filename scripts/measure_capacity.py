@@ -14,8 +14,8 @@ work):
     50 simultaneous session requests   >= 99% successful, 0 legitimate 429
     token acquisition p95              < 2s
     event loop during token issuance   not blocked (50 x 50ms in << 2.5s)
-    memory growth per completed session  none proportional to session count
-    active sessions after shutdown     == 0
+    memory growth over the short run   < 32 MiB allowance
+    in-flight grants after requests    == 0
 
 Real Deepgram latency is explicitly NOT measured here and is not claimed:
 this is a local harness against a stub. Use the opt-in
@@ -152,7 +152,7 @@ def main(argv: Any = None) -> int:
         results.append(
             (
                 f"{count} simultaneous session requests",
-                success >= int(count * 0.99) and limited == 0,
+                success / count >= 0.99 and limited == 0,
                 f"{success}/{count} ok, {limited} x 429",
             )
         )
@@ -183,7 +183,7 @@ def main(argv: Any = None) -> int:
         growth = after - before
         results.append(
             (
-                "no memory growth per session batch",
+                "RSS growth within 32 MiB allowance",
                 growth < 32 * 1024 * 1024,
                 f"{growth / 1e6:+.2f} MB over {count * 5} sessions",
             )
@@ -192,7 +192,7 @@ def main(argv: Any = None) -> int:
         # --- state after shutdown ---------------------------------------
         results.append(
             (
-                "active sessions after shutdown == 0",
+                "in-flight grants after requests == 0",
                 app.state.inflight.in_flight == 0,
                 f"in-flight grants = {app.state.inflight.in_flight}",
             )
@@ -204,6 +204,8 @@ def main(argv: Any = None) -> int:
                 f"{app.state.client_limiter.tracked_keys} buckets for {count} clients",
             )
         )
+
+        asyncio.run(app.state.grant_client.aclose())
 
     width = max(len(name) for name, _ok, _detail in results)
     print("\n=== 50-concurrent-session acceptance criteria ===")

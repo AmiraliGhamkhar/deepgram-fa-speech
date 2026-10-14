@@ -10,6 +10,8 @@ segments are kept.
 """
 from __future__ import annotations
 
+import time
+
 from typing import List, Optional, Tuple
 
 from .base import TranscriptEvent, WordInfo
@@ -37,10 +39,19 @@ def _same_word_span(first: Tuple[WordInfo, ...], second: Tuple[WordInfo, ...]) -
     )
 
 
+class UtteranceLimitError(ValueError):
+    """The provider did not endpoint within the bounded utterance budget."""
+
+
 class UtteranceAccumulator:
     """Collect finalized segments until the provider marks speech complete."""
 
-    def __init__(self) -> None:
+    def __init__(self, max_chars: int = 8000, max_segments: int = 128, max_seconds: float = 60.0) -> None:
+        self.max_chars = max_chars
+        self.max_segments = max_segments
+        self.max_seconds = max_seconds
+        self._chars = 0
+        self._started = 0.0
         self._segments: List[TranscriptEvent] = []
         self._last_source_event: Optional[TranscriptEvent] = None
 
@@ -51,6 +62,13 @@ class UtteranceAccumulator:
         text = event.text.strip()
         # Providers may repeat a finalized segment around an endpoint event.
         if text and not self._is_duplicate(event, text):
+            now = time.monotonic()
+            if (self._chars + len(text) > self.max_chars or len(self._segments) >= self.max_segments
+                    or (self._segments and now - self._started > self.max_seconds)):
+                raise UtteranceLimitError("Dictation exceeded the utterance budget; stop and review")
+            if not self._segments:
+                self._started = now
+            self._chars += len(text)
             self._segments.append(
                 TranscriptEvent(
                     text=text,
@@ -58,6 +76,7 @@ class UtteranceAccumulator:
                     speech_final=False,
                     confidence=event.confidence,
                     words=event.words,
+                    received_at=event.received_at,
                 )
             )
             self._last_source_event = event
@@ -71,6 +90,8 @@ class UtteranceAccumulator:
             return None
 
         segments, self._segments = self._segments, []
+        self._chars = 0
+        self._started = 0.0
         self._last_source_event = None
         words = tuple(word for segment in segments for word in segment.words)
         confidences = [segment.confidence for segment in segments if segment.confidence is not None]
@@ -81,10 +102,13 @@ class UtteranceAccumulator:
             speech_final=True,
             confidence=confidence,
             words=words,
+            received_at=segments[-1].received_at,
         )
 
     def reset(self) -> None:
         self._segments.clear()
+        self._chars = 0
+        self._started = 0.0
         self._last_source_event = None
 
     def _is_duplicate(self, event: TranscriptEvent, text: str) -> bool:

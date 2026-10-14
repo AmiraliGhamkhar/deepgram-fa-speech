@@ -25,8 +25,8 @@ from typing import Any
 _CRYPTPROTECT_UI_FORBIDDEN = 0x1
 
 #: Application-specific optional entropy. Binding the blob to this value
-#: means a blob produced by another application cannot be decrypted here
-#: even by code that runs as the same user.
+#: separates this application's blobs from accidental use elsewhere. It is
+#: public data, NOT a boundary against code running as the same Windows user.
 APP_ENTROPY = b"MedicalSTT/host-secret/v1"
 
 #: Human-readable description embedded in the protected blob.

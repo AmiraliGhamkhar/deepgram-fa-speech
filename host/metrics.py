@@ -283,6 +283,9 @@ def _as_number(value: float) -> str:
 #: these is a series this process actually updates -- see the module
 #: docstring for why client-side series are deliberately not declared here.
 DECLARED_COUNTERS: Tuple[str, ...] = (
+    "session_http_requests_total",
+    "session_http_outcomes_total",
+    "grant_capacity_rejections_total",
     "session_starts_total",
     "session_success_total",
     "session_failures_total",
@@ -298,6 +301,7 @@ DECLARED_COUNTERS: Tuple[str, ...] = (
 DECLARED_GAUGES: Tuple[str, ...] = (
     #: Deepgram grant requests currently in flight, and the cap they are
     #: shed against (`HOST_MAX_INFLIGHT_GRANTS`).
+    "active_session_requests",
     "inflight_grants",
     "inflight_grants_capacity",
     #: Client identities the host can authenticate.
@@ -306,6 +310,7 @@ DECLARED_GAUGES: Tuple[str, ...] = (
 
 DECLARED_HISTOGRAMS: Tuple[str, ...] = (
     "token_request_latency",
+    "session_http_latency",
 )
 
 

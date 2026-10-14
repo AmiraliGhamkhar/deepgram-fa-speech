@@ -59,11 +59,12 @@ def _settings(**overrides):
     return Settings(**base)
 
 
-def test_send_audio_without_a_connection_is_a_noop():
+def test_send_audio_without_a_connection_reports_not_ready():
     from medical_stt.stt.deepgram_provider import DeepgramProvider
 
     provider = DeepgramProvider(_settings(), token_provider=lambda: "token")
-    provider.send_audio(b"\x00\x00")  # must not raise
+    with pytest.raises(ProviderError, match="not ready"):
+        provider.send_audio(b"\x00\x00")
 
 
 def test_stop_without_a_connection_is_a_noop():

@@ -177,6 +177,7 @@ class TextInjector:
         backend delegation; our own text handling stays outside them, so a bug
         in this class is still loud.
         """
+        self.last_error = None
         if not text:
             return False
         try:
@@ -206,6 +207,7 @@ class TextInjector:
         processing.bidi.to_injected -- never a forced RLE/PDF embedding
         around the whole string (see processing/bidi.py for why).
         """
+        self.last_error = None
         separator = _trailing_separator(text)
         text = normalize_injected_whitespace(text)
         if not text:

@@ -15,6 +15,8 @@ shared secret -- never a provider credential -- and a plaintext secret in
 from __future__ import annotations
 
 import copy
+import math
+import tempfile
 import logging
 import os
 import re
@@ -364,19 +366,42 @@ def load_host_secret() -> str:
     return secret or ""
 
 
-def save_host_credentials(host_url: str, host_secret: str) -> None:
-    """Persist the host URL in settings.yaml and the secret via DPAPI."""
-    initialize_user_config()
-    if host_secret:
-        SecretStore(paths.secret_path()).save(host_secret)
+def save_host_credentials(host_url: str, host_secret: str, client_id: str | None = None) -> None:
+    """Validate before touching credentials; replace YAML atomically.
 
+    The encrypted secret and YAML are separate files, not a transaction. If
+    replacing YAML fails after secret storage, report that partial outcome.
+    """
+    valid, message = _valid_host_url(host_url.strip())
+    if not valid:
+        raise ConfigError(message)
+    if client_id and not _valid_client_id(client_id):
+        raise ConfigError("host_client_id is invalid")
+    initialize_user_config()
     target = user_settings_path()
     cfg = _load_yaml(target)
     if not isinstance(cfg, dict):
         raise ConfigError(f"{target} must contain a mapping at the top level")
     cfg["host_url"] = host_url.strip()
-    with target.open("w", encoding="utf-8") as fh:
-        yaml.safe_dump(cfg, fh, allow_unicode=True, sort_keys=False)
+    if client_id is not None:
+        cfg["host_client_id"] = client_id
+    handle, temporary = tempfile.mkstemp(dir=target.parent, prefix=".settings-", suffix=".tmp")
+    secret_saved = False
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            yaml.safe_dump(cfg, stream, allow_unicode=True, sort_keys=False)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if host_secret:
+            SecretStore(paths.secret_path()).save(host_secret)
+            secret_saved = True
+        os.replace(temporary, target)
+    except OSError as exc:
+        detail = "Secret saved, but settings were not replaced; retry saving" if secret_saved else "Settings were not saved"
+        raise ConfigError(detail) from exc
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 def _valid_host_url(url: str) -> Tuple[bool, str]:
@@ -412,6 +437,10 @@ def _valid_host_url(url: str) -> Tuple[bool, str]:
 def validate_settings(settings: Settings) -> List[str]:
     """Return a list of validation error strings; empty list means valid."""
     errors: List[str] = []
+    for name in ("block_duration", "paste_settle_seconds", "reconnect_delay", "reconnect_backoff_max",
+                 "reconnect_jitter", "host_timeout_seconds", "medical_confidence_threshold"):
+        if not math.isfinite(getattr(settings, name)):
+            errors.append(f"{name} must be finite")
 
     if settings.sample_rate not in (8000, 16000, 22050, 24000, 44100, 48000):
         errors.append(f"sample_rate must be a standard rate, got {settings.sample_rate}")

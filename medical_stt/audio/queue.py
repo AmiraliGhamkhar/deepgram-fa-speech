@@ -40,6 +40,10 @@ class QueueStats:
     consecutive_drops: int = 0
     #: True while the queue is dropping audio -- the session health flag.
     degraded: bool = False
+    oldest_age_seconds: float = 0.0
+    last_queue_age_seconds: float = 0.0
+    sent_bytes: int = 0
+    dropped_bytes: int = 0
 
 
 class BoundedAudioQueue:
@@ -47,8 +51,11 @@ class BoundedAudioQueue:
     without adding latency to the producer (audio callback) path."""
 
     def __init__(self, maxsize: int = 40) -> None:
-        self._q: "queue.Queue[bytes]" = queue.Queue(maxsize=maxsize)
+        self._q: "queue.Queue[tuple[float, bytes]]" = queue.Queue(maxsize=maxsize)
         self._lock = threading.Lock()
+        self._last_queue_age = 0.0
+        self._sent_bytes = 0
+        self._dropped_bytes = 0
         self._dropped_total = 0
         self._drained_total = 0
         self._put_total = 0
@@ -64,10 +71,11 @@ class BoundedAudioQueue:
         queue (a real-time audio callback must not have to handle
         exceptions from this call)."""
         try:
-            self._q.put_nowait(chunk)
+            self._q.put_nowait((time.monotonic(), chunk))
         except queue.Full:
             with self._lock:
                 self._dropped_total += 1
+                self._dropped_bytes += len(chunk)
                 self._consecutive_drops += 1
                 self._consecutive_sends = 0
                 self._last_drop_at = time.monotonic()
@@ -86,17 +94,33 @@ class BoundedAudioQueue:
         return True
 
     def get(self, timeout: float = 0.1) -> bytes:
-        chunk = self._q.get(timeout=timeout)
+        captured, chunk = self._q.get(timeout=timeout)
         with self._lock:
             self._get_total += 1
+            self._last_queue_age = time.monotonic() - captured
         return chunk
+
+    def record_sent(self, chunk: bytes) -> None:
+        with self._lock:
+            self._sent_bytes += len(chunk)
+
+    def record_failed(self, chunk: bytes) -> None:
+        with self._lock:
+            self._dropped_bytes += len(chunk)
+            self._dropped_total += 1
 
     def task_done(self) -> None:
         self._q.task_done()
 
     def stats(self) -> QueueStats:
         with self._lock:
+            with self._q.mutex:
+                age = time.monotonic() - self._q.queue[0][0] if self._q.queue else 0.0
             return QueueStats(
+                oldest_age_seconds=age,
+                last_queue_age_seconds=self._last_queue_age,
+                sent_bytes=self._sent_bytes,
+                dropped_bytes=self._dropped_bytes,
                 depth=self._q.qsize(),
                 max_depth=self._max_depth_seen,
                 dropped_total=self._dropped_total,
@@ -118,7 +142,9 @@ class BoundedAudioQueue:
         drained = 0
         while True:
             try:
-                self._q.get_nowait()
+                _, chunk = self._q.get_nowait()
+                with self._lock:
+                    self._dropped_bytes += len(chunk)
             except queue.Empty:
                 break
             drained += 1

@@ -1,221 +1,80 @@
-"""Phase 14 -- opt-in load test against the *real* Deepgram project.
+"""Explicitly opt-in real-provider load test using the production credential path.
 
-This is the only test in the repository that spends real Deepgram credits,
-and it must never run accidentally. Three independent gates, all required:
-
-    MEDICAL_STT_LOAD_TEST=1        # explicit opt-in
-    DEEPGRAM_API_KEY               # a real key, in the environment
-    pytest -m loadtest             # the marker must be selected explicitly
-
-    MEDICAL_STT_LOAD_TEST=1 pytest tests/test_live_load.py -m loadtest -v -s
-
-CI never sets `MEDICAL_STT_LOAD_TEST`, so this is skipped there. See also
-`tests/test_live_deepgram.py`, which is the single-stream functional check.
-
-**It does not attempt to bypass Deepgram's concurrency limits.** If the
-project is provisioned for fewer concurrent streams than the target, the
-test reports the two causes separately and fails only on the application's:
-
-    APPLICATION CAPACITY: PASS
-    PROVIDER CAPACITY: FAIL
-
-That distinction is the point. The application issuing a token and opening a
-WebSocket is something this repository controls and can be proven correct.
-Whether the Deepgram plan allows 50 simultaneous Nova-3 streams is a
-commercial decision on the operator's account, and reporting it as an
-application failure would be dishonest.
+Requires MEDICAL_STT_LOAD_TEST=1, -m loadtest, MEDICALSTT_HOST_URL and either
+MEDICAL_STT_LOAD_CLIENTS_FILE (JSON list of client_id/secret objects) or the
+MEDICALSTT_HOST_SECRET / MEDICALSTT_HOST_CLIENT_ID pair. No account API key
+is read or required. Keep the credential file outside Git (e.g. *.secret).
 """
 from __future__ import annotations
 
-import asyncio
+import concurrent.futures
+import json
 import os
-import sys
-import threading
 import time
 from pathlib import Path
-from typing import List, Tuple
 
 import pytest
 
-pytestmark = [
-    pytest.mark.loadtest,
-    pytest.mark.skipif(
-        os.getenv("MEDICAL_STT_LOAD_TEST", "").strip() not in ("1", "true", "yes"),
-        reason="set MEDICAL_STT_LOAD_TEST=1 to run the real Deepgram load test",
-    ),
-    pytest.mark.skipif(
-        not os.getenv("DEEPGRAM_API_KEY", "").strip(),
-        reason="DEEPGRAM_API_KEY is required for a real provider load test",
-    ),
-]
+from medical_stt.config import Settings
+from medical_stt.stt.deepgram_provider import DeepgramProvider
+from medical_stt.stt.runner import stream_audio
 
-#: Stream counts the operator is asked to validate, in ascending order.
-STREAM_COUNTS: Tuple[int, ...] = (10, 25, 50)
-
-#: How long each tier holds its streams open. Long enough for Deepgram to
-#: accept the connection and start streaming, short enough to stay cheap.
-TIER_SECONDS = float(os.getenv("MEDICAL_STT_LOAD_TIER_SECONDS", "20"))
-
-#: Fraction of streams that must connect for the application to be judged
-#: capable. Deepgram may refuse the excess if the plan is smaller than the
-#: target -- that is a provider limit, not an application defect.
-APPLICATION_SUCCESS_THRESHOLD = 0.99
-
-SAMPLE_RATE = 16_000
-SAMPLE_WIDTH = 2
-CHANNELS = 1
+pytestmark = [pytest.mark.loadtest, pytest.mark.live]
+STREAM_COUNTS = (10, 25, 50)
 
 
-def _silence(frames: int) -> bytes:
-    """A block of digital silence, valid linear16 PCM."""
-    return b"\x00" * (frames * SAMPLE_WIDTH * CHANNELS)
+def _credentials(count: int) -> list[dict[str, str]]:
+    path = os.getenv("MEDICAL_STT_LOAD_CLIENTS_FILE", "")
+    if path:
+        clients = json.loads(Path(path).read_text(encoding="utf-8"))
+        if not isinstance(clients, list) or len(clients) < count:
+            pytest.fail("load credential file must contain enough provisioned clients")
+        if any(not isinstance(c, dict) or not c.get("client_id") or not c.get("secret") for c in clients):
+            pytest.fail("load credential file entries require client_id and secret")
+        return clients[:count]
+    secret = os.getenv("MEDICALSTT_HOST_SECRET", "")
+    if not secret:
+        pytest.skip("host credentials are required")
+    return [{"client_id": os.getenv("MEDICALSTT_HOST_CLIENT_ID", ""), "secret": secret}] * count
 
 
-class _CapacityResult:
-    def __init__(self) -> None:
-        self.application_pass = False
-        self.provider_pass = False
-        self.rows: List[str] = []
-
-    def report(self) -> None:
-        print("\n--- Deepgram concurrent-stream capacity ---")
-        for row in self.rows:
-            print(row)
-        print(
-            f"\nAPPLICATION CAPACITY: {'PASS' if self.application_pass else 'FAIL'}\n"
-            f"PROVIDER CAPACITY: {'PASS' if self.provider_pass else 'FAIL'}"
-        )
-
-    def summary(self) -> str:
-        return (
-            f"APPLICATION CAPACITY: {'PASS' if self.application_pass else 'FAIL'}; "
-            f"PROVIDER CAPACITY: {'PASS' if self.provider_pass else 'FAIL'}"
-        )
-
-
-async def _open_stream(index: int, stop: asyncio.Event, outcome: List[str]) -> str:
-    """Hold one Deepgram streaming connection open for the tier.
-
-    Uses the Deepgram SDK exactly as the production provider does: Nova-3,
-    `language=fa`, with a *short-lived grant token* when one can be minted.
-    Falls back to the account API key only for this opt-in diagnostic, and
-    says so, so nobody mistakes it for the production credential path.
-    """
-    from deepgram import DeepgramClient
-
-    host_url = os.getenv("MEDICAL_STT_HOST_URL", "").strip()
-    client_secret = os.getenv("MEDICALSTT_HOST_SECRET", "").strip()
-
-    if host_url and client_secret:
-        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-        from medical_stt.host_client import HostSessionClient
-
-        session = HostSessionClient(
-            base_url=host_url, secret=client_secret, client_id="loadtest"
-        ).fetch_session(ttl_seconds=60)
-        client = DeepgramClient(access_token=session.access_token)
-        path = "host-issued short-lived token (production credential path)"
-    else:
-        client = DeepgramClient(api_key=os.environ["DEEPGRAM_API_KEY"])
-        path = "account API key (host NOT under test; credential path unverified)"
-
+def _stream(client: dict[str, str], seconds: float) -> tuple[str, float, float]:
+    settings = Settings(host_url=os.environ["MEDICALSTT_HOST_URL"],
+                        host_secret=client["secret"], host_client_id=client["client_id"])
+    provider = DeepgramProvider(settings)
+    ready_at = 0.0
+    def ready() -> None:
+        nonlocal ready_at
+        ready_at = time.monotonic()
     try:
-        connection = client.listen.v1.connect(
-            model="nova-3",
-            language="fa",
-            encoding="linear16",
-            sample_rate=SAMPLE_RATE,
-            channels=CHANNELS,
-            interim_results=True,
-            endpointing=400,
-            smart_format=True,
-        )
-        with connection:
-            opened = threading.Event()
-            connection.on("open", lambda _m: opened.set())
-            connection.start_listening()
-            # Give Deepgram a moment to complete the handshake; a refusal is
-            # reported by the SDK rather than raised here.
-            await asyncio.sleep(1.0)
-
-            frames = int(SAMPLE_RATE * 0.1)
-            while not stop.is_set():
-                try:
-                    connection.send_media(_silence(frames))
-                except Exception as exc:  # noqa: BLE001 - classified below
-                    return f"stream {index}: send failed ({type(exc).__name__})"
-                await asyncio.sleep(0.1)
-            return f"stream {index}: ok ({path})"
-    except Exception as exc:  # noqa: BLE001 - any refusal is a capacity signal
-        return f"stream {index}: REFUSED ({type(exc).__name__}: {exc})"
+        # Silence, paced in real time. The listener runs on its own worker.
+        stream_audio(provider, (bytes(3200) for _ in range(max(1, int(seconds * 10)))),
+                     lambda event: None, lambda error: None, bytes_per_second=32000, on_ready=ready)
+        return "ok", ready_at, time.monotonic()
+    except Exception as exc:
+        # No raw exception representations: SDKs can embed credentials.
+        return getattr(getattr(exc, "category", None), "value", type(exc).__name__), ready_at, time.monotonic()
 
 
-def _run_tier(count: int) -> Tuple[int, int, List[str]]:
-    """Open `count` streams concurrently; return (opened, refused, notes)."""
-    async def main() -> List[str]:
-        stop = asyncio.Event()
-        tasks = [asyncio.create_task(_open_stream(i, stop, [])) for i in range(count)]
-        await asyncio.sleep(TIER_SECONDS)
-        stop.set()
-        return await asyncio.gather(*tasks, return_exceptions=True)
-
-    results = asyncio.run(main())
-    notes: List[str] = []
-    for result in results:
-        if isinstance(result, BaseException):
-            notes.append(f"REFUSED ({type(result).__name__})")
-        else:
-            notes.append(result)
-    refused = sum(1 for note in notes if "REFUSED" in note or "failed" in note)
-    return count - refused, refused, notes
-
-
-@pytest.mark.live
-def test_50_concurrent_deepgram_streams() -> None:
-    """Validate 10 -> 25 -> 50 concurrent Nova-3 streams, honestly.
-
-    Fails when the *application* cannot serve the target. Reports -- but
-    does not fail on -- a provider-side concurrency limit, because that is a
-    property of the Deepgram plan on the account, not of this code.
-    """
-    result = _CapacityResult()
-    highest_opened = 0
-    target = max(STREAM_COUNTS)
-
+def test_50_concurrent_deepgram_streams(pytestconfig) -> None:
+    if os.getenv("MEDICAL_STT_LOAD_TEST") != "1" or "loadtest" not in pytestconfig.option.markexpr:
+        pytest.skip("set MEDICAL_STT_LOAD_TEST=1 and select -m loadtest to run the real Deepgram load test")
+    if not os.getenv("MEDICALSTT_HOST_URL"):
+        pytest.skip("MEDICALSTT_HOST_URL is required")
+    seconds = float(os.getenv("MEDICAL_STT_LOAD_TIER_SECONDS", "20"))
     for count in STREAM_COUNTS:
+        clients = _credentials(count)
         started = time.monotonic()
-        opened, refused, notes = _run_tier(count)
-        elapsed = time.monotonic() - started
-        highest_opened = max(highest_opened, opened)
-        success_rate = opened / count if count else 0.0
-        result.rows.append(
-            f"streams={count:>3}  opened={opened:>3}  refused={refused:>3}  "
-            f"success={success_rate * 100:5.1f}%  ({elapsed:.0f}s)"
-        )
-        for note in notes:
-            if "REFUSED" in note or "failed" in note:
-                result.rows.append(f"    {note}")
-        if opened < count:
-            # Keep going: the operator wants the full curve, not just the
-            # first failure point.
-            continue
-
-    application_ok = highest_opened >= int(target * APPLICATION_SUCCESS_THRESHOLD)
-    provider_ok = highest_opened >= target
-    result.application_pass = application_ok
-    result.provider_pass = provider_ok
-    result.report()
-
-    assert application_ok, (
-        f"the application opened only {highest_opened}/{target} concurrent streams "
-        f"({result.summary()})"
-    )
-    if not provider_ok:
-        pytest.fail(
-            "APPLICATION CAPACITY: PASS, PROVIDER CAPACITY: FAIL -- "
-            f"{highest_opened}/{target} concurrent Nova-3 streams were accepted. "
-            "This is a limit on the Deepgram project's concurrency allowance, "
-            "not a defect in this application. Confirm your Deepgram plan's "
-            "concurrent-stream limit, or reduce the supported session count. "
-            "See host/README.md > Capacity planning."
-        )
+        with concurrent.futures.ThreadPoolExecutor(max_workers=count) as pool:
+            results = list(pool.map(lambda c: _stream(c, seconds), clients))
+        categories = [row[0] for row in results]
+        successes = categories.count("ok")
+        failures = {result: categories.count(result) for result in set(categories) if result != "ok"}
+        assert successes / count >= .99, f"End-to-end stream failures by category: {failures}"
+        successful = [row for row in results if row[0] == "ok"]
+        # Count overlapping actual ready-to-close intervals, not merely a
+        # collection of successful streams that could have run serially.
+        overlap = min(row[2] for row in successful) - max(row[1] for row in successful)
+        print(f"streams={count} successful={successes} overlap={overlap:.1f}s "
+              f"elapsed={time.monotonic()-started:.1f}s")
+        assert overlap >= min(5.0, seconds / 4), "Streams did not remain concurrently ready long enough"

@@ -419,7 +419,9 @@ def test_send_audio_racing_stop_is_not_an_error():
 
     # ...but the same failure after stop() bumped the generation is dropped.
     provider.stop()
-    provider.send_audio(b"\x00\x02")  # must not raise
+    with pytest.raises(ProviderError) as cancelled:
+        provider.send_audio(b"\x00\x02")
+    assert cancelled.value.category is ErrorCategory.SHUTDOWN
 
 
 # -- 08-F1: Retry-After is a floor against the backoff, not a clamp ---------

@@ -65,11 +65,11 @@ def test_close_schedules_destroy_even_though_closed_flag_is_set():
 
     overlay.close()
 
-    assert len(fake_root.scheduled) == 1, "destroy callback was not scheduled"
+    assert not fake_root.scheduled, "workers must not call Tk.after"
     assert overlay._closed is True
 
     # Running the scheduled callback must actually clear _root (the real
     # destroy() call), proving the callback does real work.
-    fake_root.scheduled[0]()
+    overlay._mailbox.drain()  # the owning Tk thread pumps the mailbox
     assert overlay._root is None
 

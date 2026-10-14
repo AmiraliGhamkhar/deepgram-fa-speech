@@ -23,12 +23,13 @@ issued token.
 from __future__ import annotations
 
 import hashlib
+import math
 import hmac
 import logging
 import os
 import threading
 import time
-from collections import defaultdict, deque
+from collections import OrderedDict, defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Deque, Dict, Mapping, Optional, Tuple
@@ -88,9 +89,10 @@ class GrantError(RuntimeError):
     response body are never part of the message.
     """
 
-    def __init__(self, message: str, status: int = 502) -> None:
+    def __init__(self, message: str, status: int = 502, retry_after: Optional[int] = None) -> None:
         super().__init__(message)
         self.status = status
+        self.retry_after = retry_after
 
 
 @dataclass(frozen=True)
@@ -133,6 +135,9 @@ class HostSettings:
     max_request_body_bytes: int = MAX_REQUEST_BODY_BYTES
     #: Concurrent in-flight Deepgram grants before the host sheds load.
     max_inflight_grants: int = 100
+    max_active_requests: int = 128
+    request_body_timeout_seconds: float = 2.0
+    grant_deadline_seconds: float = 7.0
 
     # -- Deepgram pool (Phase 3) ----------------------------------------
     grant_connect_timeout_seconds: float = 5.0
@@ -169,8 +174,11 @@ class HostSettings:
             if not raw:
                 return fallback
             try:
-                return convert(raw)
-            except ValueError:
+                value = convert(raw)
+                if isinstance(value, float) and not math.isfinite(value):
+                    raise ValueError("nonfinite")
+                return value
+            except (ValueError, OverflowError):
                 log.warning("ignoring non-numeric %s=%r", name, raw)
                 return fallback
 
@@ -223,6 +231,9 @@ class HostSettings:
                 64, _int("HOST_MAX_REQUEST_BODY_BYTES", MAX_REQUEST_BODY_BYTES)
             ),
             max_inflight_grants=max(1, _int("HOST_MAX_INFLIGHT_GRANTS", 100)),
+            max_active_requests=max(1, _int("HOST_MAX_ACTIVE_REQUESTS", 128)),
+            request_body_timeout_seconds=max(0.1, _float("HOST_REQUEST_BODY_TIMEOUT_SECONDS", 2.0)),
+            grant_deadline_seconds=max(0.1, _float("HOST_GRANT_DEADLINE_SECONDS", 7.0)),
             grant_connect_timeout_seconds=max(
                 0.5, _float("HOST_GRANT_CONNECT_TIMEOUT_SECONDS", 5.0)
             ),
@@ -305,7 +316,7 @@ def normalize_ttl(raw: Any, settings: HostSettings) -> int:
     """Clamp a requested TTL into the allowed range."""
     try:
         requested = int(raw) if raw is not None else settings.default_ttl_seconds
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         requested = settings.default_ttl_seconds
     return max(5, min(requested, settings.max_ttl_seconds))
 
@@ -448,7 +459,7 @@ def parse_token_response(payload: Any) -> Tuple[str, int]:
         raise GrantError("Deepgram did not return a session token", 502)
     try:
         expires_in = int(payload.get("expires_in", 0))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         expires_in = 0
     if expires_in <= 0:
         raise GrantError("Deepgram returned an invalid token expiry", 502)
@@ -734,7 +745,7 @@ class TokenBucketRateLimiter:
         self._max_tracked_keys = max(1, max_tracked_keys)
         self._purge_interval_calls = max(1, purge_interval_calls)
         # key -> [tokens, last_refill_monotonic]
-        self._buckets: Dict[str, list] = {}
+        self._buckets: OrderedDict[str, list] = OrderedDict()
         self._lock = threading.Lock()
         self._calls = 0
 
@@ -761,6 +772,7 @@ class TokenBucketRateLimiter:
                 bucket = [float(self._capacity), now]
                 self._buckets[key] = bucket
             else:
+                self._buckets.move_to_end(key)
                 elapsed = max(0.0, now - bucket[1])
                 bucket[0] = min(
                     float(self._capacity), bucket[0] + elapsed * self._refill_per_second
@@ -796,8 +808,7 @@ class TokenBucketRateLimiter:
     def _evict_locked(self) -> None:
         """Enforce the hard cap by dropping the least recently used buckets."""
         while len(self._buckets) > self._max_tracked_keys:
-            oldest = min(self._buckets, key=lambda key: self._buckets[key][1])
-            del self._buckets[oldest]
+            self._buckets.popitem(last=False)
 
     def reset(self) -> None:
         with self._lock:
@@ -887,6 +898,7 @@ class AsyncGrantClient:
             raise GrantError(
                 f"Deepgram refused the token request (HTTP {response.status_code})",
                 _grant_error_status(response.status_code),
+                retry_after=_retry_after(response.headers.get("Retry-After")),
             )
         try:
             return response.json()
@@ -929,3 +941,11 @@ def new_session_id() -> str:
     import uuid
 
     return uuid.UUID(bytes=os.urandom(SESSION_ID_BYTES), version=4).hex
+
+
+def _retry_after(value: Optional[str]) -> Optional[int]:
+    try:
+        seconds = float(value) if value else 0.0
+        return min(60, max(1, math.ceil(seconds))) if math.isfinite(seconds) and seconds > 0 else None
+    except (ValueError, OverflowError):
+        return None

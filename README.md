@@ -899,3 +899,44 @@ test suite and the Windows self-test before packaging.
 - No LLM is used in the transcription-correction path, by design; novel
   phrasing outside the explicit rule set is left unchanged rather than
   guessed.
+
+
+## Performance audit remediation — October 2026
+
+The Windows-client/GUI/API audit has been implemented. See
+[`docs/PERFORMANCE_FIXES.md`](docs/PERFORMANCE_FIXES.md) for the finding-by-finding
+change list, verification results, limits, and Windows/provider release checklist.
+The original [`audit`](docs/PERFORMANCE_AUDIT.md) is retained as historical evidence.
+
+Key operational changes:
+
+- **Connecting is not recording.** Capture now waits for the WebSocket. After
+  pressing Start, focus your external document before speaking. The app refuses
+  to inject into its own settings or recovery windows.
+- **Injection acceptance is not proof of insertion.** Failures, low-confidence
+  words and audio loss are visible. Recovery text is held in bounded memory;
+  review/copy/clear it explicitly before another session. No automatic replay.
+- **Clipboard preservation is conservative.** With `restore_clipboard: true`,
+  rich/image/file clipboards are refused instead of destroyed. Use `inject_mode:
+  type` or deliberately clear/replace that clipboard first. Newer user copies
+  are never intentionally overwritten by restoration.
+- The GUI now includes a client-ID field and a connection check for **saved**
+  configuration (one temporary token request, no audio). Start/settings work
+  runs off Tk; the overlay shares its interpreter and uses coalesced updates.
+- Host body and whole-grant budgets default to 2 and 7 seconds; the admitted
+  request cap defaults to 128. See `host/.env.example` and the host settings
+  table. Set the desktop request timeout above the sum plus network margin
+  if you raise these server budgets.
+- Latency logs distinguish VAD/result receipt and local stages; they do not
+  assert acoustic onset or target-document consumption. Mocked capacity remains
+  a token-service check, not a production speech-latency/accuracy measurement.
+
+For an explicit Windows native-input check in its own synthetic-text window:
+
+```powershell
+python scripts/windows_injection_check.py --interactive
+```
+
+No Windows performance, real-provider concurrency or clinical-accuracy claim
+is made from Linux/fake-DLL tests. Follow the remediation document's release
+checklist before deploying into a clinical workflow.
