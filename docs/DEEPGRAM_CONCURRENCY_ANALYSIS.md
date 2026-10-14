@@ -416,8 +416,27 @@ bookkeeping, for a signal the client already surfaces precisely at the
 handshake. Revisit if the clinic grows past the published pool size.
 
 Verification after the changes: `pytest tests/` (excluding the opt-in soak and
-live suites) 810 passed; `ruff check .` and `mypy medical_stt host benchmarks`
+live suites) 813 passed; `ruff check .` and `mypy medical_stt host benchmarks`
 clean; `scripts/measure_capacity.py` PASS on the new defaults.
+
+Re-check against the SDK source and the documentation after applying (what
+was confirmed, and the two small corrections it produced):
+
+* SDK 7.9.0: `DeepgramClient(environment=...)` is a real constructor
+  argument and the WebSocket URL is `environment.production + "/v1/listen"`,
+  so the per-region `DeepgramClientEnvironment` is the right lever; the sync
+  socket's `send()` holds a mutex, so `KeepAlive` from the session thread is
+  safe next to the sender thread.
+* `/docs/stt-tagging`: 128 characters per tag **and 500 unique tags per
+  project per day**. This is why `tag` carries the device id and the session
+  id travels in `extra` (documented in the provider and the README).
+* `/docs/utterance-end`: range 1000–5000 ms, `interim_results=true`
+  required, `last_word_end: -1` to be ignored — all as implemented.
+* Corrections: a reconnect failure that is *not* a 429 now withdraws a
+  previous "service at capacity" message (it used to persist over a network
+  error), and a new session starts without the previous session's
+  "microphone silent" verdict (re-raised after 3 s if still true). Both
+  covered in `tests/test_capture_watchdog.py`.
 
 ---
 

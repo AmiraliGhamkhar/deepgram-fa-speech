@@ -293,8 +293,9 @@ class DeepgramProvider(STTProvider):
 
         All clinicians share one Deepgram key, so without these the usage
         console cannot tell devices apart. `tag` filters usage reports (128
-        chars max; a client id is at most 64 safe characters) and `extra`
-        echoes the host's session id back in every response's metadata.
+        chars max, **500 unique tags per project per day** -- so it carries
+        the device id, never a per-session value) and `extra` echoes the
+        host's session id back in every response's metadata.
         """
         params: dict = {}
         if self._settings.host_client_id:

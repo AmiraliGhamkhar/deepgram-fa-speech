@@ -241,6 +241,56 @@ def test_a_rate_limit_that_never_clears_keeps_the_message_and_keeps_retrying(mon
     assert not runner.is_alive()
 
 
+class RateLimitThenNetworkProvider(KeepAliveProvider):
+    """One 429, then a network failure forever: the capacity message must
+    not outlive the capacity problem."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.attempts = 0
+
+    def start(self, on_transcript: OnTranscript, on_error: OnError) -> None:
+        self.attempts += 1
+        if self.attempts == 1:
+            raise ProviderError(ErrorCategory.RATE_LIMIT, "too many concurrent streams")
+        raise ProviderError(ErrorCategory.NETWORK, "connection reset")
+
+
+def test_a_later_failure_of_another_kind_withdraws_the_capacity_message(monkeypatch):
+    from medical_stt import app as app_module
+    from medical_stt.stt.reconnect import ReconnectDecision
+
+    monkeypatch.setattr(app_module, "decide", lambda *_a, **_k: ReconnectDecision(True, 0.01, "test"))
+    provider = RateLimitThenNetworkProvider()
+    stt = _build_session(provider, monkeypatch)
+    runner = _run_on_thread(stt.run)
+    try:
+        assert _wait_for(lambda: provider.attempts >= 3)
+        assert _wait_for(lambda: stt.warning != app_module.CAPACITY_WARNING), (
+            "a network error after a 429 must not keep saying 'service at capacity'"
+        )
+    finally:
+        stt.request_stop()
+        runner.join(timeout=10.0)
+    assert not runner.is_alive()
+
+
+def test_a_new_session_starts_without_the_previous_microphone_verdict(monkeypatch):
+    """The warning belongs to the session that observed the silence; the
+    next session re-raises it only if the microphone is still silent."""
+    from medical_stt import app as app_module
+
+    provider = KeepAliveProvider()
+    stt = _build_session(provider, monkeypatch)
+    stt._warn(app_module.MIC_SILENT_WARNING)
+    stt._reset_capture_watch()
+    assert stt.warning == ""
+    # A different warning is not clobbered by the reset.
+    stt._warn(app_module.CAPACITY_WARNING)
+    stt._reset_capture_watch()
+    assert stt.warning == app_module.CAPACITY_WARNING
+
+
 # -- backoff ceiling ------------------------------------------------------------------
 
 

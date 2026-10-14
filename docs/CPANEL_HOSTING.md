@@ -118,6 +118,7 @@ cPanel → Setup Python App → your app → **Environment variables** (or
 | Variable | Value | Required |
 |---|---|---|
 | `DEEPGRAM_API_KEY` | your Deepgram key (Member permission) | **yes** |
+| `DEEPGRAM_REGION` | `us` (default), `eu`, `au` or `in` — where the grant request goes; tokens work in every region | no |
 | `HOST_CLIENTS_FILE` | `/home/USER/secure/clients.txt` | multi-clinician |
 | `HOST_SHARED_SECRET` | 24+ random chars, *legacy mode only* | if no registry |
 | `HOST_ALLOW_HTTP` | `1` | **only if step 7's check says Apache reports `http`** — see below |

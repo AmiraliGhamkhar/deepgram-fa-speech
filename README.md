@@ -635,6 +635,8 @@ the same way, for the same reason.
   `extra=session_id:<host session id>`, so Deepgram's usage console can be
   filtered per device and a Deepgram request can be joined to the host's
   log line; Deepgram's `dg-request-id` is logged next to the session id.
+  The session id is deliberately *not* a tag: Deepgram allows 500 unique
+  tags per project per day, which per-session values would exhaust.
 - SDK pinned to `deepgram-sdk==7.9.0`, and `access_token=` is used (not
   `api_key=`) so the SDK sends `Authorization: Bearer <short-lived token>`
   for the WebSocket handshake. A **fresh token is requested for every
@@ -649,7 +651,10 @@ the same way, for the same reason.
 - A microphone that stops delivering frames for 3 s is reported as such
   (not as a network problem) and the stream is held open with Deepgram
   `KeepAlive` messages until frames resume; without them Deepgram closes an
-  audio-less stream after ~10 s.
+  audio-less stream after ~10 s. `KeepAlive` cannot substitute for the first
+  audio frame: a microphone that is dead from the start still gets the
+  server's `1011 NET-0001` close, but the clinician sees the microphone
+  message and the log names the close reason while the client reconnects.
 
 ### Language scope: Persian ASR + English *terminology*, not code-switching
 

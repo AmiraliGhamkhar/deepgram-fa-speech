@@ -454,6 +454,8 @@ class LiveMedicalSTT:
         self._last_capture_at = time.monotonic()
         self._last_keep_alive_at = 0.0
         self._mic_silent = False
+        # A verdict from the previous session; re-raised if still true.
+        self._clear_warning(MIC_SILENT_WARNING)
 
     def _watch_capture(self, provider: STTProvider) -> None:
         """Detect a microphone that has stopped delivering frames.
@@ -738,6 +740,8 @@ class LiveMedicalSTT:
                         # limiter) refused this device: say so instead of
                         # showing a generic "reconnecting" indefinitely.
                         self._warn(CAPACITY_WARNING)
+                    else:
+                        self._clear_warning(CAPACITY_WARNING)
                     # `exc.retry_after` is honored when the host sent one, so
                     # a rate-limited client slows down when told to instead of
                     # guessing -- which is what would otherwise turn 50
