@@ -6,7 +6,17 @@ sample_rate: 16000
 channels: 1
 block_duration: 0.08
 endpointing: 400
-utterance_end_ms: 1200
+utterance_end_ms: 1200   # Deepgram accepts 1000-5000
+
+# Deepgram region the audio is streamed to: us (default), eu, au or in.
+# Session tokens from the host are valid on every region; choose the closest
+# one, or the one your data-residency rules require. Concurrency limits are
+# per Deepgram project and do not change with the region.
+deepgram_region: us
+# Opt the audio out of Deepgram's Model Improvement Program. false is
+# Deepgram's default; true is billed at a higher per-minute rate. Decide this
+# explicitly for clinical audio and record the decision.
+mip_opt_out: false
 
 # --- Host (the only place the Deepgram API key exists) -------------------
 # The desktop app has NO Deepgram API key. It authenticates to your

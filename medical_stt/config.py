@@ -75,6 +75,26 @@ _VALIDATED_CONFIGURATION = "model: nova-3 with language: fa"
 #: https://developers.deepgram.com/guides/fundamentals/token-based-authentication
 _MAX_SESSION_TTL_SECONDS = 3600
 
+#: Deepgram regional endpoints. Keys and session tokens are valid on every
+#: region; a region never falls back to another one. See
+#: https://developers.deepgram.com/reference/regional-endpoints
+DEEPGRAM_REGION_HOSTS: Dict[str, str] = {
+    "us": "api.deepgram.com",
+    "eu": "api.eu.deepgram.com",
+    "au": "api.au.deepgram.com",
+    "in": "api.in.deepgram.com",
+}
+
+
+def deepgram_api_host(region: str) -> str:
+    """Hostname of the Deepgram API for a configured region."""
+    try:
+        return DEEPGRAM_REGION_HOSTS[region]
+    except KeyError:
+        raise ConfigError(
+            f"deepgram_region must be one of {sorted(DEEPGRAM_REGION_HOSTS)}, got {region!r}"
+        ) from None
+
 #: Plaintext hosts for which http:// is tolerated (development only).
 _LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
@@ -179,6 +199,13 @@ class Settings:
     specialty: str = "general"
     medical_confidence_threshold: float = 0.65
     use_asr_replacements: bool = True
+    #: Deepgram region the audio is streamed to (`us`, `eu`, `au`, `in`).
+    #: Session tokens work on every region; pick the closest one or the one
+    #: your data-residency rules require.
+    deepgram_region: str = "us"
+    #: Opt the audio out of Deepgram's Model Improvement Program. Off by
+    #: default (Deepgram's default); opting out is billed at a higher rate.
+    mip_opt_out: bool = False
     #: Base URL of the self-hosted service that mints short-lived
     #: Deepgram sessions. Must be https:// (http:// only for localhost).
     host_url: str = ""
@@ -223,6 +250,8 @@ class Settings:
             "specialty": self.specialty,
             "medical_confidence_threshold": self.medical_confidence_threshold,
             "use_asr_replacements": self.use_asr_replacements,
+            "deepgram_region": self.deepgram_region,
+            "mip_opt_out": self.mip_opt_out,
             "host_url": self.host_url,
             "host_client_id": self.host_client_id,
             "host_timeout_seconds": self.host_timeout_seconds,
@@ -450,8 +479,14 @@ def validate_settings(settings: Settings) -> List[str]:
         errors.append(f"block_duration must be between 0.01 and 1.0 seconds, got {settings.block_duration}")
     if not (10 <= settings.endpointing <= 10000):
         errors.append(f"endpointing must be between 10 and 10000 ms, got {settings.endpointing}")
-    if not (0 <= settings.utterance_end_ms <= 20000):
-        errors.append(f"utterance_end_ms must be between 0 and 20000 ms, got {settings.utterance_end_ms}")
+    # Deepgram's documented range; values outside it are rejected at the
+    # handshake, which would otherwise surface as an opaque CONFIG error.
+    if not (1000 <= settings.utterance_end_ms <= 5000):
+        errors.append(f"utterance_end_ms must be between 1000 and 5000 ms, got {settings.utterance_end_ms}")
+    if settings.deepgram_region not in DEEPGRAM_REGION_HOSTS:
+        errors.append(
+            f"deepgram_region must be one of {sorted(DEEPGRAM_REGION_HOSTS)}, got {settings.deepgram_region!r}"
+        )
     if settings.inject_mode not in _VALID_INJECT_MODES:
         errors.append(f"inject_mode must be one of {sorted(_VALID_INJECT_MODES)}, got {settings.inject_mode!r}")
     if settings.reconnect_delay < 0:
@@ -531,6 +566,8 @@ def get_settings() -> Settings:
         specialty=str(cfg.get("specialty", "general")),
         medical_confidence_threshold=float(cfg.get("medical_confidence_threshold", 0.65)),
         use_asr_replacements=bool(cfg.get("use_asr_replacements", True)),
+        deepgram_region=str(cfg.get("deepgram_region", "us") or "us").strip().lower(),
+        mip_opt_out=bool(cfg.get("mip_opt_out", False)),
         host_url=os.getenv("MEDICALSTT_HOST_URL", str(cfg.get("host_url", "") or "")),
         host_secret=load_host_secret(),
         host_client_id=os.getenv(
@@ -542,6 +579,12 @@ def get_settings() -> Settings:
 
 
 MAX_KEYTERMS = 100
+
+#: Deepgram's keyterm limit is 500 *tokens* per request, not a term count,
+#: and the tokenizer is not public. Budgeting one token per two characters
+#: is conservative for Persian and keeps the request well under the limit
+#: (a connection over it is refused at the handshake).
+MAX_KEYTERM_CHARS = 1000
 
 
 def _terms_from_file(path: Path) -> List[str]:
@@ -555,8 +598,15 @@ def _terms_from_file(path: Path) -> List[str]:
     return [str(term).strip() for term in terms if term is not None and str(term).strip()]
 
 
-def load_keyterms(specialty: str = "general", max_count: int = MAX_KEYTERMS) -> List[str]:
-    """Load general plus selected specialty terms, preserving priority order."""
+def load_keyterms(
+    specialty: str = "general", max_count: int = MAX_KEYTERMS, max_chars: int = MAX_KEYTERM_CHARS
+) -> List[str]:
+    """Load general plus selected specialty terms, preserving priority order.
+
+    Both the term count and the total character budget are enforced in
+    priority order: general terms first, then the specialty's, and loading
+    stops at whichever limit is reached first.
+    """
     if not _valid_specialty_name(specialty):
         raise ConfigError("invalid keyterm specialty name")
     if max_count < 0:
@@ -577,13 +627,23 @@ def load_keyterms(specialty: str = "general", max_count: int = MAX_KEYTERMS) -> 
 
     result: List[str] = []
     seen = set()
+    total_chars = 0
     for path in paths_to_load:
         for term in _terms_from_file(path):
-            if term not in seen:
-                seen.add(term)
-                result.append(term)
-                if len(result) == max_count:
-                    return result
+            if term in seen:
+                continue
+            if total_chars + len(term) > max_chars:
+                log.warning(
+                    "keyterms truncated at %d terms: the %d-character budget "
+                    "(Deepgram's 500-token limit) is exhausted by %s",
+                    len(result), max_chars, path.name,
+                )
+                return result
+            seen.add(term)
+            result.append(term)
+            total_chars += len(term)
+            if len(result) == max_count:
+                return result
     return result
 
 

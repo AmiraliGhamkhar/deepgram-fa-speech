@@ -139,6 +139,15 @@ class STTProvider(ABC):
     def send_audio(self, chunk: bytes) -> None:
         """Send one chunk of raw PCM audio to the provider."""
 
+    def keep_alive(self) -> None:
+        """Tell the provider the session is alive while no audio is flowing.
+
+        Called by the session loop when the microphone has delivered nothing
+        for a few seconds, so a provider with an idle timeout does not close
+        the stream. Providers without such a timeout need not override it.
+        """
+        return None
+
     @abstractmethod
     def stop(self) -> None:
         """Request a graceful shutdown of the streaming session."""

@@ -93,6 +93,55 @@ def test_non_numeric_rate_limit_falls_back_to_default():
     assert settings.rate_limit_requests == 30
 
 
+def test_deepgram_region_selects_the_grant_endpoint():
+    """Regional hosts take the same key and mint tokens valid everywhere;
+    the default stays the global endpoint and is always https."""
+    default = core.HostSettings.from_env({"DEEPGRAM_API_KEY": API_KEY, "HOST_SHARED_SECRET": SHARED_SECRET})
+    assert default.deepgram_region == "us"
+    assert default.grant_url == core.DEEPGRAM_GRANT_URL == "https://api.deepgram.com/v1/auth/grant"
+
+    eu = core.HostSettings.from_env(
+        {"DEEPGRAM_API_KEY": API_KEY, "HOST_SHARED_SECRET": SHARED_SECRET, "DEEPGRAM_REGION": " EU "}
+    )
+    assert eu.grant_url == "https://api.eu.deepgram.com/v1/auth/grant"
+
+    with pytest.raises(core.ConfigurationError):
+        core.HostSettings.from_env(
+            {"DEEPGRAM_API_KEY": API_KEY, "HOST_SHARED_SECRET": SHARED_SECRET, "DEEPGRAM_REGION": "mars"}
+        )
+
+
+def test_the_grant_pool_posts_to_the_configured_region():
+    import asyncio
+
+    seen = {}
+
+    class FakeHttpClient:
+        async def post(self, url, headers=None, json=None):
+            seen["url"] = url
+
+            class Response:
+                status_code = 200
+                headers = {}
+
+                def json(self):
+                    return {"access_token": "t", "expires_in": 30}
+
+            return Response()
+
+    client = core.AsyncGrantClient(client=FakeHttpClient(), grant_url="https://api.au.deepgram.com/v1/auth/grant")
+    settings = _settings(deepgram_region="au")
+    assert asyncio.run(core.grant_session_async(settings, 30, client)) == ("t", 30)
+    assert seen["url"] == "https://api.au.deepgram.com/v1/auth/grant"
+
+
+def test_per_client_defaults_are_small_enough_to_protect_the_shared_pool():
+    settings = core.HostSettings.from_env({"DEEPGRAM_API_KEY": API_KEY, "HOST_SHARED_SECRET": SHARED_SECRET})
+    assert settings.client_burst == 10
+    assert settings.client_rate_limit_requests == 6
+    assert settings.global_burst == 1200
+
+
 # -- authentication ------------------------------------------------------
 
 

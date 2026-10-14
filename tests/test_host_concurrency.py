@@ -75,10 +75,10 @@ def _settings(tmp_path: Path, registry_file: Path, **overrides: str) -> "core.Ho
         "HOST_SHARED_SECRET": "s" * 40,
         "HOST_CLIENTS_FILE": str(registry_file),
         "HOST_ALLOW_HTTP": "1",
-        # Sized for the 50-client target: a 50-clinician morning surge must
-        # never be throttled, while a looping client still is.
-        "HOST_CLIENT_BURST": str(CLIENT_COUNT * 2),
-        "HOST_CLIENT_RATE_LIMIT_REQUESTS": "60",
+        # Per-client limits are left at the shipped defaults on purpose: a
+        # 50-clinician morning surge is 50 devices spending one token each,
+        # which must pass with the small per-device burst that stops one
+        # looping device from draining the shared Deepgram stream pool.
         "HOST_GLOBAL_BURST": str(CLIENT_COUNT * 4),
         "HOST_GLOBAL_RATE_LIMIT_REQUESTS": "600",
     }
@@ -337,6 +337,42 @@ def test_one_abusive_client_is_throttled_without_affecting_the_others(
     assert other_statuses.count(200) == len(legitimate), (
         f"throttling one client blocked legitimate clients: {other_statuses}"
     )
+
+
+def test_default_per_device_burst_cannot_drain_the_shared_stream_pool(monkeypatch, tmp_path):
+    """Every token is a potential Deepgram stream from the pool the whole
+    clinic shares (per *project*, 150 on pay-as-you-go). With the shipped
+    defaults one looping device gets its small burst and no more; the next
+    device still gets its token."""
+    registry_file = tmp_path / "clients.txt"
+    registry, secrets_map = _make_registry(tmp_path)
+    settings = _settings(tmp_path, registry_file)
+    assert settings.client_burst == 10
+    assert settings.client_rate_limit_requests == 6
+    app = _build_app(monkeypatch, settings)
+    (looping_id, looping_secret), (other_id, other_secret) = list(secrets_map.items())[:2]
+
+    async def run() -> Tuple[List[int], int]:
+        transport = httpx.ASGITransport(app=app, client=(HOSPITAL_NAT_IP, 51000))
+        async with httpx.AsyncClient(transport=transport, base_url="https://stt.example.com") as http:
+
+            async def one(client_id: str, secret: str) -> int:
+                response = await http.post(
+                    "/v1/session",
+                    headers={"Authorization": f"Bearer {secret}", "X-Client-Id": client_id},
+                    json={},
+                )
+                return response.status_code
+
+            loop = [await one(looping_id, looping_secret) for _ in range(30)]
+            return loop, await one(other_id, other_secret)
+
+    loop_statuses, other_status = asyncio.run(run())
+    assert loop_statuses.count(200) <= settings.client_burst + 1, (
+        f"one device opened {loop_statuses.count(200)} streams from the shared pool"
+    )
+    assert loop_statuses[-1] == 429
+    assert other_status == 200
 
 
 def test_failed_authentication_is_limited_per_ip(monkeypatch, tmp_path):

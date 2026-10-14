@@ -29,7 +29,7 @@ import time
 import threading
 from typing import Any, Callable, List, Optional
 
-from ..config import Settings, keyterm_parameter, validate_model_language
+from ..config import Settings, deepgram_api_host, keyterm_parameter, validate_model_language
 from .base import (
     ConnectionClosed,
     ErrorCategory,
@@ -65,6 +65,26 @@ def is_connection_closure(exc: BaseException) -> bool:
     return isinstance(exc, ws_exc.ConnectionClosed)
 
 
+def _close_code_and_reason(exc: BaseException) -> tuple[Optional[int], str]:
+    """The close frame Deepgram sent, if any: `(code, reason)`.
+
+    The reason carries Deepgram's own error code (`NET-0001`, `DATA-0000`,
+    ...); it is the one line support needs and contains no credential.
+    """
+    close = getattr(exc, "rcvd", None)
+    code = getattr(close, "code", None)
+    reason = str(getattr(close, "reason", "") or "").strip()
+    return (code if isinstance(code, int) else None), reason
+
+
+def close_details(exc: BaseException) -> str:
+    """Human-readable close code and reason, e.g. `1011 NET-0001`."""
+    code, reason = _close_code_and_reason(exc)
+    if code is None:
+        return "no close frame"
+    return f"{code} {reason}".strip()
+
+
 def classify_deepgram_exception(exc: BaseException) -> ErrorCategory:
     """Map a raw exception raised anywhere in the Deepgram SDK / websocket
     stack to a generic ErrorCategory. Import errors from optional
@@ -87,11 +107,15 @@ def classify_deepgram_exception(exc: BaseException) -> ErrorCategory:
     try:
         import websockets.exceptions as ws_exc
 
-        if isinstance(exc, ws_exc.ConnectionClosedOK):
-            return ErrorCategory.SERVER_DISCONNECT
-        if isinstance(exc, ws_exc.ConnectionClosedError):
-            return ErrorCategory.SERVER_DISCONNECT
         if isinstance(exc, ws_exc.ConnectionClosed):
+            # Deepgram closes with 1008 and a `DATA-xxxx` reason when the
+            # audio cannot be decoded (encoding/sample-rate mismatch). That
+            # is a configuration fault: reconnecting with the same settings
+            # would loop forever. Every other closure (1011 NET-xxxx, 1000)
+            # is a disconnect worth retrying.
+            code, reason = _close_code_and_reason(exc)
+            if code == 1008 or reason.startswith("DATA-"):
+                return ErrorCategory.CONFIG
             return ErrorCategory.SERVER_DISCONNECT
         if isinstance(exc, ws_exc.InvalidStatus):
             code = getattr(getattr(exc, "response", None), "status_code", None)
@@ -190,6 +214,8 @@ class DeepgramProvider(STTProvider):
         self._keyterms = keyterms or []
         self._asr_replacements = asr_replacements or []
         self._token_provider = token_provider
+        #: Host-side correlation id of the current session (not a credential).
+        self._host_session_id = ""
         self._stop_event = threading.Event()
         self._ready = threading.Event()
         self._connection: Any = None
@@ -254,12 +280,39 @@ class DeepgramProvider(STTProvider):
         session = client.fetch_session(ttl_seconds=s.session_ttl_seconds)
         # Correlation only: safe to log, and the only host-side handle that
         # ties this WebSocket to a host log line. The token below is not.
+        self._host_session_id = session.session_id
         log.info(
             "deepgram_session_granted session_id=%s expires_in=%ds",
             session.session_id or "n/a", session.expires_in,
         )
         # Intentionally not logged and not stored beyond this return value.
         return session.access_token
+
+    def _attribution_parameters(self) -> dict:
+        """`tag`/`extra` so a Deepgram request can be tied back to a device.
+
+        All clinicians share one Deepgram key, so without these the usage
+        console cannot tell devices apart. `tag` filters usage reports (128
+        chars max, **500 unique tags per project per day** -- so it carries
+        the device id, never a per-session value) and `extra` echoes the
+        host's session id back in every response's metadata.
+        """
+        params: dict = {}
+        if self._settings.host_client_id:
+            params["tag"] = [self._settings.host_client_id]
+        if self._host_session_id:
+            params["extra"] = [f"session_id:{self._host_session_id}"]
+        return params
+
+    @staticmethod
+    def _request_id(connection: Any) -> str:
+        """Deepgram's `dg-request-id` from the handshake response, if visible."""
+        response = getattr(getattr(connection, "_websocket", None), "response", None)
+        headers = getattr(response, "headers", None)
+        try:
+            return str(headers.get("dg-request-id", "") or "") if headers is not None else ""
+        except Exception:  # noqa: BLE001 - transport detail, never fatal
+            return ""
 
     def validate_config(self) -> None:
         """Refuse to open a WebSocket for a configuration Deepgram would
@@ -276,6 +329,10 @@ class DeepgramProvider(STTProvider):
             raise ProviderError(ErrorCategory.CONFIG, "sample_rate must be positive")
         if s.channels not in (1, 2):
             raise ProviderError(ErrorCategory.CONFIG, "channels must be 1 or 2")
+        try:
+            deepgram_api_host(s.deepgram_region)
+        except ValueError as exc:  # ConfigError
+            raise ProviderError(ErrorCategory.CONFIG, str(exc)) from exc
 
     def _recognition_hint_parameters(self) -> dict:
         """Return the keyterm/keywords parameters legal for this model.
@@ -300,7 +357,7 @@ class DeepgramProvider(STTProvider):
         # Imported lazily so environments that only run the deterministic
         # processing tests (no network deps needed) don't require the
         # Deepgram SDK to be installed.
-        from deepgram import DeepgramClient
+        from deepgram import DeepgramClient, DeepgramClientEnvironment
         from deepgram.core.events import EventType
         from deepgram.listen.v1.types import ListenV1Results, ListenV1UtteranceEnd, ListenV1SpeechStarted
 
@@ -319,11 +376,21 @@ class DeepgramProvider(STTProvider):
         if stop_event.is_set():
             raise ProviderError(ErrorCategory.SHUTDOWN, "Provider startup cancelled")
 
+        # Regional endpoint: same token, different base URL. Deepgram never
+        # falls back across regions, so this is a deliberate choice.
+        api_host = deepgram_api_host(s.deepgram_region)
+        environment = DeepgramClientEnvironment(
+            base=f"https://{api_host}",
+            production=f"wss://{api_host}",
+            agent="wss://agent.deepgram.com",
+            agent_rest="https://agent.deepgram.com",
+        )
+
         try:
             # `access_token` makes the SDK send `Authorization: Bearer ...`
             # instead of a long-lived API key, for both the websocket
             # handshake and any HTTP request.
-            client = DeepgramClient(access_token=session_token)
+            client = DeepgramClient(access_token=session_token, environment=environment)
             with client.listen.v1.connect(
                 model=s.model,
                 language=s.language,
@@ -337,6 +404,8 @@ class DeepgramProvider(STTProvider):
                 smart_format=True,
                 punctuate=True,
                 replace=self._asr_replacements or None,
+                mip_opt_out=True if s.mip_opt_out else None,
+                **self._attribution_parameters(),
                 **self._recognition_hint_parameters(),
             ) as connection:
                 with self._connection_lock:
@@ -345,7 +414,13 @@ class DeepgramProvider(STTProvider):
                         raise ProviderError(ErrorCategory.SHUTDOWN, "Provider startup cancelled")
                     self._connection = connection
                     ready.set()
-                log.info("latency: websocket_ready=%.3fs", time.monotonic() - started)
+                # `dg-request-id` is what Deepgram support asks for; logged
+                # next to the host session id so the two can be joined.
+                log.info(
+                    "latency: websocket_ready=%.3fs region=%s session_id=%s dg_request_id=%s",
+                    time.monotonic() - started, s.deepgram_region,
+                    self._host_session_id or "n/a", self._request_id(connection) or "n/a",
+                )
 
                 #: Warned at most once per connection: a provider format
                 #: change must be visible in the logs without flooding them.
@@ -367,6 +442,10 @@ class DeepgramProvider(STTProvider):
                         on_transcript(TranscriptEvent("", False, speech_started=True))
                         return
                     if isinstance(message, ListenV1UtteranceEnd):
+                        # `last_word_end: -1` means the preceding words were
+                        # already finalized; Deepgram documents it as ignorable.
+                        if getattr(message, "last_word_end", 0) == -1:
+                            return
                         # UtteranceEnd can close segments when no result carried speech_final.
                         on_transcript(TranscriptEvent(text="", is_final=True, speech_final=True))
                         return
@@ -381,7 +460,16 @@ class DeepgramProvider(STTProvider):
                     cause = exc if isinstance(exc, BaseException) else Exception(str(exc))
                     category = classify_deepgram_exception(cause)
                     if is_connection_closure(cause):
-                        on_error(ConnectionClosed(category, "Deepgram connection closed", cause=cause))
+                        # The close reason is Deepgram's own error code
+                        # (NET-0001, DATA-0000, ...): the one line that
+                        # makes a reconnect loop diagnosable from the log.
+                        details = close_details(cause)
+                        log.warning("deepgram_connection_closed %s (%s)", details, category.value)
+                        on_error(
+                            ConnectionClosed(
+                                category, f"Deepgram connection closed ({details})", cause=cause
+                            )
+                        )
                     else:
                         on_error(ProviderError(category, f"Deepgram error ({category.value})", cause=cause))
 
@@ -427,6 +515,18 @@ class DeepgramProvider(STTProvider):
         return self._connections_opened
 
     def send_audio(self, chunk: bytes) -> None:
+        # Deepgram treats an empty binary frame as a close request; a
+        # zero-length capture buffer must never be forwarded as one.
+        if not chunk:
+            return
+        self._send(lambda connection: connection.send_media(chunk), "failed to send audio")
+
+    def keep_alive(self) -> None:
+        # Deepgram closes a stream that has carried no audio for a while
+        # (`1011 NET-0002`); a KeepAlive text frame resets that timer.
+        self._send(lambda connection: connection.send_keep_alive(), "failed to send keep-alive")
+
+    def _send(self, operation: Callable[[Any], None], failure: str) -> None:
         # The connection snapshot is taken under the lock, but the network
         # send happens outside it: holding the lock across a send would
         # block `stop()` for the whole round trip. The generation counter
@@ -440,7 +540,7 @@ class DeepgramProvider(STTProvider):
         if connection is None:
             raise ProviderError(ErrorCategory.NETWORK, "Audio transport is not ready")
         try:
-            connection.send_media(chunk)
+            operation(connection)
         except BaseException as exc:  # noqa: BLE001 - reclassified for caller
             # A failure on a connection that is being (or was) stopped is a
             # normal shutdown, never a session error and never a reconnect
@@ -452,7 +552,7 @@ class DeepgramProvider(STTProvider):
             if raced_stop:
                 raise ProviderError(ErrorCategory.SHUTDOWN, "Audio send cancelled during stop") from exc
             category = classify_deepgram_exception(exc)
-            raise ProviderError(category, "failed to send audio", cause=exc) from exc
+            raise ProviderError(category, failure, cause=exc) from exc
 
     def stop(self) -> None:
         self._stop_event.set()

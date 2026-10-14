@@ -204,8 +204,8 @@ python -m host.provision --count 50 --prefix doctor \
 export HOST_CLIENTS_FILE=/secure/host/clients.txt
 
 # Defaults already suit 50; shown for explicitness:
-export HOST_CLIENT_BURST=120          # > 50 so a startup surge never 429s
-export HOST_GLOBAL_BURST=1200
+export HOST_CLIENT_BURST=10           # per device: bounds its share of the Deepgram pool
+export HOST_GLOBAL_BURST=1200         # > 50 so a startup surge never 429s
 export HOST_METRICS_ADMIN_TOKEN='...' # protects /metrics
 
 python -m host.app
@@ -275,6 +275,16 @@ real provider.
 > property of your plan. Run the opt-in real-provider test, which reports
 > `APPLICATION CAPACITY` and `PROVIDER CAPACITY` separately rather than
 > hiding the difference.
+
+Provider capacity is decided by Deepgram **per project**, not per key, and
+the host cannot observe it. Published defaults for Nova-3 streaming are 150
+concurrent streams on pay-as-you-go (every region) and 225 (US) / 150 (EU,
+AU, IN) on Growth; **secondary projects on a self-serve account are capped at
+1 stream**, so deploy on the account's primary project. 50 clinicians plus
+their reconnects fit under 150 with room to spare; a 429 at the WebSocket
+handshake is shown to the clinician as "ظرفیت سرویس گفتار پر است" and
+retried with backoff. Details and sources:
+[host/README.md › Deepgram's concurrency limits](host/README.md#deepgrams-concurrency-limits).
 
 ---
 
@@ -438,9 +448,17 @@ Runtime environment overrides (development only): `MEDICALSTT_HOST_URL`,
 `DEEPGRAM_LANGUAGE`.
 
 All settings are validated at startup; invalid sample rate, channel count,
-block duration, endpointing, inject mode, reconnect settings, model,
-language, host URL (must be `https://`) or TTL fail fast with a clear
-error.
+block duration, endpointing, `utterance_end_ms` (Deepgram's 1000–5000 ms
+range), `deepgram_region` (`us`, `eu`, `au`, `in`), inject mode, reconnect
+settings, model, language, host URL (must be `https://`) or TTL fail fast
+with a clear error.
+
+`deepgram_region` selects the Deepgram endpoint the **audio** is streamed to;
+session tokens from the host are valid in every region, and Deepgram never
+falls back from one region to another. `mip_opt_out` opts the audio out of
+Deepgram's Model Improvement Program (off by default, Deepgram's default;
+opting out is billed at a higher rate) — decide it explicitly for clinical
+audio.
 
 ### Session lifecycle
 
@@ -610,7 +628,15 @@ the same way, for the same reason.
   procedures and diagnoses produce an in-memory warning; recognized text
   is preserved, never guessed.
 - `specialty` selects `general + specialty` terms from `data/keyterms/`,
-  deduplicated, capped at 100 terms.
+  deduplicated, capped at 100 terms and 1000 characters in priority order
+  (Deepgram's limit is 500 *tokens* per request; a connection over it is
+  refused at the handshake).
+- Every connection carries `tag=<host_client_id>` and
+  `extra=session_id:<host session id>`, so Deepgram's usage console can be
+  filtered per device and a Deepgram request can be joined to the host's
+  log line; Deepgram's `dg-request-id` is logged next to the session id.
+  The session id is deliberately *not* a tag: Deepgram allows 500 unique
+  tags per project per day, which per-session values would exhaust.
 - SDK pinned to `deepgram-sdk==7.9.0`, and `access_token=` is used (not
   `api_key=`) so the SDK sends `Authorization: Bearer <short-lived token>`
   for the WebSocket handshake. A **fresh token is requested for every
@@ -618,7 +644,17 @@ the same way, for the same reason.
 - Errors are classified into `ErrorCategory` (`stt/base.py`): `AUTH`,
   `CONFIG`, `RATE_LIMIT`, `NETWORK`, `TIMEOUT`, `SERVER_DISCONNECT`,
   `MICROPHONE`, `SHUTDOWN`, `UNKNOWN`. **`AUTH` and `CONFIG` are never
-  retried.**
+  retried.** Deepgram's close frame is read, not discarded: `1008 DATA-xxxx`
+  (audio Deepgram cannot decode — an encoding/sample-rate fault) is `CONFIG`
+  and stops the session instead of reconnecting forever, while `1011
+  NET-xxxx` closures are retried with the code and reason in the log.
+- A microphone that stops delivering frames for 3 s is reported as such
+  (not as a network problem) and the stream is held open with Deepgram
+  `KeepAlive` messages until frames resume; without them Deepgram closes an
+  audio-less stream after ~10 s. `KeepAlive` cannot substitute for the first
+  audio frame: a microphone that is dead from the start still gets the
+  server's `1011 NET-0001` close, but the clinician sees the microphone
+  message and the log names the close reason while the client reconnects.
 
 ### Language scope: Persian ASR + English *terminology*, not code-switching
 
