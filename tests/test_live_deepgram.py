@@ -24,8 +24,6 @@ from __future__ import annotations
 
 import logging
 import os
-import threading
-import time
 
 import pytest
 
@@ -61,14 +59,15 @@ def _silence(seconds: float, sample_rate: int = 16000) -> bytes:
 def _settings(host_url: str, host_secret: str):
     from medical_stt.config import Settings
 
-    return Settings(host_url=host_url, host_secret=host_secret)
+    return Settings(host_url=host_url, host_secret=host_secret, host_client_id=os.getenv("MEDICALSTT_HOST_CLIENT_ID", ""))
 
 
 def test_live_host_mints_a_session_token():
     host_url, host_secret = _require_live()
     from medical_stt.host_client import HostSessionClient
 
-    client = HostSessionClient(base_url=host_url, secret=host_secret, timeout=15.0)
+    client = HostSessionClient(base_url=host_url, secret=host_secret, timeout=15.0,
+                               client_id=os.getenv("MEDICALSTT_HOST_CLIENT_ID", ""))
     session = client.fetch_session(ttl_seconds=30)
     assert session.access_token, "the host returned an empty session token"
     assert os.environ.get(HOST_SECRET_ENV, "") not in session.access_token
@@ -90,7 +89,7 @@ def test_live_provider_streams_and_shuts_down_cleanly(caplog):
 
     transcript_events = []
     errors = []
-    stopped = threading.Event()
+    from medical_stt.stt.runner import stream_audio
 
     def on_transcript(event) -> None:
         transcript_events.append(event)
@@ -99,14 +98,10 @@ def test_live_provider_streams_and_shuts_down_cleanly(caplog):
         errors.append(error)
 
     with caplog.at_level(logging.DEBUG):
-        provider.start(on_transcript, on_error)
-        for start in range(0, len(_silence(0.4)), 3200):
-            provider.send_audio(_silence(0.4)[start:start + 3200])
-        time.sleep(1.5)  # let the service acknowledge; no transcript expected
-        provider.stop()
-        stopped.set()
+        audio = _silence(0.4)
+        stream_audio(provider, (audio[start:start + 3200] for start in range(0, len(audio), 3200)),
+                     on_transcript, on_error, bytes_per_second=32000)
 
-    assert stopped.is_set()
     # A silent stream may legitimately produce no transcript events; what
     # must not happen is an unexplained provider error.
     fatal = [e for e in errors if getattr(e, "category", None) is not None

@@ -29,6 +29,7 @@ measured baseline, and none is implied. Run it against your own audio.
 from __future__ import annotations
 
 import argparse
+from functools import lru_cache
 import json
 import os
 import sys
@@ -68,17 +69,21 @@ def load_hypotheses(path: Path) -> Dict[str, str]:
     return out
 
 
-def apply_processing(text: str) -> str:
-    """Run the local deterministic pipeline (normalize -> terminology -> injected)."""
+@lru_cache(maxsize=1)
+def _processing_engine():
     from medical_stt.config import load_correction_rules_raw
+    from medical_stt.processing.terminology import TerminologyEngine
+    engine = TerminologyEngine()
+    engine.load(load_correction_rules_raw())
+    return engine
+
+
+def apply_processing(text: str) -> str:
+    """Run the deterministic pipeline, reusing the immutable rule engine."""
     from medical_stt.injection.text_injector import normalize_injected_whitespace
     from medical_stt.processing.bidi import to_injected
     from medical_stt.processing.normalize import normalize
-    from medical_stt.processing.terminology import TerminologyEngine
-
-    engine = TerminologyEngine()
-    engine.load(load_correction_rules_raw())
-    return normalize_injected_whitespace(to_injected(engine.apply(normalize(text))))
+    return normalize_injected_whitespace(to_injected(_processing_engine().apply(normalize(text))))
 
 
 def print_report(score: CorpusScore, missing: Sequence[str]) -> None:
@@ -107,10 +112,14 @@ def print_report(score: CorpusScore, missing: Sequence[str]) -> None:
 # -- live mode -------------------------------------------------------------
 
 
-def _read_wav(path: Path) -> bytes:
+def _read_wav(path: Path, sample_rate: int | None = None, channels: int | None = None) -> bytes:
     with wave.open(str(path), "rb") as handle:
         if handle.getsampwidth() != 2:
             raise SystemExit(f"error: {path} is not 16-bit PCM")
+        if sample_rate is not None and handle.getframerate() != sample_rate:
+            raise SystemExit(f"error: {path} sample rate does not match stream settings")
+        if channels is not None and handle.getnchannels() != channels:
+            raise SystemExit(f"error: {path} channels do not match stream settings")
         return handle.readframes(handle.getnframes())
 
 
@@ -125,7 +134,8 @@ def run_live(cases: Sequence[Dict[str, object]], audio_dir: Path) -> Dict[str, s
         )
         raise SystemExit(3)
 
-    from medical_stt.config import get_settings, load_keyterms
+    from medical_stt.config import get_settings, load_keyterms, load_asr_replacements
+    from medical_stt.stt.runner import stream_audio
     from medical_stt.stt.base import ProviderError
     from medical_stt.stt.deepgram_provider import DeepgramProvider
 
@@ -134,7 +144,8 @@ def run_live(cases: Sequence[Dict[str, object]], audio_dir: Path) -> Dict[str, s
         print("error: host_url / host_secret are not configured", file=sys.stderr)
         raise SystemExit(3)
 
-    provider = DeepgramProvider(settings, keyterms=load_keyterms(settings.specialty))
+    provider = DeepgramProvider(settings, keyterms=load_keyterms(settings.specialty),
+                                asr_replacements=load_asr_replacements() if settings.use_asr_replacements else [])
     provider.validate_config()
 
     hypotheses: Dict[str, str] = {}
@@ -144,7 +155,7 @@ def run_live(cases: Sequence[Dict[str, object]], audio_dir: Path) -> Dict[str, s
         if not wav.is_file():
             print(f"skip {case_id}: {wav} not found")
             continue
-        audio = _read_wav(wav)
+        audio = _read_wav(wav, settings.sample_rate, settings.channels)
         finals: List[str] = []
         errors: List[ProviderError] = []
 
@@ -155,15 +166,12 @@ def run_live(cases: Sequence[Dict[str, object]], audio_dir: Path) -> Dict[str, s
         def on_error(error: ProviderError, collected: List[ProviderError] = errors) -> None:
             collected.append(error)
 
-        provider.start(on_transcript, on_error)
-        chunk_bytes = settings.sample_rate * 2 // 25  # ~40 ms
-        try:
-            for start in range(0, len(audio), chunk_bytes):
-                provider.send_audio(audio[start:start + chunk_bytes])
-        finally:
-            provider.stop()
+        chunk_bytes = settings.sample_rate * settings.channels * 2 // 25
+        stream_audio(provider, (audio[start:start + chunk_bytes] for start in range(0, len(audio), chunk_bytes)),
+                     on_transcript, on_error,
+                     bytes_per_second=settings.sample_rate * settings.channels * 2)
         if errors:
-            print(f"{case_id}: provider error {errors[0].category.value}: {errors[0]}")
+            raise errors[0]
         hypotheses[case_id] = " ".join(finals).strip()
     return hypotheses
 

@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import logging
 import socket
+import math
+import time
 import threading
 from typing import Any, Callable, List, Optional
 
@@ -114,7 +116,8 @@ def classify_deepgram_exception(exc: BaseException) -> ErrorCategory:
 
 def _optional_float(value: object) -> Optional[float]:
     try:
-        return float(value) if value is not None else None  # type: ignore[arg-type]
+        parsed = float(value) if value is not None else None  # type: ignore[arg-type]
+        return parsed if parsed is not None and math.isfinite(parsed) else None
     except (TypeError, ValueError):
         return None
 
@@ -188,6 +191,7 @@ class DeepgramProvider(STTProvider):
         self._asr_replacements = asr_replacements or []
         self._token_provider = token_provider
         self._stop_event = threading.Event()
+        self._ready = threading.Event()
         self._connection: Any = None
         self._connection_lock = threading.Lock()
         #: Bumped every time `stop()` claims the connection. A `send_audio`
@@ -199,6 +203,35 @@ class DeepgramProvider(STTProvider):
         #: never a module global: 50 clients share no provider state, so one
         #: session can never influence another.
         self._connections_opened = 0
+
+    def prepare(self) -> None:
+        with self._connection_lock:
+            self._stop_event.set()  # invalidate any abandoned startup
+            self._stop_event = threading.Event()
+            self._ready = threading.Event()
+            self._connection = None
+
+    def wait_ready(self, timeout: float) -> bool:
+        return self._ready.wait(timeout)
+
+    @staticmethod
+    def _abort_connection(connection: Any) -> None:
+        # SDK 7.9.0 exposes no public abort. Keep this version-specific escape
+        # hatch isolated: shutdown wakes blocked send/recv without a close handshake.
+        transport = getattr(connection, "_websocket", None)
+        sock = getattr(transport, "socket", None)
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+    def abort(self) -> None:
+        with self._connection_lock:
+            self._stop_event.set()
+            self._ready.clear()
+            connection = self._connection
+        self._abort_connection(connection)
 
     def _request_session_token(self) -> str:
         """Get a short-lived Deepgram session token from the host.
@@ -262,21 +295,29 @@ class DeepgramProvider(STTProvider):
         return {}
 
     def start(self, on_transcript: OnTranscript, on_error: OnError) -> None:
+        stop_event = self._stop_event
+        ready = self._ready
         # Imported lazily so environments that only run the deterministic
         # processing tests (no network deps needed) don't require the
         # Deepgram SDK to be installed.
         from deepgram import DeepgramClient
         from deepgram.core.events import EventType
-        from deepgram.listen.v1.types import ListenV1Results, ListenV1UtteranceEnd
+        from deepgram.listen.v1.types import ListenV1Results, ListenV1UtteranceEnd, ListenV1SpeechStarted
 
         s = self._settings
-        self._stop_event.clear()
+        connection = None
+        started = time.monotonic()
+        if stop_event.is_set():
+            raise ProviderError(ErrorCategory.SHUTDOWN, "Provider startup cancelled")
 
         # A fresh short-lived token per connection. It is only valid for the
         # handshake, which is exactly why it is requested here and not at
         # construction time (a reconnect would otherwise present a stale
         # token and fail with an auth error).
         session_token = self._request_session_token()
+        log.info("latency: token_acquisition=%.3fs", time.monotonic() - started)
+        if stop_event.is_set():
+            raise ProviderError(ErrorCategory.SHUTDOWN, "Provider startup cancelled")
 
         try:
             # `access_token` makes the SDK send `Authorization: Bearer ...`
@@ -299,7 +340,12 @@ class DeepgramProvider(STTProvider):
                 **self._recognition_hint_parameters(),
             ) as connection:
                 with self._connection_lock:
+                    if stop_event.is_set() or stop_event is not self._stop_event:
+                        self._abort_connection(connection)
+                        raise ProviderError(ErrorCategory.SHUTDOWN, "Provider startup cancelled")
                     self._connection = connection
+                    ready.set()
+                log.info("latency: websocket_ready=%.3fs", time.monotonic() - started)
 
                 #: Warned at most once per connection: a provider format
                 #: change must be visible in the logs without flooding them.
@@ -317,6 +363,9 @@ class DeepgramProvider(STTProvider):
                         )
 
                 def _on_message(message: object) -> None:
+                    if isinstance(message, ListenV1SpeechStarted):
+                        on_transcript(TranscriptEvent("", False, speech_started=True))
+                        return
                     if isinstance(message, ListenV1UtteranceEnd):
                         # UtteranceEnd can close segments when no result carried speech_final.
                         on_transcript(TranscriptEvent(text="", is_final=True, speech_final=True))
@@ -332,12 +381,12 @@ class DeepgramProvider(STTProvider):
                     cause = exc if isinstance(exc, BaseException) else Exception(str(exc))
                     category = classify_deepgram_exception(cause)
                     if is_connection_closure(cause):
-                        on_error(ConnectionClosed(category, str(exc), cause=cause))
+                        on_error(ConnectionClosed(category, "Deepgram connection closed", cause=cause))
                     else:
-                        on_error(ProviderError(category, str(exc), cause=cause))
+                        on_error(ProviderError(category, f"Deepgram error ({category.value})", cause=cause))
 
                 def _on_close(_: object) -> None:
-                    if not self._stop_event.is_set():
+                    if not stop_event.is_set():
                         on_error(
                             ConnectionClosed(
                                 ErrorCategory.SERVER_DISCONNECT, "Deepgram connection closed"
@@ -351,15 +400,19 @@ class DeepgramProvider(STTProvider):
                 self._connections_opened += 1
                 connection.start_listening()
         except BaseException as exc:  # noqa: BLE001 - single classification boundary
-            with self._connection_lock:
-                self._connection = None
-            if self._stop_event.is_set():
+            if isinstance(exc, ProviderError):
+                raise
+            if stop_event.is_set():
                 raise ProviderError(ErrorCategory.SHUTDOWN, "Provider stopped during startup", cause=exc) from exc
             category = classify_deepgram_exception(exc)
-            raise ProviderError(category, str(exc), cause=exc) from exc
+            # SDK exceptions may include Authorization headers. Never surface
+            # their raw representation in a log or the GUI.
+            raise ProviderError(category, f"Deepgram connection failed ({category.value})", cause=exc) from exc
         finally:
+            ready.clear()
             with self._connection_lock:
-                self._connection = None
+                if self._connection is connection:
+                    self._connection = None
             # Do not keep the session credential alive in this frame any
             # longer than the connection needed it.
             session_token = ""
@@ -385,7 +438,7 @@ class DeepgramProvider(STTProvider):
             connection = self._connection
             generation = self._stop_generation
         if connection is None:
-            return
+            raise ProviderError(ErrorCategory.NETWORK, "Audio transport is not ready")
         try:
             connection.send_media(chunk)
         except BaseException as exc:  # noqa: BLE001 - reclassified for caller
@@ -397,10 +450,9 @@ class DeepgramProvider(STTProvider):
             with self._connection_lock:
                 raced_stop = self._stop_generation != generation or self._stop_event.is_set()
             if raced_stop:
-                log.debug("audio send raced session stop; dropped instead of reporting an error")
-                return
+                raise ProviderError(ErrorCategory.SHUTDOWN, "Audio send cancelled during stop") from exc
             category = classify_deepgram_exception(exc)
-            raise ProviderError(category, f"failed to send audio: {exc}", cause=exc) from exc
+            raise ProviderError(category, "failed to send audio", cause=exc) from exc
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -409,13 +461,17 @@ class DeepgramProvider(STTProvider):
             self._stop_generation += 1
         if connection is None:
             return
-        try:
-            connection.send_finalize()
-            connection.send_close_stream()
-        except Exception as exc:  # noqa: BLE001 - the connection is discarded either way
-            # Any failure here (socket already closed by the peer, a
-            # websockets library exception on the close path, ...) must not
-            # escape into shutdown bookkeeping: `stop()` runs in `finally`
-            # scopes where an exception would skip the remaining cleanup
-            # steps and mislabel the session as failed.
-            log.debug("error while closing Deepgram connection: %s", exc)
+        finished = threading.Event()
+
+        def finalize() -> None:
+            try:
+                connection.send_finalize()
+                connection.send_close_stream()
+            except Exception:
+                log.debug("error while closing Deepgram connection")
+            finally:
+                finished.set()
+
+        threading.Thread(target=finalize, daemon=True, name="provider-close").start()
+        if not finished.wait(1.0):
+            self._abort_connection(connection)

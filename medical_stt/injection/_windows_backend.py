@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ctypes
 import logging
+import os
 import platform
 import time
 from ctypes import wintypes
@@ -137,6 +138,8 @@ user32.MapVirtualKeyW.restype = wintypes.UINT
 
 user32.GetForegroundWindow.argtypes = []
 user32.GetForegroundWindow.restype = wintypes.HWND
+user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+user32.GetWindowThreadProcessId.restype = wintypes.DWORD
 
 _INTERFERING_MODIFIERS = (VK_SHIFT, VK_MENU, VK_LWIN, VK_RWIN)
 
@@ -156,9 +159,30 @@ def _unicode_input(code_unit: int, key_up: bool) -> INPUT:
     return inp
 
 
+# Sequence numbers let restoration avoid overwriting a newer user copy.
+user32.CountClipboardFormats.argtypes = []
+user32.CountClipboardFormats.restype = ctypes.c_int
+user32.EnumClipboardFormats.argtypes = [wintypes.UINT]
+user32.EnumClipboardFormats.restype = wintypes.UINT
+
+
 class WindowsBackend(InjectionBackend):
-    def __init__(self) -> None:
-        pass
+    def __init__(self, *, allow_own_process: bool = False, expected_target: Optional[int] = None) -> None:
+        # Diagnostics may explicitly target their own synthetic-text window.
+        # Production must not dictate into its settings/secret/recovery fields.
+        self._allow_own_process = allow_own_process
+        self._expected_target = expected_target
+
+    def _target_allowed(self, target: int) -> bool:
+        if self._expected_target is not None and target != self._expected_target:
+            return False
+        pid = wintypes.DWORD()
+        if not user32.GetWindowThreadProcessId(target, ctypes.byref(pid)):
+            return False
+        if not target or (pid.value == os.getpid() and not self._allow_own_process):
+            log.warning("focus an external document before dictating")
+            return False
+        return True
 
     # -- keystrokes -----------------------------------------------------
 
@@ -172,8 +196,14 @@ class WindowsBackend(InjectionBackend):
         """
         if not inputs:
             return True
+        target = user32.GetForegroundWindow()
+        if not self._target_allowed(target):
+            return False
         total_sent = 0
         for start in range(0, len(inputs), chunk):
+            if target != user32.GetForegroundWindow():
+                log.warning("focused window changed during input; remaining events cancelled")
+                return False
             batch = inputs[start:start + chunk]
             n = len(batch)
             arr = (INPUT * n)(*batch)
@@ -288,7 +318,7 @@ class WindowsBackend(InjectionBackend):
         finally:
             user32.CloseClipboard()
 
-    def _set_clipboard_text(self, text: str) -> bool:
+    def _set_clipboard_text(self, text: str, expected_sequence: Optional[int] = None) -> bool:
         text_bytes = (text + "\0").encode("utf-16-le")
         size = len(text_bytes)
 
@@ -297,6 +327,8 @@ class WindowsBackend(InjectionBackend):
 
         h_mem = None
         try:
+            if expected_sequence is not None and user32.GetClipboardSequenceNumber() != expected_sequence:
+                return False
             if not user32.EmptyClipboard():
                 return False
 
@@ -318,43 +350,65 @@ class WindowsBackend(InjectionBackend):
                 return False
 
             h_mem = None  # ownership transferred
+            self._last_written_sequence = user32.GetClipboardSequenceNumber()
             return True
         finally:
             if h_mem:
                 kernel32.GlobalFree(h_mem)
             user32.CloseClipboard()
 
-    def paste_text(self, text: str, restore_clipboard: bool, settle_seconds: float) -> bool:
-        previous: Optional[str] = None
-        if restore_clipboard:
-            previous = self.get_clipboard_text()
-
-        if not self._set_clipboard_text(text):
+    def _plain_clipboard(self) -> bool:
+        if not self._open_clipboard():
             return False
+        try:
+            fmt = 0
+            while True:
+                fmt = user32.EnumClipboardFormats(fmt)
+                if not fmt:
+                    return True
+                # Windows synthesizes ANSI/OEM text and locale alongside Unicode.
+                if fmt not in (1, 7, 13, 16):
+                    return False
+        finally:
+            user32.CloseClipboard()
 
-        # Confirm the text really landed before pressing Ctrl+V; otherwise
-        # we would paste whatever the previous owner left behind.
-        if self.get_clipboard_text() != text:
-            time.sleep(0.03)
-            if not self._set_clipboard_text(text):
+    def paste_text(self, text: str, restore_clipboard: bool, settle_seconds: float) -> bool:
+        target = user32.GetForegroundWindow()
+        if not self._target_allowed(target):
+            return False
+        previous: Optional[str] = None
+        before = user32.GetClipboardSequenceNumber()
+        if restore_clipboard:
+            # Preserve only plain Unicode text/empty clipboards. Do not destroy
+            # image/file/rich-format clipboards while promising restoration.
+            count = user32.CountClipboardFormats()
+            if count and (not self._plain_clipboard() or not user32.IsClipboardFormatAvailable(CF_UNICODETEXT)):
+                log.warning("clipboard contains non-plain-text formats; use type mode or clear it explicitly")
                 return False
+            previous = self.get_clipboard_text() if count else None
+            if count and previous is None:
+                return False
+        if not self._set_clipboard_text(text, expected_sequence=before):
+            return False
+        owned_sequence = self._last_written_sequence
+        try:
             if self.get_clipboard_text() != text:
-                # Report failure instead of typing here: the caller owns
-                # the fallback, and doing it in both places double-injects
-                # text.
                 log.warning("clipboard verification failed; aborting paste")
                 return False
-
-        ok = self._send_paste_keystroke()
-
-        # Let the target application actually read the clipboard. Pasting
-        # is asynchronous: returning immediately let the NEXT utterance
-        # overwrite the clipboard mid-read, which duplicated or dropped
-        # sentences.
-        if settle_seconds:
-            time.sleep(settle_seconds)
-
-        if restore_clipboard and previous is not None and previous != text:
-            self._set_clipboard_text(previous)
-
-        return ok
+            if target != user32.GetForegroundWindow():
+                log.warning("focused window changed; paste cancelled")
+                return False
+            ok = self._send_paste_keystroke()
+            if settle_seconds:
+                time.sleep(settle_seconds)
+            return ok
+        finally:
+            if restore_clipboard:
+                if previous is not None:
+                    self._set_clipboard_text(previous, expected_sequence=owned_sequence)
+                elif self._open_clipboard():
+                    try:
+                        if user32.GetClipboardSequenceNumber() == owned_sequence:
+                            user32.EmptyClipboard()
+                    finally:
+                        user32.CloseClipboard()

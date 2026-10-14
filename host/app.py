@@ -37,6 +37,8 @@ for local development.
 from __future__ import annotations
 
 import logging
+import asyncio
+import json
 import os
 import time
 from contextlib import asynccontextmanager
@@ -151,7 +153,8 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
         limit=resolved.auth_failure_limit,
         window_seconds=resolved.rate_limit_window_seconds,
     )
-    inflight = _InflightLimiter(resolved.max_inflight_grants)
+    inflight = _InflightLimiter(min(resolved.max_inflight_grants, resolved.grant_max_connections))
+    active = _InflightLimiter(resolved.max_active_requests)
 
     #: One-shot flag, so a deployment that cannot attribute failed
     #: authentication is reported once instead of on every rejected request.
@@ -216,6 +219,7 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
     app.state.global_limiter = global_limiter
     app.state.auth_failure_limiter = auth_failure_limiter
     app.state.inflight = inflight
+    app.state.active_requests = active
 
     @app.middleware("http")
     async def harden(request: Request, call_next: Any) -> Any:
@@ -226,20 +230,39 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
         default), so a direct HTTP client cannot forge the header to make a
         plaintext request look like TLS.
         """
-        peer_host = request.client.host if request.client else None
-        secure = request_is_secure(
-            request.url.scheme,
-            peer_host,
-            request.headers.get("x-forwarded-proto"),
-            resolved,
-        )
-        if not secure and not resolved.allow_http:
-            response: Any = JSONResponse({"detail": "HTTPS is required"}, status_code=400)
-        else:
-            response = await call_next(request)
-        for header, value in _SECURITY_HEADERS.items():
-            response.headers.setdefault(header, value)
-        return response
+        is_session = request.url.path == "/v1/session" and request.method == "POST"
+        admitted = False
+        started = time.monotonic()
+        outcome = "cancelled"
+        if is_session:
+            metrics.increment("session_http_requests_total")
+        try:
+            peer_host = request.client.host if request.client else None
+            secure = request_is_secure(request.url.scheme, peer_host,
+                                       request.headers.get("x-forwarded-proto"), resolved)
+            if not secure and not resolved.allow_http:
+                response: Any = JSONResponse({"detail": "HTTPS is required"}, status_code=400)
+            elif is_session and not active.acquire():
+                response = JSONResponse({"detail": "host request capacity reached"}, status_code=503,
+                                        headers={"Retry-After": "1"})
+            else:
+                admitted = is_session
+                metrics.set_gauge("active_session_requests", active.in_flight)
+                response = await call_next(request)
+            outcome = str(response.status_code)
+            for header, value in _SECURITY_HEADERS.items():
+                response.headers.setdefault(header, value)
+            return response
+        except Exception:
+            outcome = "500"
+            raise
+        finally:
+            if admitted:
+                active.release()
+            if is_session:
+                metrics.set_gauge("active_session_requests", active.in_flight)
+                metrics.increment("session_http_outcomes_total", status=outcome)
+                metrics.observe("session_http_latency", time.monotonic() - started)
 
     @app.get("/healthz")
     async def healthz() -> dict:
@@ -286,8 +309,9 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
         peer = request.client.host if request.client else None
 
         # -- abuse guard: a locked-out identity is refused without any work ---
+        identity = authenticate_client(authorization, x_client_id, registry)
         auth_key = auth_failure_key(peer, x_client_id)
-        if auth_key is not None:
+        if identity is None and auth_key is not None:
             locked, lock_retry_after = auth_failure_limiter.is_locked(auth_key)
             if locked:
                 metrics.increment("rate_limited_total")
@@ -297,7 +321,6 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
                     headers={"Retry-After": str(lock_retry_after)},
                 )
 
-        identity = authenticate_client(authorization, x_client_id, registry)
         if identity is None:
             # Charge the brute-force budget *only* on a real failure.
             # Charging every request would make a hospital's 50 legitimate
@@ -372,35 +395,39 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
         session_id = new_session_id()
         log.info("session_started session_id=%s client_id=%s", session_id, identity.client_id)
 
-        body: Any = {}
-        try:
-            raw = b""
-            received = 0
+        async def read_body() -> bytes:
+            raw = bytearray()
             async for chunk in request.stream():
-                received += len(chunk)
-                if received > resolved.max_request_body_bytes:
-                    metrics.increment("request_body_rejections_total")
-                    log.warning(
-                        "session aborted session_id=%s reason=body_over_cap bytes=%d",
-                        session_id, received,
-                    )
-                    return JSONResponse({"detail": "request body too large"}, status_code=413)
-                raw += chunk
-        except Exception:  # noqa: BLE001 - a truncated body is simply empty
-            raw = b""
-        if raw:
-            try:
-                import json
+                if len(raw) + len(chunk) > resolved.max_request_body_bytes:
+                    raise OverflowError("body cap")
+                raw.extend(chunk)
+            return bytes(raw)
 
-                body = json.loads(raw.decode("utf-8"))
-            except (UnicodeDecodeError, ValueError):
-                body = {}
-        ttl = normalize_ttl(body.get("ttl_seconds") if isinstance(body, dict) else None, resolved)
+        try:
+            raw = await asyncio.wait_for(read_body(), resolved.request_body_timeout_seconds)
+        except asyncio.TimeoutError:
+            metrics.increment("request_body_rejections_total")
+            return JSONResponse({"detail": "request body timed out"}, status_code=408)
+        except OverflowError:
+            metrics.increment("request_body_rejections_total")
+            return JSONResponse({"detail": "request body too large"}, status_code=413)
+        except Exception:
+            return JSONResponse({"detail": "incomplete request body"}, status_code=400)
+        try:
+            body = json.loads(raw) if raw else {}
+            if not isinstance(body, dict):
+                raise ValueError("object required")
+            requested = body.get("ttl_seconds")
+            if requested is not None and (type(requested) is not int or not 5 <= requested <= resolved.max_ttl_seconds):
+                raise ValueError("invalid TTL")
+        except (ValueError, UnicodeError, RecursionError, OverflowError):
+            return JSONResponse({"detail": "ttl_seconds must be a bounded integer in a JSON object"}, status_code=422)
+        ttl = normalize_ttl(requested, resolved)
 
         if not inflight.acquire():
             # Explicit controlled error, not a silent drop and not an
             # unbounded wait for a Deepgram slot.
-            metrics.increment("token_request_failures_total")
+            metrics.increment("grant_capacity_rejections_total")
             metrics.increment("session_failures_total")
             log.error("session_error session_id=%s reason=upstream_saturated", session_id)
             return JSONResponse(
@@ -413,9 +440,13 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
         metrics.increment("token_requests_total")
         metrics.set_gauge("inflight_grants", inflight.in_flight)
         try:
-            token, expires_in = await grant_session_async(
-                resolved, ttl, request.app.state.grant_client
-            )
+            try:
+                token, expires_in = await asyncio.wait_for(
+                    grant_session_async(resolved, ttl, request.app.state.grant_client),
+                    timeout=resolved.grant_deadline_seconds,
+                )
+            except asyncio.TimeoutError as exc:
+                raise GrantError("Deepgram grant deadline exceeded", 504) from exc
         except GrantError as exc:
             elapsed = time.monotonic() - started
             metrics.observe("token_request_latency", elapsed)
@@ -428,7 +459,8 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
                 metrics.increment("deepgram_connection_failures_total")
             # The message never contains the Deepgram key or its body.
             log.error("session_error session_id=%s status=%s", session_id, exc.status)
-            return JSONResponse({"detail": str(exc)}, status_code=exc.status)
+            return JSONResponse({"detail": str(exc)}, status_code=exc.status,
+                                headers={"Retry-After": str(exc.retry_after)} if exc.retry_after else None)
         finally:
             inflight.release()
             metrics.set_gauge("inflight_grants", inflight.in_flight)

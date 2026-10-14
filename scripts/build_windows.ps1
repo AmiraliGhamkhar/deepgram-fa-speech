@@ -134,6 +134,10 @@ New-Item -ItemType Directory -Force -Path (Split-Path -Parent $DistDir) | Out-Nu
 if (Test-Path $DistDir) { Remove-Item -Recurse -Force $DistDir }
 Move-Item $builtFolder $DistDir
 
+# Record resolved package names/versions (no index URLs or credentials).
+& $Python -m pip list --format=json | Set-Content -Encoding UTF8 (Join-Path $DistDir "dependency-versions.json")
+if ($LASTEXITCODE -ne 0) { throw "Could not record release dependency versions." }
+
 Write-Host "==> Build complete: $DistDir" -ForegroundColor Green
 
 if (-not $SkipVerify) {

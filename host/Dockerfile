@@ -45,7 +45,7 @@ EXPOSE 8443
 # safe here: it talks to loopback inside the container, and there is
 # nothing to impersonate.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD python -c "import os,ssl,urllib.request; scheme='https' if (os.getenv('HOST_TLS_CERTFILE') and os.getenv('HOST_TLS_KEYFILE')) else 'http'; ctx=ssl._create_unverified_context() if scheme=='https' else None; urllib.request.urlopen(scheme+'://127.0.0.1:'+os.getenv('HOST_PORT','8443')+'/readyz',timeout=4,context=ctx)"
+    CMD python -c "import os,ssl,urllib.request; scheme='https' if (os.getenv('HOST_TLS_CERTFILE') and os.getenv('HOST_TLS_KEYFILE')) else 'http'; ctx=ssl._create_unverified_context() if scheme=='https' else None; req=urllib.request.Request(scheme+'://127.0.0.1:'+os.getenv('HOST_PORT','8443')+'/readyz',headers={'X-Forwarded-Proto':'https'}); urllib.request.urlopen(req,timeout=4,context=ctx)"
 
 # TLS cert/key are mounted at runtime:
 #   -v /etc/letsencrypt:/etc/letsencrypt:ro

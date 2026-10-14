@@ -26,6 +26,7 @@ sources before building the automaton.
 from __future__ import annotations
 
 import logging
+from bisect import bisect_right
 from dataclasses import dataclass, field
 from typing import Dict, List, Sequence, Tuple
 
@@ -135,7 +136,18 @@ class DeterministicFST:
 
         matches = self._longest_matches(text)
         if protected_ranges:
-            matches = [m for m in matches if not _overlaps_any(m, protected_ranges)]
+            # Merge once, then use binary search rather than scanning every
+            # numeric/negation span for every match on long dictations.
+            merged: List[Tuple[int, int]] = []
+            for start, end in sorted(protected_ranges):
+                if merged and start <= merged[-1][1]:
+                    merged[-1] = (merged[-1][0], max(end, merged[-1][1]))
+                else:
+                    merged.append((start, end))
+            ends = [end for _, end in merged]
+            matches = [m for m in matches if not (
+                (index := bisect_right(ends, m[0])) < len(merged) and merged[index][0] < m[1]
+            )]
         if require_word_boundaries:
             matches = [m for m in matches if _is_whole_word(text, m[0], m[1])]
 

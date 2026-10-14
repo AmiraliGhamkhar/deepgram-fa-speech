@@ -8,6 +8,7 @@ decide, generically, whether a failure is worth retrying.
 from __future__ import annotations
 
 import enum
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Callable, Optional, Tuple
@@ -85,6 +86,8 @@ class TranscriptEvent:
     speech_final: bool = True
     confidence: Optional[float] = None
     words: Tuple[WordInfo, ...] = field(default_factory=tuple)
+    speech_started: bool = False
+    received_at: float = field(default_factory=time.monotonic)
 
 
 # Callback signatures used by STTProvider.
@@ -101,7 +104,22 @@ class STTProvider(ABC):
       failure (never let a raw provider-SDK exception escape uncaught from
       the streaming thread).
     * Be safe to `stop()` from a different thread than `start()`.
+    * Override `wait_ready` for asynchronous connection establishment.
+      Call `prepare()` before starting each run; it must precede any Stop
+      that can race startup, so cancellation cannot be cleared by a worker.
     """
+
+    def prepare(self) -> None:
+        """Prepare a new run before starting its worker. Must not do network I/O."""
+        return None
+
+    def wait_ready(self, timeout: float) -> bool:
+        """Wait for transport readiness. Legacy synchronous providers are ready immediately."""
+        return True
+
+    def abort(self) -> None:
+        """Best-effort immediate transport abort after a graceful-stop deadline."""
+        return None
 
     @abstractmethod
     def validate_config(self) -> None:

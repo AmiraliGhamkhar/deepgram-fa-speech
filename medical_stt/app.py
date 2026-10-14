@@ -15,6 +15,8 @@ never held open in the background.
 from __future__ import annotations
 
 import enum
+import math
+from collections import deque
 import logging
 import logging.handlers
 import queue
@@ -41,7 +43,7 @@ from .processing.bidi import to_injected
 from .processing.confidence import MedicalConfidenceWarning, find_low_confidence_medical_words
 from .processing.normalize import normalize
 from .processing.terminology import TerminologyEngine
-from .stt.accumulator import UtteranceAccumulator
+from .stt.accumulator import UtteranceAccumulator, UtteranceLimitError
 from .stt.base import ErrorCategory, ProviderError, STTProvider, TranscriptEvent
 from .stt.deepgram_provider import DeepgramProvider
 from .stt.reconnect import ReconnectPolicy, decide
@@ -74,10 +76,10 @@ def load_sounddevice() -> Any:
 
 
 class LatencyTracker:
-    """Lightweight end-to-end latency instrumentation.
+    """Per-utterance VAD/result-receipt and local-stage timing.
 
-    Never logs transcript content -- only durations and stage names -- so
-    it is safe to enable at INFO level by default.
+    VAD receipt is not acoustic onset; injection acceptance is not target
+    consumption. Never logs transcript content, only durations/stage names.
     """
 
     def __init__(self) -> None:
@@ -85,20 +87,20 @@ class LatencyTracker:
         self._first_interim: Optional[float] = None
         self._speech_final: Optional[float] = None
 
-    def mark_utterance_start(self) -> None:
+    def mark_utterance_start(self, at: Optional[float] = None) -> None:
         if self._capture_start is None:
-            self._capture_start = time.monotonic()
+            self._capture_start = at if at is not None else time.monotonic()
             self._first_interim = None
             self._speech_final = None
 
-    def mark_first_interim(self) -> None:
+    def mark_first_interim(self, at: Optional[float] = None) -> None:
         if self._capture_start is not None and self._first_interim is None:
-            self._first_interim = time.monotonic()
+            self._first_interim = at if at is not None else time.monotonic()
             log.debug("latency: first interim after %.3fs", self._first_interim - self._capture_start)
 
-    def mark_speech_final(self) -> None:
+    def mark_speech_final(self, at: Optional[float] = None) -> None:
         if self._capture_start is not None:
-            self._speech_final = time.monotonic()
+            self._speech_final = at if at is not None else time.monotonic()
 
     def mark_final(self, terminology_s: float, bidi_s: float, injection_s: float) -> None:
         if self._capture_start is None:
@@ -107,8 +109,8 @@ class LatencyTracker:
         speech_final_s = (self._speech_final or now) - self._capture_start
         first_interim_s = None if self._first_interim is None else self._first_interim - self._capture_start
         log.info(
-            "latency: total=%.3fs audio_to_first_interim=%s audio_to_speech_final=%.3fs "
-            "terminology=%.3fs bidi=%.3fs injection=%.3fs",
+            "latency: total=%.3fs vad_to_first_interim=%s vad_to_final_receipt=%.3fs "
+            "terminology=%.3fs bidi=%.3fs injection_acceptance=%.3fs",
             now - self._capture_start,
             "n/a" if first_interim_s is None else f"{first_interim_s:.3f}s",
             speech_final_s,
@@ -138,6 +140,9 @@ class LiveMedicalSTT:
 
         self.keyterms = load_keyterms(self.settings.specialty)
         asr_replacements = load_asr_replacements() if self.settings.use_asr_replacements else []
+        self._owns_provider = provider is None
+        self._provider_used = False
+        self._asr_replacements = asr_replacements
         self.provider: STTProvider = provider or DeepgramProvider(
             self.settings, self.keyterms, asr_replacements
         )
@@ -153,7 +158,16 @@ class LiveMedicalSTT:
         self.last_confidence_warning: Optional[MedicalConfidenceWarning] = None
         self._utterance = UtteranceAccumulator()
 
-        self._audio_q = BoundedAudioQueue(maxsize=40)
+        # Keep a fixed time budget even if capture block size changes.
+        self._audio_q = BoundedAudioQueue(maxsize=max(1, math.floor(3.2 / self.settings.block_duration)))
+        self.phase = "connecting"
+        self.warning = ""
+        self._recovery: deque[str] = deque(maxlen=16)
+        self._recovery_lock = threading.Lock()
+        self._recovery_truncated = False
+        self._injection_failed = False
+        self._connected_at: Optional[float] = None
+        self._abandoned_workers: list[threading.Thread] = []
         #: Set to end the current session (error, endpoint, or Stop).
         self._stop = threading.Event()
         #: Set by `request_stop()` to end `run()` itself.
@@ -210,7 +224,35 @@ class LiveMedicalSTT:
             "audio_queue_drops_total": stats.dropped_total,
             "consecutive_drops": stats.consecutive_drops,
             "reconnect_count": self._reconnect_count,
+            "phase": self.phase,
+            "warning": self.warning,
+            "audio_queue_age_seconds": stats.oldest_age_seconds,
+            "audio_sent_seconds": stats.sent_bytes / (self.settings.sample_rate * self.settings.channels * 2),
+            "audio_lost_seconds": stats.dropped_bytes / (self.settings.sample_rate * self.settings.channels * 2),
         }
+
+    def recovery_text(self) -> str:
+        """Bounded in-memory recovery only; never log or persist clinical text."""
+        with self._recovery_lock:
+            return "\n".join(self._recovery)
+
+    def clear_recovery(self) -> None:
+        with self._recovery_lock:
+            self._recovery.clear()
+            self._recovery_truncated = False
+
+    def _retain_failed(self, text: str) -> None:
+        with self._recovery_lock:
+            if len(self._recovery) >= 16 or len(text) > 8000:
+                self._recovery_truncated = True
+            if len(self._recovery) < 16:
+                self._recovery.append(text[:8000])
+
+    def _warn(self, message: str) -> None:
+        if self._recovery_truncated:
+            message += " — ظرفیت بازیابی پر شده؛ بخشی از متن در دسترس نیست"
+        self.warning = message
+        self.overlay.set_warning(message)
 
     # -- transcript handling --------------------------------------------
 
@@ -229,15 +271,30 @@ class LiveMedicalSTT:
             # into the one the user is dictating into now.
             log.debug("dropped a transcript from a superseded session")
             return
+        if event.speech_started:
+            self.latency.mark_utterance_start(event.received_at)
+            return
         if not event.is_final:
-            self.latency.mark_first_interim()
+            self.latency.mark_first_interim(event.received_at)
             self.overlay.set_partial(normalize(event.text))
             return
 
-        utterance = self._utterance.add(event)
+        if self._injection_failed:
+            if event.text:
+                self._retain_failed(event.text)
+            return
+        try:
+            utterance = self._utterance.add(event)
+        except UtteranceLimitError:
+            self._injection_failed = True
+            self._retain_failed(event.text)
+            self._warn("گفتار طولانی است؛ متن بازیابی را بررسی کنید")
+            self._on_provider_error(ProviderError(ErrorCategory.CONFIG, "Utterance limit reached; review recovery text"))
+            return
         if utterance is None:
             return
 
+        self.latency.mark_speech_final(event.received_at)
         self._finalize_utterance(utterance)
 
     def _flush_pending_utterance(self) -> None:
@@ -253,11 +310,23 @@ class LiveMedicalSTT:
         if pending is None:
             return
         log.info("injecting the final buffered utterance during shutdown")
-        self._finalize_utterance(pending)
+        if self._injection_failed:
+            self._retain_failed(pending.text)
+        else:
+            self.latency.mark_speech_final(pending.received_at)
+            self._finalize_utterance(pending)
 
     def _finalize_utterance(self, utterance: TranscriptEvent) -> None:
-        """Run one completed utterance through terminology, BiDi, injection."""
-        self.latency.mark_speech_final()
+        """Preserve the whole accumulated utterance if any processing stage fails."""
+        try:
+            self._render_and_inject(utterance)
+        except Exception:
+            self._retain_failed(utterance.text)
+            self._injection_failed = True
+            self._warn("پردازش متن ناموفق بود؛ متن بازیابی را بررسی کنید")
+            self._on_provider_error(ProviderError(ErrorCategory.CONFIG, "Transcript processing failed; review recovery text"))
+
+    def _render_and_inject(self, utterance: TranscriptEvent) -> None:
         self.last_confidence_warning = find_low_confidence_medical_words(
             utterance.words, self.settings.medical_confidence_threshold
         )
@@ -279,20 +348,32 @@ class LiveMedicalSTT:
         injected_repr = to_injected(rewritten)
         bidi_end = time.monotonic()
 
-        self.overlay.set_done(rewritten)
         self.injector.reset_partial()
-        ok = self.injector.paste_text(injected_repr + " ", add_rtl_mark=True)
+        if self.settings.inject_mode == "type":
+            ok = self.injector.type_text(injected_repr + " ")
+        else:
+            ok = self.injector.paste_text(injected_repr + " ", add_rtl_mark=True)
         injection_end = time.monotonic()
         if not ok:
-            log.warning("injection failed for a final transcript (see injector.last_error)")
+            log.warning("injection failed for a final transcript")
+            self._retain_failed(rewritten)
+            self._injection_failed = True
+            self._warn("درج متن ناموفق بود؛ متن بازیابی را بررسی کنید")
+            self._on_provider_error(ProviderError(ErrorCategory.CONFIG, "Text injection failed; review recovery text"))
+        elif self.last_confidence_warning is not None:
+            self.overlay.set_done(rewritten)
+            self._warn("واژه پزشکی با اطمینان پایین؛ متن درج‌شده را بررسی کنید")
+        else:
+            self.overlay.set_done(rewritten)
 
+        log.info("latency: terminology=%.3fs bidi=%.3fs injection_acceptance=%.3fs",
+                 terminology_end - terminology_start, bidi_end - terminology_end,
+                 injection_end - bidi_end)
         self.latency.mark_final(
             terminology_s=terminology_end - terminology_start,
             bidi_s=bidi_end - terminology_end,
             injection_s=injection_end - bidi_end,
         )
-        time.sleep(0.08)
-        self.overlay.set_idle()
 
     def _on_provider_error(self, error: ProviderError, generation: Optional[int] = None) -> None:
         if not self._is_current_session(generation):
@@ -317,7 +398,6 @@ class LiveMedicalSTT:
         Anything worth reporting (queue overflow, device status) is turned
         into a flag here and logged by the sender thread.
         """
-        self.latency.mark_utterance_start()
         if status:
             # Never log here: store the latest status string for the
             # sender thread to report (device overflow flags can repeat
@@ -335,6 +415,7 @@ class LiveMedicalSTT:
             if status:
                 log.warning("microphone status: %s", status)
         if self._audio_drop_pending.is_set():
+            self._warn("بخشی از صدا از دست رفت؛ متن را بررسی کنید")
             self._audio_drop_pending.clear()
             stats = self._audio_q.stats()
             # Persisting overflow is reported at ERROR and flips the session
@@ -369,161 +450,187 @@ class LiveMedicalSTT:
             log.info("discarded %d buffered audio chunk(s) on session reset", drained)
         self._utterance.reset()
         self.injector.reset_partial()
+        self.latency = LatencyTracker()
 
     def _run_session(self) -> None:
+        self._abandoned_workers = [worker for worker in self._abandoned_workers if worker.is_alive()]
+        if len(self._abandoned_workers) >= 3:
+            self._warn("اتصال قبلی پایان نیافته است؛ پس از رفع مشکل برنامه را باز کنید")
+            raise ProviderError(ErrorCategory.CONFIG, "Too many abandoned network workers; restart after network recovery")
         sounddevice = load_sounddevice()
         s = self.settings
-        blocksize = int(s.sample_rate * s.block_duration)
-
-        self.provider.validate_config()
-
-        # Claim this session. Any thread still running for a previous one is
-        # now stale and its callbacks are ignored (see `_is_current_session`).
+        if self._owns_provider and self._provider_used:
+            self.provider = DeepgramProvider(s, self.keyterms, self._asr_replacements)
+        self._provider_used = True
+        provider = self.provider  # old workers must never send to a replacement provider
+        provider.validate_config()
+        provider.prepare()
         self._session_generation += 1
         generation = self._session_generation
-
-        # A stop requested before the session started must not be cleared
-        # here, otherwise it would be lost.
+        self.phase = "connecting"
         if not self._shutdown.is_set():
             self._stop.clear()
         self._errors.clear()
         self._reset_session_state()
-        self.latency.mark_utterance_start()
+        self._connected_at = None
+        finals: queue.Queue[tuple[TranscriptEvent, LatencyTracker]] = queue.Queue(maxsize=16)
+        receive_latency = LatencyTracker()
+        processing_done = threading.Event()
+
+        def on_error(error: ProviderError) -> None:
+            self._on_provider_error(error, generation)
 
         def on_transcript(event: TranscriptEvent) -> None:
-            self._on_transcript(event, generation)
+            nonlocal receive_latency
+            if not self._is_current_session(generation):
+                return
+            if event.speech_started:
+                receive_latency.mark_utterance_start(event.received_at)
+                return
+            # Interims are latest-value display data, not an unbounded backlog.
+            if not event.is_final:
+                receive_latency.mark_first_interim(event.received_at)
+                self.overlay.set_partial(normalize(event.text[:8000]))
+                return
+            if len(event.text) > 8000 or len(event.words) > 4000:
+                self._retain_failed(event.text)
+                self._warn("گفتار بیش از حد طولانی است؛ متن بازیابی را بررسی کنید")
+                on_error(ProviderError(ErrorCategory.CONFIG, "Oversized transcript; review recovery text"))
+                return
+            try:
+                finals.put_nowait((event, receive_latency))
+                if event.speech_final:
+                    receive_latency = LatencyTracker()
+            except queue.Full:
+                self._retain_failed(event.text)
+                self._warn("پردازش عقب افتاده است؛ متن بازیابی را بررسی کنید")
+                on_error(ProviderError(ErrorCategory.CONFIG, "Transcript queue full; review recovery text"))
 
-        def on_provider_error(error: ProviderError) -> None:
-            self._on_provider_error(error, generation)
+        def process_finals() -> None:
+            while not processing_done.is_set() or not finals.empty():
+                try:
+                    event, tracker = finals.get(timeout=0.05)
+                except queue.Empty:
+                    continue
+                try:
+                    # This worker is fully drained before session state is reused.
+                    self.latency = tracker
+                    log.debug("latency: transcript_queue=%.3fs", time.monotonic() - event.received_at)
+                    self._on_transcript(event)
+                except Exception:
+                    self._retain_failed(event.text)
+                    self._injection_failed = True
+                    self._warn("پردازش متن ناموفق بود؛ متن بازیابی را بررسی کنید")
+                    self._on_provider_error(ProviderError(ErrorCategory.CONFIG, "Transcript processing failed; review recovery text"))
+                finally:
+                    finals.task_done()
+            try:
+                self._flush_pending_utterance()
+            except Exception:
+                self._on_provider_error(ProviderError(ErrorCategory.CONFIG, "Final transcript processing failed"))
+
+        processor = threading.Thread(target=process_finals, daemon=True, name="transcript-worker")
+        processor.start()
 
         def run_provider() -> None:
             try:
-                self.provider.start(on_transcript, on_provider_error)
+                provider.start(on_transcript, on_error)
             except ProviderError as exc:
-                on_provider_error(exc)
+                on_error(exc)
+            except Exception:
+                on_error(ProviderError(ErrorCategory.UNKNOWN, "Provider worker failed"))
             finally:
                 if generation == self._session_generation:
                     self._stop.set()
-                else:
-                    # The join below timed out and this thread outlived the
-                    # session it belonged to. Stopping `_stop` here would end
-                    # the *next* session, which `run()` would then report as a
-                    # clean exit -- the dictation would stop with no error.
-                    log.warning(
-                        "a provider thread from a previous session outlived its "
-                        "join and is being abandoned; the current session is unaffected"
-                    )
 
         provider_thread = threading.Thread(target=run_provider, daemon=True, name="stt-provider")
         provider_thread.start()
 
         def send_audio() -> None:
-            """Stream queued audio until it is empty *and* the session is
-            stopping.
-
-            This is what makes shutdown lossless: when Stop sets `_stop`,
-            the sender keeps sending whatever the capture callback already
-            queued, and only exits once the queue is empty. The caller
-            joins this thread *before* finalizing the Deepgram stream, so
-            no captured audio can be dropped between Stop and Finalize.
-            """
-            while True:
-                if generation != self._session_generation:
-                    # Superseded: the audio queue belongs to a newer session
-                    # now, so draining it here would feed one session's audio
-                    # into another's connection.
-                    return
+            while generation == self._session_generation:
                 try:
                     chunk = self._audio_q.get(timeout=0.1)
                 except queue.Empty:
-                    self._report_audio_health()
                     if self._stop.is_set():
                         return
                     continue
                 if generation != self._session_generation:
-                    # A session can be replaced while this sender is blocked
-                    # in get(). Do not let a chunk it already dequeued cross
-                    # that boundary into the replacement provider stream.
+                    self._audio_q.record_failed(chunk)
                     self._audio_q.task_done()
                     return
                 try:
-                    self.provider.send_audio(chunk)
+                    provider.send_audio(chunk)
+                    self._audio_q.record_sent(chunk)
                 except ProviderError as exc:
-                    # The connection is unusable: report once and stop
-                    # rather than reporting the same failure per chunk.
-                    on_provider_error(exc)
-                    self._audio_q.task_done()
+                    self._audio_q.record_failed(chunk)
+                    on_error(exc)
                     return
-                self._audio_q.task_done()
+                finally:
+                    self._audio_q.task_done()
 
-        sender = threading.Thread(target=send_audio, daemon=True, name="audio-sender")
-        sender.start()
-
+        sender: Optional[threading.Thread] = None
         try:
+            deadline = time.monotonic() + s.host_timeout_seconds + 12.0
+            while not self._stop.is_set() and not self._shutdown.is_set():
+                if provider.wait_ready(0.05):
+                    break
+                if time.monotonic() >= deadline:
+                    on_error(ProviderError(ErrorCategory.TIMEOUT, "Provider readiness timed out"))
+                    break
+            if self._stop.is_set() or self._shutdown.is_set():
+                if self._errors and not self._shutdown.is_set():
+                    raise self._errors[0]
+                return
+            self._connected_at = time.monotonic()
+            sender = threading.Thread(target=send_audio, daemon=True, name="audio-sender")
+            sender.start()
             with sounddevice.RawInputStream(
-                samplerate=s.sample_rate,
-                blocksize=blocksize,
-                channels=s.channels,
-                dtype="int16",
-                callback=self._on_audio,
+                samplerate=s.sample_rate, blocksize=int(s.sample_rate * s.block_duration),
+                channels=s.channels, dtype="int16", callback=self._on_audio,
             ):
+                self.phase = "recording"
                 while not self._stop.wait(0.1) and not self._shutdown.is_set():
-                    pass
+                    self._report_audio_health()  # independent of queue emptiness / blocked sends
         except KeyboardInterrupt:
-            log.info("shutdown requested by user")
             self.request_stop()
         except OSError as exc:
-            # The `with` block above releases the microphone on the way out.
-            self._errors.append(ProviderError(ErrorCategory.MICROPHONE, str(exc), cause=exc))
+            on_error(ProviderError(ErrorCategory.MICROPHONE, "Microphone unavailable", cause=exc))
         finally:
-            # Shutdown order matters; each step must finish before the next:
-            #   1. the microphone is already released (the `with` block
-            #      above exited), so no new audio can be captured;
-            #   2. `_stop` lets the sender drain everything that was
-            #      captured but not yet transmitted;
-            #   3. joining the sender -- not finalizing first -- is what
-            #      guarantees the last words reach Deepgram;
-            #   4. Finalize + CloseStream, then wait for the provider
-            #      thread, so the final transcript events are processed
-            #      before the session state is reset;
-            #   5. any utterance that Deepgram finalized but never closed
-            #      with `speech_final` is injected now instead of being
-            #      discarded;
-            #   6. finally, reset the per-session state for the next Start.
-            # Every step runs even if an earlier one raises: `stop()` and
-            # the joins are best-effort during teardown, and letting one
-            # exception skip the rest would leave threads, the queue, or
-            # the injector in a stale state for the next Start.
+            self.phase = "stopping"
             self._stop.set()
-            sender.join(timeout=SENDER_JOIN_TIMEOUT_SECONDS)
-            if sender.is_alive():
-                log.warning(
-                    "audio sender did not stop within %.1fs; queued audio is discarded",
-                    SENDER_JOIN_TIMEOUT_SECONDS,
-                )
-            try:
-                self.provider.stop()
-            except Exception as exc:  # noqa: BLE001 - shutdown must continue
-                log.warning("provider stop raised during shutdown: %s", exc)
-            try:
-                provider_thread.join(timeout=PROVIDER_JOIN_TIMEOUT_SECONDS)
-            except RuntimeError as exc:  # pragma: no cover - thread already gone
-                log.debug("provider thread join skipped: %s", exc)
-            if provider_thread.is_alive():
-                # Reported, not swallowed: this thread is now abandoned and
-                # outlives the session. Its callbacks are ignored from here on
-                # (they carry an older `_session_generation`), so it can no
-                # longer corrupt the next session -- but a leaked thread must
-                # be visible in the log rather than discovered as a mystery
-                # growth in thread count.
-                log.warning(
-                    "provider thread did not stop within %.1fs and is being "
-                    "abandoned (a wedged provider socket); it will be ignored",
-                    PROVIDER_JOIN_TIMEOUT_SECONDS,
-                )
-            self._flush_pending_utterance()
+            if sender is not None:
+                sender.join(timeout=SENDER_JOIN_TIMEOUT_SECONDS)
+                if sender.is_alive():
+                    log.warning("audio sender did not stop; aborting transport")
+                    provider.abort()
+            # Even a third-party provider's stop must not block teardown forever.
+            def stop_provider() -> None:
+                try:
+                    provider.stop()
+                except Exception:
+                    log.warning("provider stop raised during shutdown")
+            closer = threading.Thread(target=stop_provider, daemon=True, name="session-close")
+            closer.start()
+            closer.join(timeout=1.2)
+            provider_thread.join(timeout=PROVIDER_JOIN_TIMEOUT_SECONDS)
+            if provider_thread.is_alive() or closer.is_alive():
+                log.warning("provider thread did not stop and is being abandoned")
+                provider.abort()
+            self._abandoned_workers.extend(
+                worker for worker in (provider_thread, closer, sender)
+                if worker is not None and worker.is_alive()
+            )
+            # Reject late callbacks now, including the entire backoff period.
+            self._session_generation += 1
+            processing_done.set()
+            processor.join(timeout=4.0)
+            if processor.is_alive():
+                self._warn("درج متن هنوز پایان نیافته است؛ منتظر بمانید")
+                # Native injection cannot be safely interrupted. Fail closed:
+                # do not confirm Stop or launch a replacement while it can type.
+                processor.join()
             self._reset_session_state()
-
+            self.phase = "idle"
         if self._errors:
             raise self._errors[0]
 
@@ -543,6 +650,7 @@ class LiveMedicalSTT:
 
         self.overlay.set_idle()
         exit_code = 0
+        consecutive_failures = 0
 
         try:
             while not self._shutdown.is_set():
@@ -557,12 +665,16 @@ class LiveMedicalSTT:
                         # classified: that is a normal stop, not an error.
                         break
                     self._reconnect_count += 1
+                    if self._connected_at is not None and time.monotonic() - self._connected_at >= 30.0:
+                        consecutive_failures = 0
+                    consecutive_failures += 1
+                    self.phase = "reconnecting"
                     # `exc.retry_after` is honored when the host sent one, so
                     # a rate-limited client slows down when told to instead of
                     # guessing -- which is what would otherwise turn 50
                     # clients into a synchronized retry storm.
                     decision = decide(
-                        policy, exc, self._reconnect_count, retry_after=exc.retry_after
+                        policy, exc, consecutive_failures, retry_after=exc.retry_after
                     )
                     if not decision.should_retry:
                         log.error("not retrying: %s", decision.reason)
@@ -604,6 +716,7 @@ class SessionController:
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
         self._state = ControllerState.IDLE
+        self._stop_requested = threading.Event()
         self.last_error: Optional[str] = None
 
     @property
@@ -614,16 +727,32 @@ class SessionController:
     def is_running(self) -> bool:
         return self._state is ControllerState.RUNNING
 
+    @property
+    def health(self) -> Dict[str, Any]:
+        return self._stt.session_health if self._stt is not None else {"phase": "idle"}
+
+    def recovery_text(self) -> str:
+        return self._stt.recovery_text() if self._stt is not None else ""
+
+    def clear_recovery(self) -> None:
+        if self._stt is not None:
+            self._stt.clear_recovery()
+
     def start(self) -> None:
         """Start a dictation session. Raises on unusable configuration."""
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 return
+            self._stop_requested.clear()
             # Built here (not in __init__) so a settings change is picked
             # up on the next Start, and so errors surface to the user at
             # the moment they press the button.
+            if self._stt is not None and hasattr(self._stt, "recovery_text") and self._stt.recovery_text():
+                raise ConfigError("Review and clear recovery text before starting another session")
             stt = self._stt_factory()
             self._stt = stt
+            if self._stop_requested.is_set():
+                stt.request_stop()
             self.last_error = None
             self._state = ControllerState.RUNNING
 
@@ -632,7 +761,7 @@ class SessionController:
                     code = stt.run()
                     self._state = ControllerState.IDLE if code == 0 else ControllerState.FAILED
                     if code != 0 and self.last_error is None:
-                        self.last_error = "session ended with an error"
+                        self.last_error = getattr(stt, "warning", "") or "session ended with an error"
                 except Exception as exc:  # noqa: BLE001 - surfaced in the UI
                     log.error("session failed: %s", exc)
                     self.last_error = str(exc)
@@ -644,11 +773,18 @@ class SessionController:
             self._thread = threading.Thread(target=run, daemon=True, name="stt-session")
             self._thread.start()
 
+    def cancel_start(self) -> None:
+        """Nonblocking cancellation latch, including while the factory is running."""
+        self._stop_requested.set()
+        if self._stt is not None:
+            self._stt.request_stop()
+
     def stop(self, timeout: float = 8.0) -> bool:
         """Stop the session and wait for a full clean shutdown.
 
         Returns True if the session thread finished within `timeout`.
         """
+        self.cancel_start()
         stt = self._stt
         thread = self._thread
         if stt is not None:

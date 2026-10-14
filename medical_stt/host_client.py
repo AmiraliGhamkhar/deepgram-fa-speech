@@ -14,6 +14,7 @@ the packaged client gains no new dependency for a single HTTPS POST.
 from __future__ import annotations
 
 import json
+import math
 import logging
 import socket
 import urllib.error
@@ -95,7 +96,7 @@ def _parse_retry_after(raw: Optional[str]) -> Optional[float]:
         seconds = float(raw.strip())
     except ValueError:
         return None
-    return seconds if seconds > 0 else None
+    return seconds if math.isfinite(seconds) and seconds > 0 else None
 
 
 class HostSessionClient:
@@ -262,7 +263,7 @@ class HostSessionClient:
             )
         try:
             expires_in = int(payload.get("expires_in", 0))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             expires_in = 0
         if expires_in <= 0:
             raise ProviderError(

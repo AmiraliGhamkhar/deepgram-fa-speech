@@ -52,7 +52,7 @@ def _capture_status(window: ControlWindow):
             stop_incomplete.set()
 
     window._set_status = set_status
-    window._ui = lambda callback, force=False: callback()
+    window._ui = lambda callback, force=False, key="action": callback()
     return statuses, stop_incomplete
 
 

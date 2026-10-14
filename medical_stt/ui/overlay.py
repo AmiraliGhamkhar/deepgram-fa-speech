@@ -1,12 +1,9 @@
-"""Always-on-top floating transcript overlay for mixed Persian & English.
+"""Cursor-following transcript overlay with latest-value UI delivery.
 
-Lifecycle note (previously a real bug): `close()` used to set `self._closed
-= True` *before* scheduling the Tk `destroy()` callback via `self._ui(...)`,
-but `_ui()` refuses to schedule anything once `_closed` is set -- so the
-window was never actually destroyed and the Tk mainloop thread could hang
-around after `close()` returned. `close()` now schedules destruction first
-and only marks the overlay closed once that is done, and `_ui()` accepts an
-explicit override for the shutdown path.
+Production uses a Toplevel on the control window's interpreter. A standalone
+diagnostic overlay may own a Tk thread. All worker updates use a bounded
+mailbox; only the owning GUI thread enters Tcl/Tk. Warning state is sticky
+and backend acceptance is never described as target-document consumption.
 """
 from __future__ import annotations
 
@@ -16,6 +13,7 @@ import threading
 from typing import Callable, Optional
 
 from ..processing.bidi import to_display
+from . import dispatch
 
 log = logging.getLogger("medical_stt.ui.overlay")
 _SYSTEM = platform.system().lower()
@@ -43,7 +41,7 @@ def _is_rtl(text: str) -> bool:
     return True
 
 
-def _get_best_persian_font(root: "tk.Tk") -> str:
+def _get_best_persian_font(root: "tk.Tk | tk.Toplevel") -> str:
     preferred = ["Vazirmatn", "Vazir", "IRANSans", "B Yekan", "B Nazanin", "Segoe UI", "Tahoma", "Arial"]
     try:
         available = set(tkfont.families(root))
@@ -61,18 +59,25 @@ class TranscriptOverlay:
         self.offset_x = offset_x
         self.offset_y = offset_y
         self.wraplength = wraplength
-        self._root: Optional["tk.Tk"] = None
+        self._root: Optional["tk.Tk | tk.Toplevel"] = None
         self._label: Optional["tk.Label"] = None
         self._status: Optional["tk.Label"] = None
         self._font_family: str = "Tahoma"
         self._ready = threading.Event()
         self._closed = False
+        self._mailbox = dispatch.Mailbox()
+        self._warning = ""
+        self._last_geometry = ""
+        self._render_version = 0
 
         if not self.enabled:
             log.info("Overlay GUI disabled or Tkinter unavailable")
             self._ready.set()
             return
 
+        if dispatch.owner_mailbox is not None:
+            dispatch.owner_mailbox.post("overlay-create", self._run)
+            return
         self._thread = threading.Thread(target=self._run, name="overlay-ui", daemon=True)
         self._thread.start()
         if not self._ready.wait(timeout=4.0):
@@ -81,7 +86,10 @@ class TranscriptOverlay:
 
     def _run(self) -> None:
         try:
-            self._root = tk.Tk()
+            if self._closed:
+                return
+            shared = dispatch.owner_root
+            self._root = tk.Toplevel(shared) if shared is not None else tk.Tk()
             self._root.title("Medical STT Overlay")
             self._root.overrideredirect(True)
             self._root.attributes("-topmost", True)
@@ -114,11 +122,25 @@ class TranscriptOverlay:
             self._root.geometry("+100+100")
             self._ready.set()
             self._tick_follow()
-            self._root.mainloop()
+            self._pump()
+            if shared is None:
+                self._root.mainloop()
         except tk.TclError as exc:
             log.warning("Failed to initialize overlay: %s", exc)
             self.enabled = False
             self._ready.set()
+
+    def _pump(self) -> None:
+        self._mailbox.drain()
+        if self._root is not None:
+            self._root.after(25, self._pump)
+
+    def set_warning(self, message: str) -> None:
+        def render() -> None:
+            self._warning = message
+            if self._status:
+                self._status.config(text=message, fg="#f9e2af")
+        self._ui(render, key="warning")
 
     def _tick_follow(self) -> None:
         if self._closed or self._root is None:
@@ -126,38 +148,37 @@ class TranscriptOverlay:
         try:
             px = self._root.winfo_pointerx()
             py = self._root.winfo_pointery()
-            sw = self._root.winfo_screenwidth()
-            sh = self._root.winfo_screenheight()
+            left, top, sw, sh = self._screen_bounds()
             ww = self._root.winfo_reqwidth()
             wh = self._root.winfo_reqheight()
 
             x = px + self.offset_x
             y = py + self.offset_y
-            if x + ww > sw - 12:
+            if x + ww > left + sw - 12:
                 x = px - ww - 10
-            if y + wh > sh - 12:
+            if y + wh > top + sh - 12:
                 y = py - wh - 10
-            self._root.geometry(f"+{max(6, x)}+{max(6, y)}")
+            geometry = f"{max(left + 6, x):+d}{max(top + 6, y):+d}"
+            if geometry != self._last_geometry:
+                self._root.geometry(geometry)
+                self._last_geometry = geometry
         except tk.TclError:
             pass
         if self._root and not self._closed:
             self._root.after(40, self._tick_follow)
 
-    def _ui(self, fn: Callable[[], None], *, force: bool = False) -> None:
-        """Schedule `fn` to run on the Tk thread.
+    def _screen_bounds(self) -> tuple[int, int, int, int]:
+        if _SYSTEM == "windows":
+            import ctypes
+            user32 = ctypes.windll.user32  # type: ignore[attr-defined]
+            return tuple(int(user32.GetSystemMetrics(i)) for i in (76, 77, 78, 79))  # type: ignore[return-value]
+        assert self._root is not None
+        return (0, 0, self._root.winfo_screenwidth(), self._root.winfo_screenheight())
 
-        `force=True` bypasses the `_closed` guard: this is required for the
-        shutdown path itself (see `close()`), otherwise the destroy
-        callback could never be scheduled once `_closed` was set.
-        """
-        if self._root is None:
-            return
+    def _ui(self, fn: Callable[[], None], *, force: bool = False, key: str = "render") -> None:
         if not force and (not self.enabled or self._closed):
             return
-        try:
-            self._root.after(0, fn)
-        except RuntimeError:
-            pass
+        self._mailbox.post("close" if force else key, fn)
 
     def _apply_text_alignment(self, text: str) -> None:
         if not self._label:
@@ -171,7 +192,7 @@ class TranscriptOverlay:
         self._show(text, text_fg="#cdd6f4", status="\u25cf در حال شنیدن...", status_fg="#a6e3a1")
 
     def set_done(self, text: str) -> None:
-        self._show(text, text_fg="#89b4fa", status="\u2713 تایپ شد", status_fg="#89b4fa")
+        self._show(text, text_fg="#89b4fa", status="\u2713 ارسال شد؛ درج را بررسی کنید", status_fg="#89b4fa")
 
     def _show(self, text: str, *, text_fg: str, status: str, status_fg: str) -> None:
         """Render `text` plus its status line from the Tk thread.
@@ -181,12 +202,13 @@ class TranscriptOverlay:
         """
 
         def _() -> None:
-            display = to_display(text) if text else "..."
+            self._render_version += 1
+            display = to_display(text[:8000]) if text else "..."
             self._apply_text_alignment(text or "")
             if self._label:
                 self._label.config(text=display, fg=text_fg)
             if self._status:
-                self._status.config(text=status, fg=status_fg, anchor="e")
+                self._status.config(text=self._warning or status, fg="#f9e2af" if self._warning else status_fg, anchor="e")
 
         self._ui(_)
 
@@ -194,7 +216,7 @@ class TranscriptOverlay:
         def _() -> None:
             if self._label:
                 self._label.config(text="...", fg="#6c7086", anchor="ne")
-            if self._status:
+            if self._status and not self._warning:
                 self._status.config(text="\u25cf آماده", fg="#a6adc8", anchor="e")
 
         self._ui(_)

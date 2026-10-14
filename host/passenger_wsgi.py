@@ -24,10 +24,10 @@ describe an instance that is not the one serving requests.
 
 a2wsgi does not implement the ASGI lifespan protocol, so the app's startup
 log line and its shutdown handler (`grant_client.aclose()`) never run here.
-That is acceptable rather than something to work around: Passenger recycles
-by killing the process, and the OS reclaims the sockets. It is also why the
-capacity gauges and `app.state.grant_client` are built in `create_app` and
-not in `lifespan`.
+A best-effort atexit hook closes the pool on the adapter's own loop during
+normal exit; abrupt Passenger termination relies on OS socket reclamation.
+Capacity gauges and `app.state.grant_client` are built in `create_app`, not
+`lifespan`, so they are still available in this deployment mode.
 
 Passenger configuration (cPanel > Setup Python App):
 
@@ -51,6 +51,8 @@ an error on the first Start press from the clinic.
 from __future__ import annotations
 
 import asyncio
+import atexit
+import logging
 import threading
 from typing import Any, Optional
 
@@ -133,3 +135,20 @@ try:  # pragma: no cover - import-time eager construction by design
     application = _build_application()
 except Exception:  # noqa: BLE001 - Passenger logs the traceback and refuses to boot
     raise
+
+
+def _shutdown_pool() -> None:
+    """Best-effort same-loop close during normal Passenger worker exit."""
+    if _asgi_app is None or _loop_thread._loop is None:
+        return
+    loop = _loop_thread._loop
+    if loop.is_running():
+        try:
+            asyncio.run_coroutine_threadsafe(_asgi_app.state.grant_client.aclose(), loop).result(timeout=3)
+        except Exception:
+            logging.getLogger("medical_stt.host").warning("WSGI pool shutdown incomplete")
+        finally:
+            loop.call_soon_threadsafe(loop.stop)
+
+
+atexit.register(_shutdown_pool)

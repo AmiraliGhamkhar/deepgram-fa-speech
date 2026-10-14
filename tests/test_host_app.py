@@ -276,8 +276,8 @@ def test_unattributable_failed_auth_is_still_limited_per_client_id(monkeypatch, 
         )
         assert response.status_code == 401, response.status_code
 
-    # doctor-01 exhausted its own budget, so even its correct secret is
-    # refused until the window resets...
+    # Correct authentication must bypass the failed-auth budget: an attacker
+    # cannot lock out a clinician simply by claiming the same client id.
     locked = client.post(
         "/v1/session",
         headers={
@@ -286,8 +286,10 @@ def test_unattributable_failed_auth_is_still_limited_per_client_id(monkeypatch, 
         },
         json={},
     )
-    assert locked.status_code == 429
-    assert int(locked.headers["Retry-After"]) >= 1
+    assert locked.status_code == 200
+    rejected = client.post("/v1/session", headers={"Authorization": "Bearer wrong", "X-Client-Id": "doctor-01"}, json={})
+    assert rejected.status_code == 429
+    assert int(rejected.headers["Retry-After"]) >= 1
 
     # ...while a colleague on the same peer-less deployment is unaffected.
     colleague = client.post(
