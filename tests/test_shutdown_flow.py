@@ -254,6 +254,69 @@ def test_send_failure_stops_the_sender_without_losing_the_session(monkeypatch):
     assert [exc.category for exc in raised] == [ErrorCategory.NETWORK]
 
 
+def test_stop_clears_queued_audio_and_partial_injector_state(monkeypatch):
+    from medical_stt import app as app_module
+
+    provider = BlockingProvider()
+    stt, _backend = _build_session(provider, monkeypatch)
+    monkeypatch.setattr(app_module, "SENDER_JOIN_TIMEOUT_SECONDS", 0.15)
+    partials_before_reset: list[str] = []
+    original_reset = stt.injector.reset_partial
+
+    def record_partial_reset() -> None:
+        partials_before_reset.append(stt.injector._last_partial)
+        original_reset()
+
+    monkeypatch.setattr(stt.injector, "reset_partial", record_partial_reset)
+    session = threading.Thread(target=stt._run_session, daemon=True)
+    session.start()
+    try:
+        assert provider.started.wait(timeout=5.0)
+        assert stt._audio_q.put_nowait(b"first")
+        assert provider.first_send_entered.wait(timeout=5.0)
+        # Hold the sender inside send_audio so teardown must discard the
+        # remaining queue, rather than letting the sender drain it normally.
+        capacity = stt._audio_q._q.maxsize
+        for _ in range(capacity):
+            assert stt._audio_q.put_nowait(b"pending")
+        assert stt.audio_queue_stats.depth == capacity
+        stt.injector.type_delta_from_partial("previous-session")
+        assert stt.injector._last_partial == "previous-session"
+
+        stt.request_stop()
+        session.join(timeout=10.0)
+        assert not session.is_alive()
+        assert stt.phase == "idle"
+        assert stt.audio_queue_stats.depth == 0
+        assert stt._utterance._segments == []
+        assert stt.injector._last_partial == ""
+        assert partials_before_reset == ["", "previous-session"]
+    finally:
+        provider.release_sender()
+        stt.request_stop()
+        session.join(timeout=10.0)
+
+
+def test_session_reset_is_called_once_at_start_and_once_at_stop(monkeypatch):
+    provider = BlockingProvider()
+    provider.release_sender()
+    stt, _backend = _build_session(provider, monkeypatch)
+    calls: list[str] = []
+    monkeypatch.setattr(stt, "_reset_session_state", lambda: calls.append(stt.phase))
+
+    session = threading.Thread(target=stt._run_session, daemon=True)
+    session.start()
+    try:
+        assert provider.started.wait(timeout=5.0)
+        stt.request_stop()
+        session.join(timeout=10.0)
+        assert not session.is_alive()
+        assert calls == ["connecting", "stopping"]
+    finally:
+        stt.request_stop()
+        session.join(timeout=10.0)
+
+
 def test_sessions_can_be_started_and_stopped_repeatedly(monkeypatch):
     provider = BlockingProvider()
     provider.release_sender()
