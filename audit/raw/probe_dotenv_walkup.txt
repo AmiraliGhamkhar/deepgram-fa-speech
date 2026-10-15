@@ -1,0 +1,34 @@
+bundle-shaped tree: audit/scratch/dotenv_walkup/install
+child env: every MEDICAL_STT_* / MEDICALSTT_* / DEEPGRAM_* variable stripped
+
+A. baseline: no .env anywhere
+    cwd=/tmp  sys.frozen=True
+    marker loaded        : None
+    app_data_dir()       : /home/user/.config/MedicalSTT
+
+B. .env inside the app folder, launched from another directory
+    cwd=/tmp  sys.frozen=True
+    marker loaded        : dotenv-was-loaded
+    app_data_dir()       : /home/user/deepgram-fa-speech/audit/scratch/dotenv_walkup/redirected_profile
+
+B2. same file, launched from the app folder (double-clicked exe)
+    cwd=/home/user/deepgram-fa-speech/audit/scratch/dotenv_walkup/install  sys.frozen=True
+    marker loaded        : dotenv-was-loaded
+    app_data_dir()       : /home/user/deepgram-fa-speech/audit/scratch/dotenv_walkup/redirected_profile
+
+C. .env in the PARENT of the app folder, launched from the app folder
+    cwd=/home/user/deepgram-fa-speech/audit/scratch/dotenv_walkup/install  sys.frozen=True
+    marker loaded        : dotenv-was-loaded
+    app_data_dir()       : /home/user/deepgram-fa-speech/audit/scratch/dotenv_walkup/redirected_profile
+
+D. same .env, frozen but launched from another directory
+    cwd=/tmp  sys.frozen=True
+    marker loaded        : None
+    app_data_dir()       : /home/user/.config/MedicalSTT
+
+E. same .env, NOT frozen (source checkout), launched from the app folder
+    cwd=/home/user/deepgram-fa-speech/audit/scratch/dotenv_walkup/install  sys.frozen=False
+    marker loaded        : dotenv-was-loaded
+    app_data_dir()       : /home/user/deepgram-fa-speech/audit/scratch/dotenv_walkup/redirected_profile
+
+cleaned up: no .env left in the probe tree

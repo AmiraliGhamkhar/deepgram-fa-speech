@@ -1,0 +1,18 @@
+HOST_METRICS_ADMIN_TOKEN is not set: /metrics is readable by anyone who can reach this port. It exposes no credential and no transcript, but it does expose traffic volume and the number of registered clients.
+HOST_METRICS_ADMIN_TOKEN is not set: /metrics is readable by anyone who can reach this port. It exposes no credential and no transcript, but it does expose traffic volume and the number of registered clients.
+
+=== 50-concurrent-session acceptance criteria ===
+(mocked Deepgram; this is application capacity, not provider latency)
+
+  PASS  50 simultaneous session requests      50/50 ok, 0 x 429
+  PASS  token acquisition p95 < 2s            93.9 ms
+  PASS  event loop free during issuance       0.091s vs 2.50s if serialized
+  PASS  RSS growth within 32 MiB allowance    +0.27 MB over 250 sessions
+  PASS  in-flight grants after requests == 0  in-flight grants = 0
+  PASS  rate limiter state bounded            50 buckets for 50 clients
+
+RESULT: PASS (all application-side criteria met)
+
+Note: this does NOT validate Deepgram's concurrent-stream limit.
+Run the opt-in real-provider test to check that separately:
+  MEDICAL_STT_LOAD_TEST=1 pytest tests/test_live_load.py -m loadtest -s

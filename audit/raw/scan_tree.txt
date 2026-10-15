@@ -1,0 +1,2 @@
+clean: no credentials found in the working tree
+note: 1 baseline entry/entries matched nothing -- the history looks scrubbed. Remove them from secret_scan_baseline.txt so the check stays meaningful.

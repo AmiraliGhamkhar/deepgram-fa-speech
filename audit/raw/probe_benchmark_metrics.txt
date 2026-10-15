@@ -1,0 +1,25 @@
+corpus cases: 22
+
+[1] hypothesis == reference (an exact match must be a perfect score)
+    imperfect metrics on an exact match: 0
+
+[2] hypothesis = apply_processing(reference); negation markers identical?
+    cases losing negation recall to processing: 0 []
+
+[3] Latin tokens carrying punctuation in the corpus references
+    dose_weight_based: token 'mg/kg/day' keeps its punctuation for recall scoring
+    -> 1 token(s)
+
+[4] presentation marks and normalization forms in the hypothesis
+    identical                neg=1.00 num=1.00 wer=0.000 cer=0.000
+    LRM inside a Latin run   neg=1.00 num=1.00 wer=0.000 cer=0.000
+    NFD                      neg=1.00 num=1.00 wer=0.000 cer=0.000
+    Persian digits           neg=1.00 num=1.00 wer=0.125 cer=0.061
+
+[5] truncation guard (documented: '120/8' must not satisfy '120/80')
+     0.0 0.0 1.0
+
+[6] a bare number credited through a Latin run?
+    ref='دوز دکستروز 5 درصد' hyp='D5W' -> num=0.00  spans=['5 درصد']
+    ref='دوز دکستروز 5 درصد' hyp='G5' -> num=0.00  spans=['5 درصد']
+    ref='دوز دکستروز 5 درصد' hyp='5' -> num=0.00  spans=['5 درصد']
