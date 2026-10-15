@@ -39,6 +39,7 @@ log = logging.getLogger("medical_stt.processing.fst")
 class Rule:
     source: str
     target: str
+    numeric_in_source: bool = False
 
 
 @dataclass
@@ -56,6 +57,7 @@ class DeterministicFST:
         self._ready = False
         self._has_words = False
         self._rule_count = 0
+        self._numeric_sources: set[str] = set()
 
     def load(self, rules: Sequence[Rule]) -> LoadResult:
         """Build the automaton from `rules`. Safe to call once; construct a
@@ -63,12 +65,16 @@ class DeterministicFST:
         `make_automaton()` without full rebuild anyway).
         """
         by_source: Dict[str, List[str]] = {}
+        numeric_allowed: Dict[str, bool] = {}
         empty_skipped = 0
         for rule in rules:
             if not rule.source:
                 empty_skipped += 1
                 continue
             by_source.setdefault(rule.source, []).append(rule.target)
+            # Duplicate sources cannot elevate each other's numeric permission.
+            numeric_allowed[rule.source] = numeric_allowed.get(rule.source, True) and rule.numeric_in_source
+        self._numeric_sources = {source for source, allowed in numeric_allowed.items() if allowed}
 
         conflicts: List[Tuple[str, List[str], str]] = []
         for source, targets in by_source.items():
@@ -110,12 +116,14 @@ class DeterministicFST:
         text: str,
         protected_ranges: Sequence[Tuple[int, int]] = (),
         require_word_boundaries: bool = False,
+        numeric_ranges: Sequence[Tuple[int, int]] = (),
     ) -> str:
         """Rewrite `text` using longest-match rules, left to right.
 
         `protected_ranges` is an optional list of (start, end) character
-        spans (e.g. numeric expressions, negation markers) that must not be
-        touched even if a rule would otherwise match inside them.
+        spans (e.g. negation markers) that must not be touched. `numeric_ranges`
+        also blocks matches, except when a rule explicitly opts in and each
+        overlapping numeric span is wholly inside that rule's match.
 
         `require_word_boundaries` additionally drops a match that is glued to
         a word character on either side, so a rule for a whole word cannot
@@ -148,6 +156,29 @@ class DeterministicFST:
             matches = [m for m in matches if not (
                 (index := bisect_right(ends, m[0])) < len(merged) and merged[index][0] < m[1]
             )]
+        if numeric_ranges:
+            merged_numeric: List[Tuple[int, int]] = []
+            for start, end in sorted(numeric_ranges):
+                if merged_numeric and start <= merged_numeric[-1][1]:
+                    merged_numeric[-1] = (merged_numeric[-1][0], max(end, merged_numeric[-1][1]))
+                else:
+                    merged_numeric.append((start, end))
+            numeric_ends = [end for _, end in merged_numeric]
+            allowed: List[Tuple[int, int, str]] = []
+            for match in matches:
+                start, end, _ = match
+                flagged = text[start:end] in self._numeric_sources
+                index = bisect_right(numeric_ends, start)
+                blocked = False
+                while index < len(merged_numeric) and merged_numeric[index][0] < end:
+                    span_start, span_end = merged_numeric[index]
+                    if not flagged or span_start < start or span_end > end:
+                        blocked = True
+                        break
+                    index += 1
+                if not blocked:
+                    allowed.append(match)
+            matches = allowed
         if require_word_boundaries:
             matches = [m for m in matches if _is_whole_word(text, m[0], m[1])]
 

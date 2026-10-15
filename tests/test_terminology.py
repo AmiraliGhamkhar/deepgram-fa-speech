@@ -1,6 +1,9 @@
 """Medical-safety terminology engine tests (task sections 3 & 9)."""
 from __future__ import annotations
 
+import pytest
+
+from medical_stt.config import ConfigError, load_correction_rules_raw
 from medical_stt.processing.terminology import TerminologyEngine, parse_rules
 
 
@@ -42,7 +45,7 @@ def test_numeric_expression_protected_from_terminology_rewrite():
     engine = TerminologyEngine()
     # A deliberately adversarial rule whose source happens to appear inside
     # a numeric expression; it must not fire there.
-    engine.load([_rule("120", "ONE_TWENTY", category="specialty_terminology")])
+    engine.load([_rule("mmHg", "REWRITE_UNIT", category="specialty_terminology")])
     assert engine.apply("BP 120/80 mmHg") == "BP 120/80 mmHg"
 
 
@@ -141,3 +144,65 @@ def test_reload_after_a_dangerous_rule_is_still_skipped():
     assert engine.rule_count == 1
     assert engine.total_rule_count == 2
     assert engine.apply("منفی") == "منفی", "a dangerous rule fired after a reload"
+
+
+def test_dextrose_rewrite_preserves_separate_numeric_dose():
+    engine = TerminologyEngine()
+    engine.load(load_correction_rules_raw())
+    assert engine.apply("تزریق دکستروز 5 درصد در آب 500 ml") == "D5W 500 ml"
+
+
+def test_partial_overlap_of_a_numeric_span_blocks_even_a_flagged_rule():
+    engine = TerminologyEngine()
+    engine.load([_rule("دکستروز 5", "D5", numeric_in_source=True)])
+    assert engine.apply("دکستروز 5") == "D5"
+    # The source matches, but the protected '5 mg' runs past its end.
+    assert engine.apply("دکستروز 5 mg") == "دکستروز 5 mg"
+
+
+def test_numeric_opt_in_cannot_bypass_negation_protection():
+    engine = TerminologyEngine()
+    engine.load([_rule("ندارد 5", "D5", numeric_in_source=True)])
+    assert engine.apply("ندارد 5") == "ندارد 5"
+
+
+@pytest.mark.parametrize("source,target", [
+    ("دکستروز", "D5W"),
+    ("دکستروز 5%", "D10W"),
+    ("دکستروز 10 و 20", "D1020"),
+])
+def test_loader_rejects_numeric_opt_in_without_matching_digit_runs(source, target):
+    with pytest.raises(ConfigError, match="identical digit sequences"):
+        parse_rules([_rule(source, target, numeric_in_source=True)])
+
+
+def test_loader_rejects_unflagged_digit_bearing_span():
+    with pytest.raises(ConfigError, match="numeric_in_source"):
+        parse_rules([_rule("120", "ONE_TWENTY")])
+
+
+def test_numeric_opt_in_requires_a_boolean():
+    with pytest.raises(ConfigError, match="boolean"):
+        parse_rules([_rule("دکستروز 5%", "D5W", numeric_in_source="false")])
+
+
+def test_digit_in_latin_term_without_numeric_span_needs_no_opt_in():
+    engine = TerminologyEngine()
+    engine.load([_rule("لیزر CO2", "CO2 laser")])
+    assert engine.apply("لیزر CO2") == "CO2 laser"
+
+
+@pytest.mark.parametrize("rule", [
+    _rule("دکستروز 5%", "D5W"),
+    _rule("دکستروز 5%", "D10W", numeric_in_source=True),
+])
+def test_yaml_loader_rejects_dead_or_digit_changing_rules(tmp_path, monkeypatch, rule):
+    import yaml
+    from medical_stt import config as config_module
+
+    (tmp_path / "corrections.yaml").write_text(
+        yaml.safe_dump({"rules": [rule]}, allow_unicode=True), encoding="utf-8"
+    )
+    monkeypatch.setattr(config_module, "_DATA_DIR", tmp_path)
+    with pytest.raises(ConfigError, match="numeric_in_source|identical digit sequences"):
+        config_module.load_correction_rules_raw()

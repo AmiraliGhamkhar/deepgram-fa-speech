@@ -1,0 +1,23 @@
+{
+  "icu_admission": "بیمار در ICU بستری شد",
+  "icu_full_phrase_not_partial": "ICU",
+  "mi_history": "بیمار سابقه MI دارد",
+  "ecg_finding": "MI در ECG مشاهده شد",
+  "blood_pressure_numeric_fidelity": "فشار خون بیمار 120/80 mmHg است",
+  "hba1c_percentage_fidelity": "HbA1c برابر 7.2 درصد است",
+  "tka_right_side": "TKA سمت راست",
+  "negation_no_infection": "علائم Infection ندارد",
+  "negation_no_mass_seen": "توده‌ای مشاهده نشد",
+  "negation_rules_out_mi": "MI رد می‌شود",
+  "dose_fidelity_iv": "500 mg IV تجویز شد",
+  "dose_fidelity_mg": "دوز دارو 5 mg است",
+  "fasting_word_not_forced_to_npo": "بیمار از دیشب ناشتا بوده است",
+  "decrease_word_not_forced_to_dc": "بیمار کاهش وزن داشته است",
+  "cbc_lab_order": "درخواست CBC شد",
+  "mixed_measurement_cm": "توده به قطر 2 cm مشاهده شد",
+  "mixed_measurement_ratio": "اندازه ضایعه 10 × 5 mm بود",
+  "persian_digits_preserved_as_value": "فشار خون 120/80 است",
+  "no_medical_terms_plain_sentence": "امروز هوا خوب است",
+  "copd_history": "سابقه COPD دارد",
+  "dvt_finding": "علائم DVT مشاهده شد"
+}

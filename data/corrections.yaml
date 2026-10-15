@@ -26,6 +26,8 @@
 #   requires_context:  true if this rule should only fire when the caller
 #                       opts in (see TerminologyEngine(enable_context_dependent=...))
 #   dangerous:         true if the rule must never be applied automatically
+#   numeric_in_source: false by default; true only for reviewed rules whose
+#                       normalized source and target have identical digit runs
 #
 # Regenerated from the legacy flat from/to list by
 # scripts/classify_corrections.py (see that file for the classification
@@ -2910,24 +2912,28 @@ rules:
   dangerous: false
 - from: تزریق دکستروز 10 درصد در آب
   to: D10W
+  numeric_in_source: true
   category: specialty_terminology
   confidence: high
   requires_context: false
   dangerous: false
 - from: تزریق دکستروز 20 درصد در آب
   to: D20W
+  numeric_in_source: true
   category: specialty_terminology
   confidence: high
   requires_context: false
   dangerous: false
 - from: تزریق دکستروز 5 درصد در آب
   to: D5W
+  numeric_in_source: true
   category: specialty_terminology
   confidence: high
   requires_context: false
   dangerous: false
 - from: تزریق دکستروز 50 درصد در آب
   to: D50W
+  numeric_in_source: true
   category: specialty_terminology
   confidence: high
   requires_context: false
@@ -3282,24 +3288,28 @@ rules:
   dangerous: false
 - from: دکستروز 5 درصد در آب
   to: D5W
+  numeric_in_source: true
   category: specialty_terminology
   confidence: high
   requires_context: false
   dangerous: false
 - from: دکستروز 5 درصد در سالین
   to: D5S
+  numeric_in_source: true
   category: specialty_terminology
   confidence: high
   requires_context: false
   dangerous: false
 - from: دکستروز 5% در آب
   to: D5W
+  numeric_in_source: true
   category: specialty_terminology
   confidence: high
   requires_context: false
   dangerous: false
 - from: دکستروز 5% در سالین
   to: D5S
+  numeric_in_source: true
   category: specialty_terminology
   confidence: high
   requires_context: false

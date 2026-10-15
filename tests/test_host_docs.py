@@ -17,6 +17,8 @@ import re
 from pathlib import Path
 from typing import Set
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 HOST_README = ROOT / "host" / "README.md"
 HOST_ENV_EXAMPLE = ROOT / "host" / ".env.example"
@@ -162,6 +164,30 @@ def test_deprecated_rate_limit_var_is_flagged_not_silently_ignored():
     )
 
 
+# Snapshot of numeric figures with units in the README's capacity section.
+# Includes threshold/prose figures and a few regex-prefix hits (e.g. "50 s"
+# in "50 sessions"); any *new* figure requires an explicit reviewed edit.
+_ALLOWED_CAPACITY_FIGURES = frozenset({
+    "0 ×", "0.37s", "1 s", "2 s", "2.5 s", "250 s", "3 s",
+    "429s", "50\ns", "50 ms", "50 s", "99%",
+})
+_CAPACITY_FIGURE_RE = re.compile(r"\d+(?:[.,]\d+)?\s*(?:ms|s|MB|%|×)")
+
+
+def _capacity_section(text: str) -> str:
+    start = text.index("## Capacity:")
+    end = text.index("\n## Building the Windows application", start)
+    return text[start:end]
+
+
+def _assert_capacity_figures_allowlisted(section: str) -> None:
+    figures = set(_CAPACITY_FIGURE_RE.findall(section))
+    assert figures == _ALLOWED_CAPACITY_FIGURES, (
+        f"capacity figures changed: new={sorted(figures - _ALLOWED_CAPACITY_FIGURES)}, "
+        f"missing={sorted(_ALLOWED_CAPACITY_FIGURES - figures)}"
+    )
+
+
 def test_readme_capacity_numbers_point_at_the_harness():
     """The README must not quote measurements it cannot keep current.
 
@@ -178,6 +204,14 @@ def test_readme_capacity_numbers_point_at_the_harness():
     )
     for stale in ("< 0.01s", "+0.65 mb"):
         assert stale not in lowered, f"README still quotes the stale figure {stale!r}"
+    _assert_capacity_figures_allowlisted(_capacity_section(text))
+
+
+def test_capacity_allowlist_detects_a_new_figure():
+    section = _capacity_section(ROOT_README.read_text(encoding="utf-8"))
+    _assert_capacity_figures_allowlisted(section)
+    with pytest.raises(AssertionError, match="713 ms"):
+        _assert_capacity_figures_allowlisted(section + "\nNew measured p95: 713 ms.\n")
 
 
 # -- the cPanel/Passenger guide ------------------------------------------

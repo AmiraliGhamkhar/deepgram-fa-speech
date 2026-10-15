@@ -3,6 +3,7 @@ checked for semantic preservation, not exact string equality (task section
 9 & 18)."""
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import List
@@ -145,3 +146,22 @@ def test_no_keyterm_welds_latin_onto_a_persian_word(engine, opt_in_engine, opt_i
 
 def test_corpus_is_non_trivial():
     assert len(CASES) >= 15
+
+
+DEXTROSE_CASES = [case for case in CASES if "persian_digits_input" in case]
+
+
+@pytest.mark.parametrize("case", DEXTROSE_CASES, ids=[c["id"] for c in DEXTROSE_CASES])
+def test_each_dextrose_rule_rewrites_ascii_and_persian_digits(engine, case):
+    assert len(DEXTROSE_CASES) == 8
+    assert _process(engine, case["input"]) == case["expected"]
+    assert _process(engine, case["persian_digits_input"]) == case["expected"]
+
+
+def test_original_non_dextrose_corpus_is_byte_identical(engine):
+    # Captured from the 21 original cases before the numeric-rule opt-in.
+    baseline = json.loads((FIXTURES.parent / "medical_regression_baseline.json").read_text(encoding="utf-8"))
+    unaffected = [case for case in CASES if "دکستروز" not in normalize(case["input"])]
+    assert {case["id"] for case in unaffected} == set(baseline)
+    for case in unaffected:
+        assert _process(engine, case["input"]) == baseline[case["id"]], case["id"]

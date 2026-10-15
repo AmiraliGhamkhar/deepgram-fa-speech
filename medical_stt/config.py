@@ -20,6 +20,7 @@ import tempfile
 import logging
 import os
 import re
+import sys
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -117,6 +118,20 @@ def _valid_client_id(value: str) -> bool:
     return all(ch.isalnum() or ch in "-_." for ch in value)
 
 
+_ASR_BLOCKED_TOKENS = frozenset({
+    "mg", "mcg", "µg", "g", "kg", "ml", "l", "cc", "iu", "meq", "mmol", "mmhg",
+    "iv", "im", "po", "sc", "hr", "bid", "tid", "qid", "prn", "npo",
+    # These extra Latin clinical terms occur in data/corrections.yaml.
+    "icu", "ecg", "mi", "diabetes", "hypertension",
+})
+_ASR_BLOCKED_TOKENS = frozenset(token.casefold() for token in _ASR_BLOCKED_TOKENS)
+_ASR_LATIN_TOKEN_RE = re.compile(r"(?<!\w)[A-Za-zµμ]+(?!\w)")
+
+
+def _has_blocked_asr_token(text: str) -> bool:
+    return any(match.group().casefold() in _ASR_BLOCKED_TOKENS for match in _ASR_LATIN_TOKEN_RE.finditer(text))
+
+
 def _contains_non_ascii_letter(text: str) -> bool:
     """True if `text` contains a Persian/Arabic (non-ASCII) letter.
 
@@ -170,8 +185,10 @@ def validate_model_language(model: str, language: str) -> List[str]:
     return errors
 
 
-load_dotenv(_ROOT / ".env")
-load_dotenv()
+if not getattr(sys, "frozen", False):
+    _env_path = _ROOT / ".env"
+    if load_dotenv(_env_path, override=False):
+        log.info("loaded .env from %s", _env_path)
 
 
 class ConfigError(ValueError):
@@ -682,18 +699,17 @@ def load_asr_replacements() -> List[str]:
         # remain protected locally during all terminology operations.
         if any(ch.isdigit() for ch in source + target) or ":" in source + target:
             raise ConfigError("ASR replacements cannot contain digits or ':'")
-        # A fix for a Persian/Arabic *spelling* must not introduce a
-        # Latin/English term or a unit in the target: those are owned by
-        # data/corrections.yaml, where `requires_context`/`dangerous`
-        # metadata and human review apply. A provider-side `replace` would
-        # bypass that review and rewrite the transcript verbatim. ASCII-only
-        # placeholder pairs (purely alphanumeric, no non-ASCII source) stay
-        # allowed so tooling/tests are not needlessly constrained.
-        if _contains_non_ascii_letter(source) and any(
-            (ch.isascii() and ch.isalpha()) or ch == "%" for ch in target
+        # Provider-side replacements bypass local clinical review: check
+        # units/abbreviations on BOTH sides, even for ASCII-only pairs.
+        # Keep the stricter no-Latin-target rule for Persian spelling fixes;
+        # benign ASCII placeholders still work if neither side is clinical.
+        if (
+            "%" in source or "%" in target
+            or _has_blocked_asr_token(source) or _has_blocked_asr_token(target)
+            or (_contains_non_ascii_letter(source) and any(ch.isascii() and ch.isalpha() for ch in target))
         ):
             raise ConfigError(
-                f"ASR replacement {source!r} -> {target!r} introduces a "
+                f"ASR replacement {source!r} -> {target!r} contains a "
                 "Latin/English term or unit; those belong in "
                 "data/corrections.yaml where the category/context guards apply"
             )
@@ -722,7 +738,11 @@ def load_correction_rules_raw() -> List[Dict[str, Any]]:
         return []
     if not isinstance(rules, list):
         raise ConfigError("data/corrections.yaml 'rules' must be a list")
-    return [r for r in rules if isinstance(r, dict)]
+    raw_rules = [r for r in rules if isinstance(r, dict)]
+    from .processing.terminology import parse_rules
+
+    parse_rules(raw_rules)  # fail at load time, including for legacy flat callers
+    return raw_rules
 
 
 def load_correction_rules() -> List[Tuple[str, str]]:
