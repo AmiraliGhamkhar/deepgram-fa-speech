@@ -20,6 +20,7 @@ import tempfile
 import logging
 import os
 import re
+import sys
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -170,8 +171,10 @@ def validate_model_language(model: str, language: str) -> List[str]:
     return errors
 
 
-load_dotenv(_ROOT / ".env")
-load_dotenv()
+if not getattr(sys, "frozen", False):
+    _env_path = _ROOT / ".env"
+    if load_dotenv(_env_path, override=False):
+        log.info("loaded .env from %s", _env_path)
 
 
 class ConfigError(ValueError):
