@@ -1,0 +1,8 @@
+== 1. as shipped ==
+client: refused: ProviderError: host redirected the session request: host attempted a redirect (HTTP 302); refusing to send credentials anywhere else (configured host: http://127.0.0.1:35871)
+requests seen by the redirect target: 0
+
+== 2. shipping opener rebuilt WITHOUT _NoRedirectHandler (M11) ==
+client: returned a session: access_token='attacker-issued-token'
+requests seen by the redirect target: 1
+   target received: {'path': '/v1/session', 'authorization': 'Bearer <placeholder>', 'x_client_id': 'doctor-01', 'method': 'GET'}

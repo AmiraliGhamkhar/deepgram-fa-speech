@@ -1,0 +1,64 @@
+unit,path,lines,total_lines,method,evidence,notes
+U1,host/core.py,1-987,987,read-full,,"HostSettings.from_env, ClientRegistry, authenticate_client, TokenBucketRateLimiter, request_is_secure, grant helper"
+U1,host/app.py,1-583,583,read-full,,"middleware (secure/limit/body cap/outcome accounting), /metrics auth, /v1/session auth-limits-body-TTL-grant, main()"
+U1,host/metrics.py,1-340,340,read-full,,"declared series, bounded label cardinality, cumulative histogram + quantiles, Prometheus render, new_metrics"
+U1,host/passenger_wsgi.py,full,~90,read-full,,a2wsgi bridge + dedicated loop
+U1,host/provision.py,full,246,read-full,,"SECRET_BYTES=32, MAX_COUNT, MAX_PREFIX_LENGTH=55, write modes"
+U2,medical_stt/host_client.py,1-277,277,read-full,,"_NoRedirectHandler, _parse_retry_after, TLS/host validation, error mapping"
+U2,medical_stt/security/secret_store.py,full,~200,read-full,,DPAPI + file fallback
+U2,medical_stt/security/dpapi.py,full,205,read-full+static-only,,"Win32 branch not executable here (platform: windows-only)"
+U2,medical_stt/config.py,1-738,738,read-full,,"validators, _load_yaml cache, _reject_plaintext_secrets, save_host_credentials, validate_settings, get_settings, keyterms, load_asr_replacements, and the import-time load_dotenv calls (F-08)"
+U2,medical_stt/paths.py + app_instance.py,full,~90,read-full,,
+U2,.env.example + config/settings.yaml,full,~120,read-full,,"F-08 (doc claim), C39-style drift check"
+U3,medical_stt/processing/normalize.py,full,189,read-full,,
+U3,medical_stt/processing/terminology.py,full,~230,read-full,,"numeric/negation protection at 150-154 (F-02)"
+U3,medical_stt/processing/numbers.py,full,~200,read-full,,
+U3,medical_stt/processing/negation.py,full,~150,read-full,,"marker list + find_negation_spans read in full"
+U3,medical_stt/processing/fst.py,full,229,read-full,,longest-match scan (M1/M2)
+U3,medical_stt/processing/bidi.py + confidence.py,full,~200,read-full,,
+U3,data/corrections.yaml,"census + all digit-bearing entries",5058,skimmed-through-probes,"audit/repro/probe_rules.py / probe_active.py / probe_dead_rules.py; the 5,058-line rule file was never read line-by-line",
+U3,data/asr_replacements.yaml + data/keyterms*,full,~90,read-full,,
+U4,medical_stt/injection/text_injector.py,1-242,242,read-full,,"paste/type paths, normalize_injected_whitespace (used by benchmarks, C29)"
+U4,medical_stt/injection/backend.py,full,~120,read-full,,
+U4,medical_stt/injection/_windows_backend.py,1-415,415,read-full+static-only,,"SendInput/clipboard ABI unverified (platform: windows-only)"
+U4,medical_stt/injection/_fallback_backend.py,full,~90,read-full,,pyautogui/pyperclip path
+U5,medical_stt/app.py,1-961,961,read-full,,"this round: 1-490 and 545-690 (session lifecycle, generation guards, heartbeat, sender, teardown) on top of 490-560 and 690-760"
+U5,medical_stt/stt/base.py + accumulator.py,full,~350,read-full,,
+U5,medical_stt/stt/reconnect.py,full,~200,read-full,,"Retry-After clamp/floor (M10/M15, F-06)"
+U5,medical_stt/stt/deepgram_provider.py,full,578,read-full,,"close-code classification, KeepAlive, attribution tag/extra (C36)"
+U5,medical_stt/stt/runner.py,1-80,80,read-full,,"diagnostic harness; provider reuse and bounded shutdown checked (C31)"
+U5,medical_stt/audio/queue.py + audio/__init__.py,full,~250,read-full,,"drop counters, degraded/recovered streaks (M18)"
+U5,medical_stt/ui/control.py,1-446,446,read-full,,
+U5,medical_stt/ui/overlay.py,1-242,242,read-full,,"this round: follow tick, work-area bounds, mailbox, close ordering (C32)"
+U5,medical_stt/ui/dispatch.py,full,~80,read-full,,
+U6,host/Dockerfile + host/.env.example + host/requirements.txt,full,~120,read-full,,"healthcheck scheme logic, non-root user, runtime-only key"
+U6,docs/CPANEL_HOSTING.md,"sections 1-5, 7, 8",~380,partial,"forwarded-proto table verified against host/core.py::request_is_secure; later sections skimmed"
+U6,host/README.md,skimmed,~200,partial,,"env-var table cross-checked by tests/test_host_docs.py; concurrency section read (C36)"
+U7,.github/workflows/ci.yml,1-214,214,read-full,,
+U7,.gitleaks.toml,full,~60,read-full,,
+U7,scripts/scan_secrets.py,1-340,340,read-full,,"patterns (including the host-credential assignment rule), *.secret rule, baseline, --strict, exit codes"
+U7,scripts/secret_scan_baseline.txt,full,12,read-full,,F-07
+U7,scripts/scrub_history.py,1-288,288,read-full,,"this round: backup/refuse-overwrite, tree filter, reflog expire, re-scan, redaction of findings (C33); not executed (R3)"
+U7,scripts/build_windows.ps1,1-182,182,read-full,,"this round: UPX refusal, scanner+pytest+selftest gates, Nuitka flags, bundle checks, manifest write (F-09)"
+U7,scripts/measure_capacity.py,1-230,230,read-full,,"executed (B5)"
+U7,SECURITY.md,1-120,120,read-full,,"key incident + revocation steps; no values quoted (R2)"
+U7,requirements*.txt + host/requirements*.txt,full,~60,read-full,,ranges not a lockfile; python-dotenv is a runtime dependency (F-08)
+U8,benchmarks/metrics.py,1-367,367,read-full,,"this round: edit distance, WER/CER, numeric-expression guard, negation/term recall, corpus aggregation"
+U8,benchmarks/run_benchmark.py,1-243,243,read-full,,"this round: offline scoring path, --apply-processing, live-mode gate (C29/C30)"
+U8,benchmarks/corpus.yaml,head + PHI sweep,175,partial,,"22 cases; no patient-identifying content"
+U8,docs/PERFORMANCE_FIXES.md,1-111,111,read-full,,F1-F13 remediation claims (regression table source)
+U8,docs/PERFORMANCE_AUDIT.md,1-341,341,read-full,,pre-change analysis (historical)
+U8,docs/DEEPGRAM_CONCURRENCY_ANALYSIS.md,summary + 3.2 + remediation table,~460,partial,,"F1-F8 remediation claims verified against code/tests (C36)"
+U8,docs/PERFORMANCE_AUDIT_REPRODUCTION.md,headings + probe inventory,318,partial,,
+U8,docs/WINDOWS_POWERSHELL.md,headings + command sweep,~330,partial,,"build/signing/self-signed-cert procedures; no dangerous download-and-run pattern found"
+U8,README.md,capacity + config + verification sections,978,partial,"740-800 and the capacity table read exactly; other sections skimmed"
+U8,tests/test_audit_fixes.py,"1-150",~400,partial,"redirect/3xx/limits regressions; the rest mapped by rg -n 'def test_'"
+U8,tests/test_host_docs.py,test map + 160-290,~290,partial,,F-04
+U8,tests/test_config_docs.py,1-80,~120,partial,,
+U8,tests/ (all other files; 46 test modules total),sampled via targeted rg,~10000,skimmed,,"mutation testing (20 mutants) is the strength signal for the rest"
+U8,run.py / medical_stt/__init__.py,full,10,read-full,,
+SKIPPED,Windows-only native paths,-,-,not-run,,"DPAPI round trip, named mutex, SendInput, Win32 clipboard, UIPI/elevated targets, PowerShell build (R5: static only, Medium confidence cap)"
+SKIPPED,gitleaks / pip-audit / bandit,-,-,not-run,,not installable in this sandbox; CI runs them
+SKIPPED,coverage run (--cov),-,-,not-run,,unbounded runtime; CI runs it
+SKIPPED,all live/network paths,-,-,not-run,,"R3: no MEDICAL_STT_* / DEEPGRAM_API_KEY / MEDICALSTT_HOST_* variable set; only 127.0.0.1 loopback servers were used"
+SKIPPED,git history rewrite / scrub modes / build_windows.ps1 / --interactive injection check,-,-,not-run,,forbidden by R3

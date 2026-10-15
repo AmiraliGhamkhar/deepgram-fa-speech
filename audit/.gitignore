@@ -1,0 +1,4 @@
+# Local toolchain and throwaway copies: never part of the audit result.
+.venv/
+scratch/
+__pycache__/
