@@ -452,6 +452,20 @@ def test_retry_after_still_wins_over_a_smaller_backoff():
     assert decision.delay_seconds == 9.0
 
 
+def test_retry_after_is_bounded_by_the_policy_ceiling():
+    from medical_stt.stt.base import ErrorCategory, ProviderError
+    from medical_stt.stt.reconnect import ReconnectPolicy, decide
+
+    policy = ReconnectPolicy(jitter=0.0)
+    assert policy.max_retry_after_seconds == 60.0
+    for hint in (3600.0, 600.0):
+        decision = decide(
+            policy, ProviderError(ErrorCategory.RATE_LIMIT, "slow", retry_after=hint), attempt=1
+        )
+        assert decision.honored_retry_after is True
+        assert 0 < decision.delay_seconds <= policy.max_retry_after_seconds
+
+
 # -- 11-F1: as_dict() never serializes the secret ---------------------------
 
 
