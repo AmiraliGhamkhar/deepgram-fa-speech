@@ -133,3 +133,59 @@ cases:
     input: "علائم دی وی تی مشاهده شد"
     must_contain: ["DVT"]
     must_not_contain: []
+
+  - id: dextrose_injection_10_water
+    input: "تزریق دکستروز 10 درصد در آب"
+    persian_digits_input: "تزریق دکستروز ۱۰ درصد در آب"
+    expected: "D10W"
+    must_contain: ["D10W"]
+    must_not_contain: ["دکستروز"]
+
+  - id: dextrose_injection_20_water
+    input: "تزریق دکستروز 20 درصد در آب"
+    persian_digits_input: "تزریق دکستروز ۲۰ درصد در آب"
+    expected: "D20W"
+    must_contain: ["D20W"]
+    must_not_contain: ["دکستروز"]
+
+  - id: dextrose_injection_5_water
+    input: "تزریق دکستروز 5 درصد در آب"
+    persian_digits_input: "تزریق دکستروز ۵ درصد در آب"
+    expected: "D5W"
+    must_contain: ["D5W"]
+    must_not_contain: ["دکستروز"]
+
+  - id: dextrose_injection_50_water
+    input: "تزریق دکستروز 50 درصد در آب"
+    persian_digits_input: "تزریق دکستروز ۵۰ درصد در آب"
+    expected: "D50W"
+    must_contain: ["D50W"]
+    must_not_contain: ["دکستروز"]
+
+  - id: dextrose_5_water
+    input: "دکستروز 5 درصد در آب"
+    persian_digits_input: "دکستروز ۵ درصد در آب"
+    expected: "D5W"
+    must_contain: ["D5W"]
+    must_not_contain: ["دکستروز"]
+
+  - id: dextrose_5_saline
+    input: "دکستروز 5 درصد در سالین"
+    persian_digits_input: "دکستروز ۵ درصد در سالین"
+    expected: "D5S"
+    must_contain: ["D5S"]
+    must_not_contain: ["دکستروز"]
+
+  - id: dextrose_5_percent_water
+    input: "دکستروز 5% در آب"
+    persian_digits_input: "دکستروز ۵% در آب"
+    expected: "D5W"
+    must_contain: ["D5W"]
+    must_not_contain: ["دکستروز"]
+
+  - id: dextrose_5_percent_saline
+    input: "دکستروز 5% در سالین"
+    persian_digits_input: "دکستروز ۵% در سالین"
+    expected: "D5S"
+    must_contain: ["D5S"]
+    must_not_contain: ["دکستروز"]

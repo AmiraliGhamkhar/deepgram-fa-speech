@@ -725,7 +725,11 @@ def load_correction_rules_raw() -> List[Dict[str, Any]]:
         return []
     if not isinstance(rules, list):
         raise ConfigError("data/corrections.yaml 'rules' must be a list")
-    return [r for r in rules if isinstance(r, dict)]
+    raw_rules = [r for r in rules if isinstance(r, dict)]
+    from .processing.terminology import parse_rules
+
+    parse_rules(raw_rules)  # fail at load time, including for legacy flat callers
+    return raw_rules
 
 
 def load_correction_rules() -> List[Tuple[str, str]]:
