@@ -135,8 +135,9 @@ if (Test-Path $DistDir) { Remove-Item -Recurse -Force $DistDir }
 Move-Item $builtFolder $DistDir
 
 # Record resolved package names/versions (no index URLs or credentials).
-& $Python -m pip list --format=json | Set-Content -Encoding UTF8 (Join-Path $DistDir "dependency-versions.json")
+$json = (& $Python -m pip list --format=json) -join "`n"
 if ($LASTEXITCODE -ne 0) { throw "Could not record release dependency versions." }
+[IO.File]::WriteAllText((Join-Path $DistDir "dependency-versions.json"), "$json`n", [Text.UTF8Encoding]::new($false))
 
 Write-Host "==> Build complete: $DistDir" -ForegroundColor Green
 
