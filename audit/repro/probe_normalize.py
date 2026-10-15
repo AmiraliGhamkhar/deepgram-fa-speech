@@ -2,7 +2,7 @@ import sys
 sys.path.insert(0, ".")
 from medical_stt.processing.normalize import normalize
 from medical_stt.processing.numbers import find_numeric_spans
-from medical_stt.config import load_correction_rules_raw, load_asr_replacements
+from medical_stt.config import load_correction_rules_raw
 from medical_stt.processing.terminology import TerminologyEngine
 
 CASES = [

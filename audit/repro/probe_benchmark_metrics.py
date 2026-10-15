@@ -2,14 +2,16 @@
 
 Report-only probe. No network, no credentials, no opt-in env vars.
 """
-import sys, unicodedata, re
+import sys
+import unicodedata
+import re
 from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
-import yaml
-from benchmarks import metrics as M
-from benchmarks.run_benchmark import apply_processing
-from medical_stt.processing.numbers import find_numeric_spans
+import yaml  # noqa: E402  (after sys.path setup, like benchmarks/run_benchmark.py)
+from benchmarks import metrics as M  # noqa: E402  (after sys.path setup, like benchmarks/run_benchmark.py)
+from benchmarks.run_benchmark import apply_processing  # noqa: E402  (after sys.path setup, like benchmarks/run_benchmark.py)
+from medical_stt.processing.numbers import find_numeric_spans  # noqa: E402  (after sys.path setup, like benchmarks/run_benchmark.py)
 
 corpus = yaml.safe_load((ROOT / "benchmarks/corpus.yaml").read_text(encoding="utf-8"))
 cases = corpus["cases"]

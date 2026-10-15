@@ -1,4 +1,4 @@
-import sys, collections
+import sys
 sys.path.insert(0, ".")
 from medical_stt.config import load_correction_rules_raw
 from medical_stt.processing.terminology import parse_rules, TerminologyEngine

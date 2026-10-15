@@ -1,4 +1,5 @@
-import sys, json, collections
+import sys
+import collections
 sys.path.insert(0, ".")
 from medical_stt.config import load_correction_rules_raw
 from medical_stt.processing.terminology import TerminologyEngine, parse_rules

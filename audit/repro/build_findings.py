@@ -1,5 +1,6 @@
 """Emit audit/findings.jsonl. Report-only: writes only under audit/."""
-import hashlib, json
+import hashlib
+import json
 from pathlib import Path
 
 COMMIT = "83dc32c9d43cac62cd80c08642219de9d57db52a"

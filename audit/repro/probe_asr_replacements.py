@@ -1,6 +1,8 @@
 """Does load_asr_replacements() enforce the README's 'no units / no English
 targets' claim for ASCII-only source pairs?"""
-import sys, tempfile, pathlib
+import sys
+import tempfile
+import pathlib
 sys.path.insert(0, ".")
 import medical_stt.config as cfg
 

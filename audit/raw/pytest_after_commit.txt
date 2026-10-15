@@ -1,0 +1,64 @@
+........................................................................ [  8%]
+........................................................................ [ 17%]
+........................................................................ [ 26%]
+........................................................................ [ 35%]
+........................................................................ [ 44%]
+........................................................................ [ 52%]
+........................................................................ [ 61%]
+......................ss.s.............................................. [ 70%]
+........................................................................ [ 79%]
+........................................................................ [ 88%]
+.........................s.............................................. [ 96%]
+.........................                                                [100%]
+=============================== warnings summary ===============================
+audit/.venv/lib/python3.11/site-packages/fastapi/testclient.py:1
+  /home/user/deepgram-fa-speech/audit/.venv/lib/python3.11/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+
+---------- coverage: platform linux, python 3.11.2-final-0 -----------
+Name                                         Stmts   Miss  Cover   Missing
+--------------------------------------------------------------------------
+medical_stt/__init__.py                          1      0   100%
+medical_stt/app.py                             594    125    79%   78-86, 102-105, 109-110, 114, 119-132, 150, 291-292, 294-295, 302-304, 307-312, 333, 491-493, 526, 551-552, 555-557, 559-562, 567-570, 583-587, 592-593, 603-604, 641-642, 661, 663, 676-677, 694-697, 727, 735, 753-755, 762, 797, 805, 808, 811-812, 824, 837, 870, 882-901, 905-919, 931-957, 961
+medical_stt/app_instance.py                     80     21    74%   34-36, 61-70, 79-81, 105-112
+medical_stt/audio/__init__.py                    2      0   100%
+medical_stt/audio/queue.py                      96      0   100%
+medical_stt/config.py                          341     29    91%   116, 288, 292-293, 310, 390-394, 408, 413, 425-426, 450, 453-454, 462, 495, 499, 505, 525, 546, 594, 596, 611, 613, 626, 665, 671, 722
+medical_stt/host_client.py                     106     15    86%   95-99, 134, 168, 177, 187-188, 242, 256, 266-267, 269
+medical_stt/injection/__init__.py                3      0   100%
+medical_stt/injection/_fallback_backend.py      47      9    81%   28, 39-42, 57, 63, 68, 71-72
+medical_stt/injection/_windows_backend.py      270    121    55%   148-151, 155-159, 181, 197-218, 221-230, 233-240, 245, 248-252, 256-281, 293-297, 300-319, 326, 332-354, 357, 361-373, 390, 392, 403
+medical_stt/injection/backend.py                53      5    91%   101, 111, 118-120, 132
+medical_stt/injection/text_injector.py         123      9    93%   78-80, 100, 156-157, 159-160, 182, 241
+medical_stt/paths.py                            32      6    81%   34-37, 62, 66
+medical_stt/processing/__init__.py               0      0   100%
+medical_stt/processing/bidi.py                  49      1    98%   91
+medical_stt/processing/confidence.py            42      2    95%   47, 51
+medical_stt/processing/fst.py                  106      8    92%   106, 144, 176, 218-222
+medical_stt/processing/negation.py              20      1    95%   96
+medical_stt/processing/normalize.py             60      0   100%
+medical_stt/processing/numbers.py               37      0   100%
+medical_stt/processing/terminology.py           71      2    97%   54, 58
+medical_stt/security/__init__.py                 3      0   100%
+medical_stt/security/dpapi.py                   68     37    46%   54, 74-102, 106, 113-114, 120, 124-129, 139-158, 173-194, 201, 204
+medical_stt/security/secret_store.py            71     13    82%   53, 65-66, 79-85, 95-96, 115-116
+medical_stt/stt/__init__.py                      3      0   100%
+medical_stt/stt/accumulator.py                  62      2    97%   27, 36
+medical_stt/stt/base.py                         60      0   100%
+medical_stt/stt/deepgram_provider.py           296     55    81%   121-127, 129, 145-146, 247-253, 256-260, 271-289, 314-315, 334-335, 368, 413-414, 431-433, 442-443, 452-457, 490-498, 515, 577
+medical_stt/stt/reconnect.py                    53      1    98%   132
+medical_stt/stt/runner.py                       53     20    62%   28, 35-36, 41-44, 53-58, 60, 63, 65, 76-78, 80
+medical_stt/ui/__init__.py                       3      0   100%
+medical_stt/ui/control.py                      304    177    42%   34, 99-100, 107-110, 115, 151-158, 166-168, 171-251, 256, 259-266, 272-275, 279, 284-287, 292-297, 301, 311-312, 316-325, 331, 341, 344-346, 353-371, 376, 381-404, 407-429, 433-446
+medical_stt/ui/dispatch.py                      29      1    97%   42
+medical_stt/ui/overlay.py                      174    108    38%   24-25, 31-41, 45-53, 78-85, 88-131, 134-136, 140-142, 146-168, 171-176, 184-189, 205-211, 217-220, 237-238
+--------------------------------------------------------------------------
+TOTAL                                         3312    768    77%
+
+=========================== short test summary info ============================
+SKIPPED [2] tests/test_live_deepgram.py:43: live Deepgram integration test disabled; set MEDICAL_STT_LIVE_TEST=1 (plus MEDICALSTT_HOST_URL/MEDICALSTT_HOST_SECRET) to run it
+SKIPPED [1] tests/test_live_load.py:61: set MEDICAL_STT_LOAD_TEST=1 and select -m loadtest to run the real Deepgram load test
+SKIPPED [1] tests/test_soak.py:138: set MEDICAL_STT_SOAK=1 to run the soak
+813 passed, 4 skipped, 1 warning in 48.53s

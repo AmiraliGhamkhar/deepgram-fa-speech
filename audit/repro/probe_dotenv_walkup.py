@@ -11,7 +11,11 @@ opt-in variable is set and no network call is made. The driver is a *script
 file*, not `python -c`, because python-dotenv treats a `__main__` without
 `__file__` as interactive and switches to a cwd-based search.
 """
-import os, shutil, subprocess, sys, textwrap
+import os
+import shutil
+import subprocess
+import sys
+import textwrap
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
