@@ -169,9 +169,22 @@ if (-not $SkipVerify) {
 
     # --version writes to %APPDATA%\MedicalSTT\logs\app.log and exits 0,
     # which proves the bundle starts with no console and no Python.
-    & $exe --version
-    if ($LASTEXITCODE -ne 0) {
-        throw "The built executable did not start correctly (exit $LASTEXITCODE)."
+    #
+    # Start-Process -Wait is deliberate: the exe is a GUI-subsystem binary
+    # (--windows-console-mode=disable), and PowerShell does NOT wait for
+    # GUI apps launched with `&` -- $LASTEXITCODE would stay stale (usually
+    # 0 from an earlier command) even if the exe fails to start. The
+    # log-growth check then proves the process really ran our code.
+    $logPath = Join-Path $env:APPDATA "MedicalSTT\logs\app.log"
+    $logSizeBefore = if (Test-Path $logPath) { (Get-Item $logPath).Length } else { [long]-1 }
+    $proc = Start-Process -FilePath $exe -ArgumentList "--version" -Wait -PassThru
+    if ($proc.ExitCode -ne 0) {
+        throw "The built executable did not start correctly (exit $($proc.ExitCode))."
+    }
+    $logSizeAfter = if (Test-Path $logPath) { (Get-Item $logPath).Length } else { [long]-1 }
+    if ($logSizeAfter -le $logSizeBefore) {
+        throw ("The executable exited 0 but appended nothing to $logPath; " +
+               "the bundle did not actually run.")
     }
     Write-Host "==> Bundle verified" -ForegroundColor Green
 }

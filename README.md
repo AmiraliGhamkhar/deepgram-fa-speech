@@ -307,6 +307,11 @@ See `docs/WINDOWS_POWERSHELL.md` for the full procedure.
 This produces **`dist\MedicalSTT\`** — a complete folder that runs on a
 clean Windows 10/11 machine with **zero Python installed**.
 
+CI builds the same bundle on every push: the `windows-build` job runs
+`scripts\build_windows.ps1` on a `windows-latest` runner and uploads
+`dist\MedicalSTT\` as the **`MedicalSTT-windows`** workflow artifact
+(unsigned — signing remains a manual post-build step).
+
 The script, in order:
 
 1. refuses to run with `--upx`;
@@ -851,7 +856,7 @@ to guess from a green badge:
 | DPAPI secret store, named mutex, `SendInput` injection | `windows-check` CI job on `windows-latest` (real `CryptProtectData` round-trip, real mutex acquisition/refusal/release, backend load) plus `scripts/windows_selftest.py`, which `scripts/build_windows.ps1` runs before packaging | verified on Windows CI; **not** verifiable in a Linux development environment |
 | Live Deepgram streaming | `tests/test_live_deepgram.py`, opt-in via `MEDICAL_STT_LIVE_TEST=1` | **not run here** (needs real credentials) |
 | Transcription accuracy / WER | `benchmarks/run_benchmark.py` with your audio | **no numbers measured here** |
-| Windows installer / signed EXE | `scripts/build_windows.ps1` on a Windows machine | **not run here** (the script is not executed by CI; only its Windows checks are) |
+| Windows build (`MedicalSTT.exe`) | `windows-build` CI job runs `scripts/build_windows.ps1` on `windows-latest` (Nuitka compile + the script's post-build bundle verification) and uploads `dist\MedicalSTT\` as the `MedicalSTT-windows` artifact | verified on every push; **unsigned** — code signing is a manual post-build step |
 
 ---
 

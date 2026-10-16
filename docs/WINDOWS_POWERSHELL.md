@@ -108,6 +108,12 @@ Both produce `dist\MedicalSTT\MedicalSTT.exe` plus its support folder — copy
 the whole folder to the target machine. Neither bakes in any credential:
 verify with `python scripts\scan_secrets.py` (must print `clean`).
 
+> **CI also builds it.** Every push runs the `windows-build` job
+> (`.github/workflows/ci.yml`), which executes `scripts\build_windows.ps1`
+> on a `windows-latest` runner and uploads `dist\MedicalSTT\` as the
+> **`MedicalSTT-windows`** workflow artifact. That artifact is *unsigned*;
+> sign it before distributing (see "Optional: sign the executable" below).
+
 What the script does, in order:
 
 1. **Refuses `--upx`** — packed binaries trip antivirus heuristics and

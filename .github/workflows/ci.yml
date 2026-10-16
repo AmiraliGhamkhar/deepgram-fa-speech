@@ -173,6 +173,59 @@ jobs:
           }
           exit $code
 
+  windows-build:
+    name: Windows build (MedicalSTT.exe)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    # Builds the real distributable with scripts/build_windows.ps1 (Nuitka
+    # standalone) on every push, so a verifiable MedicalSTT.exe exists per
+    # change instead of trusting the last local build. The script is the
+    # single build definition: it refuses UPX, secret-scans the tree, runs
+    # the full test suite and windows_selftest, compiles, and post-verifies
+    # the bundle (exe starts and writes its log, libportaudio*.dll landed,
+    # config\ and data\ are bundled). Signing stays manual -- see README >
+    # Code signing -- so this artifact is expected to be UNSIGNED.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        # host/requirements-dev.txt too: build_windows.ps1 runs the WHOLE
+        # tests/ tree as a build gate, and the host suites would otherwise
+        # be silently skipped by importorskip (same reasoning as the `test`
+        # job's install step).
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt -r host/requirements-dev.txt
+
+      - name: Preflight (tkinter overlay + sounddevice import)
+        # Fails with a clear annotation instead of a mid-build Nuitka error
+        # if the runner's Python lacks Tkinter or sounddevice.
+        shell: pwsh
+        run: python -c "import tkinter, sounddevice"
+
+      - name: Build MedicalSTT.exe (scripts/build_windows.ps1)
+        shell: pwsh
+        run: ./scripts/build_windows.ps1
+
+      - name: Validate release manifest (dependency-versions.json)
+        # Pins the F-09 regression: under PowerShell 5.1, `Set-Content
+        # -Encoding UTF8` wrote a BOM and broke JSON parsers; the script now
+        # writes BOM-less UTF-8 and this proves it stays parseable.
+        shell: pwsh
+        run: python -m json.tool dist/MedicalSTT/dependency-versions.json | Out-Null
+
+      - name: Upload the distributable
+        uses: actions/upload-artifact@v4
+        with:
+          name: MedicalSTT-windows
+          path: dist/MedicalSTT/
+          if-no-files-found: error
+
   dependency-audit:
     name: Dependency audit (known CVEs)
     runs-on: ubuntu-latest
