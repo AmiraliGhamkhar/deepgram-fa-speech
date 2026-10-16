@@ -209,8 +209,25 @@ jobs:
         run: python -c "import tkinter, sounddevice"
 
       - name: Build MedicalSTT.exe (scripts/build_windows.ps1)
+        # Child pwsh so the build script's throw/exit code is a real process
+        # exit code. On failure the interesting lines are surfaced as
+        # ::error annotations -- Windows runner logs are not always easy to
+        # reach, and the Checks tab must show why the build refused.
         shell: pwsh
-        run: ./scripts/build_windows.ps1
+        run: |
+          pwsh -NoProfile -File scripts/build_windows.ps1 > build-windows.log 2>&1
+          $code = $LASTEXITCODE
+          Get-Content build-windows.log | Write-Host
+          if ($code -ne 0) {
+            Select-String -Path build-windows.log -Pattern '^(==>|FAILED |ERROR |FATAL|.*Traceback)' |
+              Select-Object -First 15 |
+              ForEach-Object { Write-Host "::error title=windows-build phase::$($_.Line)" }
+            Get-Content build-windows.log |
+              Where-Object { $_ -ne "" } |
+              Select-Object -Last 15 |
+              ForEach-Object { Write-Host "::error title=windows-build tail::$($_)" }
+          }
+          exit $code
 
       - name: Validate release manifest (dependency-versions.json)
         # Pins the F-09 regression: under PowerShell 5.1, `Set-Content
