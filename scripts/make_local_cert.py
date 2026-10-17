@@ -26,10 +26,7 @@ except ImportError as exc:
 
 
 def _secure_dir() -> Path:
-    if sys.platform == "win32":
-        base = Path.home() / ".medical-stt" / "secure"
-    else:
-        base = Path.home() / ".medical-stt" / "secure"
+    base = Path.home() / ".medical-stt" / "secure"
     base.mkdir(parents=True, exist_ok=True)
     return base
 

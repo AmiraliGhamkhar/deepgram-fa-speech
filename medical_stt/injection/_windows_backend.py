@@ -172,6 +172,11 @@ class WindowsBackend(InjectionBackend):
         # Production must not dictate into its settings/secret/recovery fields.
         self._allow_own_process = allow_own_process
         self._expected_target = expected_target
+        #: Clipboard sequence number of this backend's last successful write,
+        #: or None before the first one. Initialized here -- not as a side
+        #: effect of the first write -- so no read site can hit
+        #: AttributeError (audit N-06).
+        self._last_written_sequence: Optional[int] = None
 
     def _target_allowed(self, target: int) -> bool:
         if self._expected_target is not None and target != self._expected_target:

@@ -75,8 +75,18 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host "==> Running the test suite" -ForegroundColor Cyan
-& $Python -m pytest tests -q
+# `-rs` first: without it pytest prints no skip reasons, so silently
+# skipped suites stay invisible. Then fail the build when a host suite
+# skipped for a missing dependency (audit N-01): five modules
+# `pytest.importorskip` fastapi/httpx/uvicorn/a2wsgi and skip whole with
+# exit 0 when host/requirements-dev.txt was never installed.
+# The pattern is deliberately narrower than CI's broad `could not import`
+# grep (see .github/workflows/ci.yml): this script runs on Windows, where
+# tests/test_soak.py always skips on the Unix-only stdlib `resource`
+# module -- a broad match would fail every Windows build.
+& $Python -m pytest tests -q -rs 2>&1 | Tee-Object -Variable pytestOutput
 if ($LASTEXITCODE -ne 0) { throw "Tests failed; refusing to build." }
+if (@($pytestOutput) -match "could not import '(fastapi|httpx|uvicorn|a2wsgi)'") { throw "A host test module was skipped for a missing dependency (run: pip install -r host/requirements-dev.txt); refusing to build." }
 
 # Win32 pieces (DPAPI, named mutex, SendInput backend) can only be checked
 # on Windows, so the build machine -- which is Windows -- is where they get
