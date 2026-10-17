@@ -179,6 +179,28 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
             "registered clients."
         )
 
+    if not resolved.clients_file:
+        # Same reasoning as the two warnings above: legacy mode is a supported
+        # single-clinician configuration, and the docs say it is not a
+        # multi-clinician one -- but nothing in the runtime ever said so. With
+        # one identity, every device on the site shares a *single* token
+        # bucket, so 50 clinicians pressing Start at once get 10 tokens and 40
+        # 429s, and the sustained ceiling is `client_rate_limit_requests`
+        # requests per window for the whole clinic. That reads to the clinicians
+        # as "the service is at capacity" and to nobody as a configuration
+        # mistake, which is exactly the trap this file refuses to leave silent.
+        log.warning(
+            "running in single-identity (legacy) mode: HOST_CLIENTS_FILE is not "
+            "set, so every device is rate limited as one shared identity -- at "
+            "most %d burst and %d sustained requests per %ds across the whole "
+            "site. One clinician is fine; a clinic is not. Provision per-device "
+            "credentials (python -m host.provision --count N --out "
+            "/secure/host/clients.txt) and set HOST_CLIENTS_FILE. Revoking one "
+            "device also revokes everything else while in this mode.",
+            resolved.client_burst, resolved.client_rate_limit_requests,
+            resolved.rate_limit_window_seconds,
+        )
+
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         log.info(
@@ -356,6 +378,32 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
         # inflate the session-start metric.
         metrics.increment("session_starts_total")
 
+        def record_failure(outcome: str) -> None:
+            """Charge an authenticated request that minted no token.
+
+            Every `return` past `session_starts_total` must go through here (or
+            through the success path), so that `session_success_total` plus
+            `session_failures_total` always equals `session_starts_total`. When
+            they do not reconcile, an operator reading `/metrics` during an
+            incident cannot tell "no traffic" from "all traffic failing", which
+            is the only question this service's metrics exist to answer.
+
+            `outcome` is a fixed, small vocabulary (never a raw client value)
+            and `client_id` is the *authenticated* id, so the per-client series
+            cannot be inflated by fabricated ids -- `Metrics` folds anything
+            past `MAX_LABELLED_CLIENTS` into `other` regardless.
+            """
+            metrics.increment("session_failures_total")
+            metrics.increment(
+                "session_requests_by_client_total", client_id=identity.client_id, outcome=outcome
+            )
+
+        def refuse(status_code: int, detail: str, outcome: str,
+                   headers: Optional[dict] = None) -> JSONResponse:
+            """`record_failure` plus the JSON error response for that outcome."""
+            record_failure(outcome)
+            return JSONResponse({"detail": detail}, status_code=status_code, headers=headers)
+
         # -- layered rate limits, keyed on identity, not on the NAT IP ----
         allowed, retry_after = client_limiter.allow(f"client:{identity.client_id}")
         if allowed:
@@ -366,9 +414,8 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
                 "rate limit hit client_id=%s peer=%s retry_after=%ds",
                 identity.client_id, peer or "unknown", retry_after,
             )
-            return JSONResponse(
-                {"detail": "too many session requests"},
-                status_code=429,
+            return refuse(
+                429, "too many session requests", "rate_limited",
                 headers={"Retry-After": str(retry_after)},
             )
 
@@ -385,14 +432,13 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
         declared = request.headers.get("content-length")
         if declared is not None:
             try:
-                if int(declared) > resolved.max_request_body_bytes:
-                    metrics.increment("request_body_rejections_total")
-                    log.warning(
-                        "session refused reason=declared_body_over_cap bytes=%s", declared
-                    )
-                    return JSONResponse({"detail": "request body too large"}, status_code=413)
+                over_cap = int(declared) > resolved.max_request_body_bytes
             except ValueError:
-                return JSONResponse({"detail": "invalid request"}, status_code=400)
+                return refuse(400, "invalid request", "invalid_request")
+            if over_cap:
+                metrics.increment("request_body_rejections_total")
+                log.warning("session refused reason=declared_body_over_cap bytes=%s", declared)
+                return refuse(413, "request body too large", "body_too_large")
 
         session_id = new_session_id()
         log.info("session_started session_id=%s client_id=%s", session_id, identity.client_id)
@@ -409,12 +455,12 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
             raw = await asyncio.wait_for(read_body(), resolved.request_body_timeout_seconds)
         except asyncio.TimeoutError:
             metrics.increment("request_body_rejections_total")
-            return JSONResponse({"detail": "request body timed out"}, status_code=408)
+            return refuse(408, "request body timed out", "body_timeout")
         except OverflowError:
             metrics.increment("request_body_rejections_total")
-            return JSONResponse({"detail": "request body too large"}, status_code=413)
+            return refuse(413, "request body too large", "body_too_large")
         except Exception:
-            return JSONResponse({"detail": "incomplete request body"}, status_code=400)
+            return refuse(400, "incomplete request body", "incomplete_body")
         try:
             body = json.loads(raw) if raw else {}
             if not isinstance(body, dict):
@@ -423,18 +469,18 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
             if requested is not None and (type(requested) is not int or not 5 <= requested <= resolved.max_ttl_seconds):
                 raise ValueError("invalid TTL")
         except (ValueError, UnicodeError, RecursionError, OverflowError):
-            return JSONResponse({"detail": "ttl_seconds must be a bounded integer in a JSON object"}, status_code=422)
+            return refuse(
+                422, "ttl_seconds must be a bounded integer in a JSON object", "invalid_request"
+            )
         ttl = normalize_ttl(requested, resolved)
 
         if not inflight.acquire():
             # Explicit controlled error, not a silent drop and not an
             # unbounded wait for a Deepgram slot.
             metrics.increment("grant_capacity_rejections_total")
-            metrics.increment("session_failures_total")
             log.error("session_error session_id=%s reason=upstream_saturated", session_id)
-            return JSONResponse(
-                {"detail": "host is at capacity, retry shortly"},
-                status_code=503,
+            return refuse(
+                503, "host is at capacity, retry shortly", "upstream_saturated",
                 headers={"Retry-After": "1"},
             )
 
@@ -453,7 +499,6 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
             elapsed = time.monotonic() - started
             metrics.observe("token_request_latency", elapsed)
             metrics.increment("token_request_failures_total")
-            metrics.increment("session_failures_total")
             if exc.status in (503, 504):
                 # Upstream unreachable or too slow: an operator problem with
                 # Deepgram, as opposed to a 502 (our own key is wrong) or a
@@ -461,8 +506,22 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
                 metrics.increment("deepgram_connection_failures_total")
             # The message never contains the Deepgram key or its body.
             log.error("session_error session_id=%s status=%s", session_id, exc.status)
-            return JSONResponse({"detail": str(exc)}, status_code=exc.status,
-                                headers={"Retry-After": str(exc.retry_after)} if exc.retry_after else None)
+            return refuse(
+                exc.status, str(exc), "upstream_error",
+                headers={"Retry-After": str(exc.retry_after)} if exc.retry_after else None,
+            )
+        except Exception:  # noqa: BLE001 - the grant path must reconcile
+            # `core.grant_session_async` maps every known upstream failure onto
+            # `GrantError`, so reaching here means an unexpected internal
+            # fault. It is still a request that produced no token: record it
+            # that way before letting the framework turn it into a 500. A
+            # failure the counters do not see is indistinguishable, on
+            # `/metrics`, from a host that nobody is calling.
+            metrics.observe("token_request_latency", time.monotonic() - started)
+            metrics.increment("token_request_failures_total")
+            record_failure("internal_error")
+            log.exception("session_error session_id=%s reason=unexpected", session_id)
+            raise
         finally:
             inflight.release()
             metrics.set_gauge("inflight_grants", inflight.in_flight)
@@ -470,6 +529,9 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
         elapsed = time.monotonic() - started
         metrics.observe("token_request_latency", elapsed)
         metrics.increment("session_success_total")
+        metrics.increment(
+            "session_requests_by_client_total", client_id=identity.client_id, outcome="ok"
+        )
         log.info("token_issued session_id=%s client_id=%s", session_id, identity.client_id)
 
         return JSONResponse(

@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import secrets
 import sys
 from pathlib import Path
@@ -60,6 +61,16 @@ MAX_PREFIX_LENGTH = 55  # 64 - 9 (separator + token_hex(4))
 MAX_DEDUP_ATTEMPTS = MAX_COUNT * 2
 
 
+#: The whole accepted alphabet, ASCII only. `str.isalnum()` is *not* the same
+#: thing: it is Unicode-aware, so a permissive check lets a Cyrillic or
+#: fullwidth look-alike of an existing id through as a distinct registry entry
+#: and rate-limit key. See `core.CLIENT_ID_PATTERN`.
+CLIENT_ID_CHARS = "A-Za-z0-9._-"
+MAX_CLIENT_ID_LENGTH = 64
+
+_IS_CLIENT_ID = re.compile(rf"\A[{CLIENT_ID_CHARS}]{{1,{MAX_CLIENT_ID_LENGTH}}}\Z").match
+
+
 def _is_valid_client_id(client_id: Any) -> bool:
     """Mirror of `host.core.is_valid_client_id`.
 
@@ -68,21 +79,37 @@ def _is_valid_client_id(client_id: Any) -> bool:
     `__init__.py`), and the client package makes the same trade-off. The
     registry is rejected wholesale by `ClientRegistry.from_file` if any
     line is invalid, so an id this tool cannot mint must never be written.
+
+    Kept in step with `core.is_valid_client_id` and
+    `medical_stt.config._valid_client_id`: an id the tool mints and the host
+    refuses to load is a device that can never connect.
     """
-    if not isinstance(client_id, str) or not 1 <= len(client_id) <= 64:
+    if not isinstance(client_id, str) or _IS_CLIENT_ID(client_id) is None:
         return False
-    return all(ch.isalnum() or ch in "-." or ch == "_" for ch in client_id)
+    # An id of only separators and dots (`..`, `-`) passes the character class
+    # but identifies nothing -- and becomes an odd file name under
+    # `--secrets-dir`.
+    return any(ch.isascii() and ch.isalnum() for ch in client_id)
+
+
+def _sanitize_prefix(prefix: str) -> str:
+    """Strip everything the id grammar does not allow, ASCII only.
+
+    `--prefix` is operator-supplied and may carry spaces, accents or fullwidth
+    letters; keeping them would mint an id `ClientRegistry.from_file` refuses,
+    which takes the whole registry down at the host's next restart. Dropping
+    them is safe because what is left is still a legal, distinguishable prefix.
+    """
+    return re.sub(f"[^{CLIENT_ID_CHARS}]", "", prefix)
 
 
 def generate_client_id(prefix: str, index: Optional[int] = None) -> str:
     """Build a syntactically valid client id.
 
-    The result must satisfy `core.is_valid_client_id`: only alphanumerics,
-    `-`, `_` and `.`, at most 64 characters.
+    The result must satisfy `core.is_valid_client_id`: at most 64 characters of
+    ASCII alphanumerics, `-`, `_` and `.`, with at least one letter or digit.
     """
-    safe_prefix = "".join(ch for ch in prefix if ch.isalnum() or ch in "-_.")
-    if not safe_prefix:
-        safe_prefix = "client"
+    safe_prefix = _sanitize_prefix(prefix) or "client"
     if index is None:
         suffix = secrets.token_hex(4)
     else:
@@ -147,13 +174,15 @@ def _generate(
         if not _is_valid_client_id(args.client_id):
             print(
                 f"error: --client-id {args.client_id!r} is not valid: use 1-64 "
-                "characters of letters, digits, '-', '_' or '.'",
+                "ASCII characters of letters, digits, '-', '_' or '.', with at "
+                "least one letter or digit (a non-ASCII letter is refused because "
+                "it is confusable with an existing id, not distinct from it)",
                 file=sys.stderr,
             )
             return 2
         ids = [args.client_id]
     else:
-        safe_prefix = "".join(ch for ch in args.prefix if ch.isalnum() or ch in "-." or ch == "_")
+        safe_prefix = _sanitize_prefix(args.prefix)
         if len(safe_prefix) > MAX_PREFIX_LENGTH:
             print(
                 f"error: --prefix {args.prefix!r} is too long: generated ids are "

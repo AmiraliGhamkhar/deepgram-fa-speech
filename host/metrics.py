@@ -7,9 +7,10 @@ answer operational questions during an incident about *token issuance*,
 which is the only thing this service does:
 
     session_starts_total, session_success_total, session_failures_total,
-    token_requests_total, token_request_failures_total,
-    token_request_latency, deepgram_connection_failures_total,
-    auth_failures_total, metrics_auth_failures_total, rate_limited_total,
+    session_requests_by_client_total, token_requests_total,
+    token_request_failures_total, token_request_latency,
+    deepgram_connection_failures_total, auth_failures_total,
+    metrics_auth_failures_total, rate_limited_total,
     request_body_rejections_total, inflight_grants, inflight_grants_capacity,
     registry_clients
 
@@ -33,6 +34,14 @@ credential, or transcript text. Client ids are accepted as labels because
 they are identifiers, not credentials, and `MAX_LABELLED_CLIENTS` bounds how
 many distinct ids can be tracked so label cardinality cannot grow without
 limit.
+
+Exactly one series is labelled per client -- `session_requests_by_client_total`
+in `host/app.py`, the only metric that answers "which of the 50 devices is
+doing this". It is labelled with the *authenticated* id, never with a presented
+one, so a flood of fabricated ids cannot even reach the cardinality bound;
+`DECLARED_COUNTERS` deliberately does not pre-seed it, because an unlabelled
+zero would read as a clinic-wide total rather than as "no client has been seen
+yet".
 """
 from __future__ import annotations
 
@@ -272,7 +281,15 @@ def _merge_labels(
 
 
 def _as_number(value: float) -> str:
-    """Format a float without an exponent, which Prometheus text rejects."""
+    """Format a float without an exponent, which Prometheus text rejects.
+
+    Non-finite values are rendered as the Prometheus spellings rather than
+    raising: `/metrics` is the endpoint an operator reaches *during* an
+    incident, and a ValueError from `int(inf)` inside the renderer would take
+    the only remaining source of truth about the service down with it.
+    """
+    if not math.isfinite(value):
+        return "NaN" if math.isnan(value) else ("+Inf" if value > 0 else "-Inf")
     if value == int(value) and abs(value) < 1e15:
         return str(int(value))
     return f"{value:.6f}".rstrip("0").rstrip(".")
