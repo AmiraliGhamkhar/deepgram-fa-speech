@@ -116,7 +116,7 @@ jobs:
         run: >-
           pytest tests/test_host_app.py tests/test_host_metrics.py
           tests/test_host_docs.py tests/test_audit_fixes.py
-          tests/test_passenger_wsgi.py -v
+          tests/test_backend_fixes.py tests/test_passenger_wsgi.py -v
 
       - name: Run 50-client concurrency suite
         # The load and soak tests are opt-in via environment variables and

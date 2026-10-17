@@ -39,12 +39,15 @@ if str(HOST_DIR) not in sys.path:
 pytest.importorskip("fastapi")
 pytest.importorskip("httpx")
 
-# `host/app.py` builds its app at import time so a missing key fails the
-# deploy rather than the first Start press, so the environment has to be
-# already plausible when this module is imported. Values here are fake.
+# `host/app.py` builds its app at import time -- that is how a missing key
+# fails the deploy instead of the first Start press -- so the environment has
+# to be plausible before this module imports it. Both values are fake, and
+# nothing else is seeded: every request-level test passes `allow_http` in its
+# own `HostSettings`, so this module cannot leak a plaintext-mode default into
+# another suite's assertions. (`tests/conftest.py` has already popped the real
+# `DEEPGRAM_API_KEY`, which is why these defaults apply at all.)
 os.environ.setdefault("DEEPGRAM_API_KEY", "dg_fake_host_side_only")
 os.environ.setdefault("HOST_SHARED_SECRET", "s" * 40)
-os.environ.setdefault("HOST_ALLOW_HTTP", "1")
 
 import app as app_module  # type: ignore[import-not-found]  # noqa: E402
 import core  # type: ignore[import-not-found]  # noqa: E402
