@@ -224,7 +224,7 @@ set -a; . host/.env; set +a
 | `HOST_CLIENTS_FILE` | no* | — | `client_id:sha256hex` registry, ids limited to 1-64 ASCII `[A-Za-z0-9._-]`. Refuses to start if any line is malformed **or if the file lists no client at all**; duplicated ids load with a warning (last line wins). *Required for many clinicians. |
 | `HOST_SHARED_SECRET` | if no registry | — | Legacy single identity. |
 | `HOST_DEFAULT_TTL_SECONDS` | no | `30` | Requested token lifetime. |
-| `HOST_MAX_TTL_SECONDS` | no | `3600` | Upper bound a client may request. |
+| `HOST_MAX_TTL_SECONDS` | no | `3600` | Upper bound a client may request. Keep it at or above every deployed client's `session_ttl_seconds`: requests outside 5..max are rejected with 422 (never retried), not clamped. |
 | `HOST_CLIENT_RATE_LIMIT_REQUESTS` | no | `6` | Per-client sustained rate per window. |
 | `HOST_CLIENT_BURST` | no | `10` | Per-client burst capacity; bounds how many Deepgram streams one device can open at once. |
 | `HOST_GLOBAL_RATE_LIMIT_REQUESTS` | no | `600` | Global sustained rate per window. |

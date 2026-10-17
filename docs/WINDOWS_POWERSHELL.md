@@ -17,9 +17,9 @@ dictating clinician. All commands are PowerShell (5.1 or 7.x).
 |---|---|---|
 | Windows | 10 or 11 (x64) | `winver` |
 | PowerShell | 5.1 or 7+ | `$PSVersionTable.PSVersion` |
-| Python | 3.10 – 3.12 (Nuitka) or 3.11 (verified PyInstaller fallback) | `python --version` |
+| Python | 3.10 – 3.12 | `python --version` |
 | Git | any recent | `git --version` |
-| C compiler | MSVC Build Tools — required for the Nuitka build only; the PyInstaller fallback below needs none | `cl` resolves in a VS dev shell, or install via Visual Studio Installer → "Desktop development with C++" |
+| C compiler | MSVC Build Tools | `cl` resolves in a VS dev shell, or install via Visual Studio Installer → "Desktop development with C++" |
 | Tkinter | ships with python.org installers | `python -c "import tkinter"` |
 
 Notes:
@@ -43,7 +43,8 @@ cd deepgram-fa-speech
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
-pip install -r requirements-dev.txt
+# Both files: the host suites skip silently without the host dependencies.
+pip install -r requirements-dev.txt -r host/requirements-dev.txt
 ```
 
 If `Activate.ps1` is blocked by execution policy (error: *"running
@@ -59,18 +60,21 @@ the build command below uses) also works without changing the policy.
 ## 3. Run the test suite (fast, offline, no credentials)
 
 ```powershell
-pytest tests/ -q
+pytest tests/ -q -rs
 ```
 
-478 tests, ~30 s. No Deepgram key, no microphone, no GUI needed — every
-network and OS boundary is faked. If this fails, **stop**: the build
-script refuses to continue on a red suite anyway.
+The full suite runs offline — no Deepgram key, no microphone, no GUI
+needed — every network and OS boundary is faked. `-rs` prints skip
+reasons: the only skips allowed are the four environment-gated live /
+load / soak suites. If anything fails, or a module skips for a missing
+import, **stop**: the build script refuses to continue on a red (or
+silently incomplete) suite anyway.
 
-Optional deeper checks:
+Optional deeper checks (the same commands CI runs):
 
 ```powershell
-ruff check medical_stt tests scripts host     # lint
-mypy medical_stt host/core.py                 # types
+ruff check .                                  # lint
+mypy medical_stt host benchmarks              # types
 python scripts\scan_secrets.py                # credential scan (must be clean)
 ```
 
@@ -89,24 +93,18 @@ fix it before building.
 
 ## 5. Build the application
 
-Preferred (harder to unpack, per `scripts/build_windows.ps1`):
-
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\build_windows.ps1
 ```
 
-No-C-compiler fallback (verified on this machine with Python 3.11, which
-has no MSVC `cl.exe`): PyInstaller `--onedir --windowed` via a local,
-git-ignored `MedicalSTT.spec` kept on the build machine:
-
-```powershell
-python -m pip install pyinstaller
-python -m PyInstaller MedicalSTT.spec -y --clean
-```
-
-Both produce `dist\MedicalSTT\MedicalSTT.exe` plus its support folder — copy
-the whole folder to the target machine. Neither bakes in any credential:
+This produces `dist\MedicalSTT\MedicalSTT.exe` plus its support folder — copy
+the whole folder to the target machine. It bakes in no credential:
 verify with `python scripts\scan_secrets.py` (must print `clean`).
+
+This script (Nuitka standalone) is the only supported build path: it
+refuses UPX, secret-scans the tree, runs the full test suite and the
+Windows self-test, compiles, and post-verifies the bundle. Do not ship a
+build produced any other way.
 
 > **CI also builds it.** Every push runs the `windows-build` job
 > (`.github/workflows/ci.yml`), which executes `scripts\build_windows.ps1`

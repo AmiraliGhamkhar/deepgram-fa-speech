@@ -261,9 +261,13 @@ class ControlWindow:
         origin = getattr(self, "_drag_origin", None)
         if origin is None:
             return
-        x = getattr(event, "x_root", 0) - origin[0]
-        y = getattr(event, "y_root", 0) - origin[1]
-        self._root.geometry(f"+{x}+{y}")
+        # `geometry("+x+y")` sets an ABSOLUTE screen position, so the drag
+        # delta offsets the window's current position: passing the delta
+        # itself parks the window near the screen origin on the first drag
+        # instead of moving it with the pointer (audit N-02).
+        dx = getattr(event, "x_root", 0) - origin[0]
+        dy = getattr(event, "y_root", 0) - origin[1]
+        self._root.geometry(f"+{self._root.winfo_x() + dx}+{self._root.winfo_y() + dy}")
 
     # -- state / actions --------------------------------------------------
 

@@ -299,13 +299,10 @@ install, and a Start-failure troubleshooting table) lives in
 powershell -ExecutionPolicy Bypass -File scripts\build_windows.ps1
 ```
 
-No-C-compiler fallback (verified with Python 3.11): a local, git-ignored
-`MedicalSTT.spec` builds the same app with PyInstaller `--onedir
---windowed` — `python -m PyInstaller MedicalSTT.spec -y --clean`.
-See `docs/WINDOWS_POWERSHELL.md` for the full procedure.
-
 This produces **`dist\MedicalSTT\`** — a complete folder that runs on a
 clean Windows 10/11 machine with **zero Python installed**.
+`scripts/build_windows.ps1` (Nuitka standalone) is the only supported
+build path — do not ship a build produced any other way.
 
 CI builds the same bundle on every push: the `windows-build` job runs
 `scripts\build_windows.ps1` on a `windows-latest` runner and uploads
@@ -347,7 +344,7 @@ Zero results means the microphone will fail on a clean machine.
 
 Nuitka compiles to C rather than shipping a PyInstaller archive, which is
 harder to unpack and inspect, and is therefore the documented builder.
-`--onefile` is deliberately **not** used in either path: a
+`--onefile` is deliberately **not** used: a
 folder build starts faster, avoids self-extraction to `%TEMP%`, and
 triggers far fewer antivirus false positives.
 

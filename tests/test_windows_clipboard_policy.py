@@ -136,3 +136,11 @@ def test_diagnostic_expected_target_cannot_be_replaced_by_another_app(win):
     assert not backend.paste_text("synthetic text", True, 0)
     assert not state["writes"]
     assert not state["pastes"]
+
+
+def test_last_written_sequence_is_initialized_before_any_paste(win):
+    """Regression pin for audit N-06: the attribute backing
+    clipboard-restore sequencing must exist from construction (None), not
+    appear as a side effect of the first successful write."""
+    _, backend, _, _ = win
+    assert backend._last_written_sequence is None

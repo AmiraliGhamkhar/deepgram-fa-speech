@@ -68,7 +68,6 @@ class TranscriptOverlay:
         self._mailbox = dispatch.Mailbox()
         self._warning = ""
         self._last_geometry = ""
-        self._render_version = 0
 
         if not self.enabled:
             log.info("Overlay GUI disabled or Tkinter unavailable")
@@ -202,7 +201,6 @@ class TranscriptOverlay:
         """
 
         def _() -> None:
-            self._render_version += 1
             display = to_display(text[:8000]) if text else "..."
             self._apply_text_alignment(text or "")
             if self._label:
