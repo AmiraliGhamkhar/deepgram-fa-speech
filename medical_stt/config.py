@@ -107,15 +107,29 @@ def _valid_specialty_name(value: str) -> bool:
     return bool(value) and value.replace("_", "").replace("-", "").isalnum()
 
 
+#: The whole accepted alphabet for `host_client_id`, ASCII only. See
+#: `host.core.CLIENT_ID_PATTERN` for why `str.isalnum()` is not equivalent: it
+#: is Unicode-aware, so a permissive check would let a clinician save a
+#: homoglyph of the id the operator provisioned -- which then authenticates as
+#: a *different* identity (and, if it is not in the host's registry, fails with
+#: a 401 that reads like a wrong secret).
+_CLIENT_ID_RE = re.compile(r"[A-Za-z0-9._-]{1,64}")
+
+
 def _valid_client_id(value: str) -> bool:
     """Mirror of `host.core.is_valid_client_id`.
 
     Duplicated deliberately rather than imported: the client package must
-    not depend on the host package, which runs on a different machine.
+    not depend on the host package, which runs on a different machine. Keep
+    the three copies (`host/core.py`, `host/provision.py`, here) in step: an id
+    one of them accepts and another refuses is a device that can never connect,
+    with an error message that blames the credential.
     """
-    if not 1 <= len(value) <= 64:
+    if _CLIENT_ID_RE.fullmatch(value) is None:
         return False
-    return all(ch.isalnum() or ch in "-_." for ch in value)
+    # An id of only separators and dots (`..`, `-`) passes the class but
+    # identifies nothing; `host.core` refuses it in the registry too.
+    return any(ch.isascii() and ch.isalnum() for ch in value)
 
 
 _ASR_BLOCKED_TOKENS = frozenset({
@@ -345,6 +359,55 @@ def _reject_plaintext_secrets(cfg: Dict[str, Any], source: Path) -> None:
             )
 
 
+_TRUE_TOKENS = frozenset({"1", "true", "yes", "on"})
+_FALSE_TOKENS = frozenset({"0", "false", "no", "off"})
+
+
+def _num(cfg: Dict[str, Any], source: Path, key: str, convert: Any, default: Any) -> Any:
+    """Read one numeric setting, refusing anything that is not a number.
+
+    `settings.yaml` is hand-edited, so the two common shapes are a key left
+    with no value (`host_timeout_seconds:`, which YAML reads as None) and a
+    unit or a decimal comma pasted into it. Feeding either to `int()`/`float()`
+    raises a raw `TypeError`/`ValueError` that escapes as a traceback naming
+    config.py -- and `app.main()` only catches `ConfigError`, so a packaged
+    build dies with a stack trace instead of telling the clinician which line
+    to fix. Same contract as every other settings failure in this module.
+    """
+    raw = cfg.get(key, default)
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        raw = default
+    try:
+        return convert(raw.strip() if isinstance(raw, str) else raw)
+    except (TypeError, ValueError):
+        raise ConfigError(f"{source}: {key} must be a number, got {raw!r}") from None
+
+
+def _flag(cfg: Dict[str, Any], source: Path, key: str, default: bool) -> bool:
+    """Read one boolean setting.
+
+    `bool()` is not the answer here: `bool("false")` is True, so a quoted
+    `mip_opt_out: "false"` -- the exact kind of edit a user makes when reading
+    a template -- would silently flip a data-retention choice to its opposite.
+    YAML already resolves unquoted true/false/yes/no, so this only has to
+    handle the quoted and stray forms, and refuse what it cannot read.
+    """
+    raw = cfg.get(key, default)
+    if isinstance(raw, bool):
+        return raw
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return bool(default)
+    if isinstance(raw, str):
+        token = raw.strip().lower()
+        if token in _TRUE_TOKENS:
+            return True
+        if token in _FALSE_TOKENS:
+            return False
+    elif isinstance(raw, (int, float)) and not isinstance(raw, bool) and raw in (0, 1):
+        return bool(raw)
+    raise ConfigError(f"{source}: {key} must be true or false, got {raw!r}")
+
+
 def user_settings_path() -> Path:
     """Path of the per-user settings file."""
     return paths.settings_path()
@@ -422,7 +485,12 @@ def save_host_credentials(host_url: str, host_secret: str, client_id: str | None
     if not valid:
         raise ConfigError(message)
     if client_id and not _valid_client_id(client_id):
-        raise ConfigError("host_client_id is invalid")
+        raise ConfigError(
+            "host_client_id is invalid: use 1-64 ASCII characters of letters, "
+            "digits, '-', '_' or '.', with at least one letter or digit. The "
+            "host refuses a registry line containing anything else, so a "
+            "non-ASCII id here is a device that can never connect."
+        )
     initialize_user_config()
     target = user_settings_path()
     cfg = _load_yaml(target)
@@ -540,8 +608,9 @@ def validate_settings(settings: Settings) -> List[str]:
         )
     if settings.host_client_id and not _valid_client_id(settings.host_client_id):
         errors.append(
-            "host_client_id must be 1-64 characters of letters, digits, "
-            "'-', '_' or '.' (see: python -m host.provision)"
+            "host_client_id must be 1-64 ASCII characters of letters, digits, "
+            "'-', '_' or '.', with at least one letter or digit (see: "
+            "python -m host.provision)"
         )
     if not (1.0 <= settings.host_timeout_seconds <= 60.0):
         errors.append("host_timeout_seconds must be between 1 and 60")
@@ -563,35 +632,43 @@ def get_settings() -> Settings:
         raise ConfigError(f"{source} must contain a mapping at the top level")
     _reject_plaintext_secrets(cfg, source)
 
+    # Every numeric and boolean key goes through `_num`/`_flag`, never a bare
+    # int()/float()/bool() on a value a human edited: see those helpers for the
+    # two failure shapes they exist for (a raw traceback instead of a ConfigError,
+    # and `bool("false") is True` inverting a retention setting).
     return Settings(
         model=os.getenv("DEEPGRAM_MODEL", cfg.get("model", "nova-3")),
         language=os.getenv("DEEPGRAM_LANGUAGE", cfg.get("language", "fa")),
-        sample_rate=int(cfg.get("sample_rate", 16000)),
-        channels=int(cfg.get("channels", 1)),
-        block_duration=float(cfg.get("block_duration", 0.08)),
-        endpointing=int(cfg.get("endpointing", 400)),
-        utterance_end_ms=int(cfg.get("utterance_end_ms", 1200)),
+        sample_rate=_num(cfg, source, "sample_rate", int, 16000),
+        channels=_num(cfg, source, "channels", int, 1),
+        block_duration=_num(cfg, source, "block_duration", float, 0.08),
+        endpointing=_num(cfg, source, "endpointing", int, 400),
+        utterance_end_ms=_num(cfg, source, "utterance_end_ms", int, 1200),
         inject_mode=cfg.get("inject_mode", "paste"),
-        paste_settle_seconds=float(cfg.get("paste_settle_seconds", 0.12)),
-        restore_clipboard=bool(cfg.get("restore_clipboard", True)),
-        overlay_enabled=bool(cfg.get("overlay_enabled", True)),
-        reconnect_delay=float(cfg.get("reconnect_delay", 2.0)),
-        max_reconnect_attempts=int(cfg.get("max_reconnect_attempts", 0)),
-        reconnect_backoff_max=float(cfg.get("reconnect_backoff_max", 30.0)),
-        reconnect_jitter=float(cfg.get("reconnect_jitter", 0.5)),
-        enable_context_dependent_terms=bool(cfg.get("enable_context_dependent_terms", False)),
-        specialty=str(cfg.get("specialty", "general")),
-        medical_confidence_threshold=float(cfg.get("medical_confidence_threshold", 0.65)),
-        use_asr_replacements=bool(cfg.get("use_asr_replacements", True)),
+        paste_settle_seconds=_num(cfg, source, "paste_settle_seconds", float, 0.12),
+        restore_clipboard=_flag(cfg, source, "restore_clipboard", True),
+        overlay_enabled=_flag(cfg, source, "overlay_enabled", True),
+        reconnect_delay=_num(cfg, source, "reconnect_delay", float, 2.0),
+        max_reconnect_attempts=_num(cfg, source, "max_reconnect_attempts", int, 0),
+        reconnect_backoff_max=_num(cfg, source, "reconnect_backoff_max", float, 30.0),
+        reconnect_jitter=_num(cfg, source, "reconnect_jitter", float, 0.5),
+        enable_context_dependent_terms=_flag(
+            cfg, source, "enable_context_dependent_terms", False
+        ),
+        specialty=str(cfg.get("specialty") or "general"),
+        medical_confidence_threshold=_num(
+            cfg, source, "medical_confidence_threshold", float, 0.65
+        ),
+        use_asr_replacements=_flag(cfg, source, "use_asr_replacements", True),
         deepgram_region=str(cfg.get("deepgram_region", "us") or "us").strip().lower(),
-        mip_opt_out=bool(cfg.get("mip_opt_out", False)),
+        mip_opt_out=_flag(cfg, source, "mip_opt_out", False),
         host_url=os.getenv("MEDICALSTT_HOST_URL", str(cfg.get("host_url", "") or "")),
         host_secret=load_host_secret(),
         host_client_id=os.getenv(
             "MEDICALSTT_HOST_CLIENT_ID", str(cfg.get("host_client_id", "") or "")
         ).strip(),
-        host_timeout_seconds=float(cfg.get("host_timeout_seconds", 10.0)),
-        session_ttl_seconds=int(cfg.get("session_ttl_seconds", 30)),
+        host_timeout_seconds=_num(cfg, source, "host_timeout_seconds", float, 10.0),
+        session_ttl_seconds=_num(cfg, source, "session_ttl_seconds", int, 30),
     )
 
 

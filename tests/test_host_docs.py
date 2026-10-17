@@ -140,6 +140,25 @@ def test_legacy_shared_secret_is_only_required_without_a_registry():
     assert "When a registry is configured, `HOST_SHARED_SECRET` is ignored." in section
 
 
+def test_the_startup_refusal_list_matches_the_code() -> None:
+    """The documented set of "refuses to start" conditions is the real one.
+
+    Each refusal exists because the alternative is a *running* service nobody
+    can use, so an operator who is told about only half of them will debug the
+    wrong thing. Checked by name against the two places that raise them.
+    """
+    readme = HOST_README.read_text(encoding="utf-8")
+    section = readme[readme.index("The service **refuses to start**"):]
+    for claim in ("printable ASCII", "lists no client at all"):
+        assert claim in section, f"host/README.md must document the {claim!r} refusal"
+
+    # ...and each claim must correspond to a check the code actually makes.
+    core_source = (ROOT / "host" / "core.py").read_text(encoding="utf-8")
+    assert "def check_api_key_shape" in core_source
+    assert "check_api_key_shape(api_key)" in core_source
+    assert "contains no client entries" in core_source
+
+
 def test_deprecated_rate_limit_var_is_flagged_not_silently_ignored():
 
     """`HOST_RATE_LIMIT_REQUESTS` is inert; the docs must say so.

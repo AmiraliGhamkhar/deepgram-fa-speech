@@ -34,6 +34,9 @@ host_url: "https://stt.example.com"
 # (see host/README.md). Required whenever the host is configured with a client
 # registry, which is the supported setup for more than one clinician.
 # Per-machine override: MEDICALSTT_HOST_CLIENT_ID.
+# Grammar: 1-64 ASCII characters of letters, digits, '-', '_' or '.', with at
+# least one letter or digit; anything else is a configuration error here
+# because the host would refuse to load it into its registry.
 host_client_id: ""
 host_timeout_seconds: 10.0
 # The session token only has to outlive the WebSocket handshake; 30s is

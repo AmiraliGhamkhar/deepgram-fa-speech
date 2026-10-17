@@ -27,12 +27,13 @@ import math
 import hmac
 import logging
 import os
+import re
 import threading
 import time
 from collections import OrderedDict, defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Deque, Dict, Mapping, Optional, Tuple
+from typing import Any, Callable, Deque, Dict, List, Mapping, Optional, Tuple
 
 log = logging.getLogger("medical_stt.host")
 
@@ -84,8 +85,29 @@ MAX_REQUEST_BODY_BYTES = 4_096
 #: line; real client ids are short.
 MAX_CLIENT_ID_LENGTH = 64
 
-#: Generated session ids are plain UUID4 strings.
+#: The whole accepted alphabet for a `client_id`: ASCII alphanumerics plus
+#: `-`, `_` and `.`. ASCII on purpose -- `str.isalnum()` is Unicode-aware, so
+#: a permissive check admits Cyrillic `саfé-cyrillic`, fullwidth `ＡＢＣ` and
+#: other homoglyphs that are *distinct* rate-limit keys and registry entries
+#: while looking identical in a text editor or a log line. Revoking a device
+#: is "delete its line from the registry", which a confusable id defeats.
+#: Mirrored in `host/provision.py` and `medical_stt/config.py`; all three must
+#: move together or the client accepts an id the host refuses to load.
+CLIENT_ID_PATTERN = r"[A-Za-z0-9._-]{1,%d}" % MAX_CLIENT_ID_LENGTH
+
+#: Generated session ids are UUID4 *hex*: 32 lowercase hex characters, the
+#: hyphenless form, because the id is embedded in log lines and returned in a
+#: JSON field where a fixed-width opaque token is easier to grep than a
+#: hyphenated UUID.
 SESSION_ID_BYTES = 16
+
+#: Characters a Deepgram API key may contain. Anything else -- a smart quote
+#: or a non-breaking space left by a paste, a stray newline, a fullwidth
+#: letter -- makes the HTTP transport refuse the `Authorization` header, and
+#: the key must fail at startup rather than as a 500 on the clinic's first
+#: Start press. Deliberately strict and checked once, at config time.
+_API_KEY_SAFE_RE = re.compile(r"\A[\x21-\x7e]+\Z")
+_CLIENT_ID_RE = re.compile(CLIENT_ID_PATTERN)
 
 #: Identity used when a deployment has not provisioned per-device
 #: credentials yet. A single shared secret maps onto this one id, so legacy
@@ -96,6 +118,38 @@ LEGACY_CLIENT_ID = "legacy"
 
 class ConfigurationError(RuntimeError):
     """The host is missing required environment configuration."""
+
+
+def check_api_key_shape(api_key: str) -> None:
+    """Refuse a Deepgram key that cannot be sent, before serving any request.
+
+    The key itself is never echoed: a configuration error is logged and may
+    end up in a journald/cloud log, so only the *offset* and the character
+    *class* of the problem are named, never the value or a prefix of it.
+    """
+    if not api_key:
+        raise ConfigurationError("DEEPGRAM_API_KEY is empty after stripping whitespace.")
+    match = _API_KEY_SAFE_RE.match(api_key)
+    if match is not None:
+        return
+    # Point at the first character the transport could not encode, without
+    # naming it. A non-match above guarantees at least one such character.
+    offset = min(
+        (index for index, ch in enumerate(api_key) if not ("\x21" <= ch <= "\x7e")),
+        default=len(api_key) - 1,
+    )
+    offender = api_key[offset]
+    if offender.isspace():
+        kind = "whitespace (a stray newline or space from a paste?)"
+    elif ord(offender) < 0x21:
+        kind = "a control character"
+    else:
+        kind = "a non-ASCII character"
+    raise ConfigurationError(
+        f"DEEPGRAM_API_KEY is not a printable ASCII token: problem at position "
+        f"{offset} ({kind}). Re-copy the key from the Deepgram console rather than "
+        "from a document or chat message."
+    )
 
 
 class GrantError(RuntimeError):
@@ -184,6 +238,10 @@ class HostSettings:
                 "DEEPGRAM_API_KEY is not set. The Deepgram key must exist only "
                 "in this service's environment, never in the client."
             )
+        # Checked here rather than on the first request: a key carrying a
+        # pasted smart quote would otherwise surface as a 500 from the HTTP
+        # transport, per clinician, forever.
+        check_api_key_shape(api_key)
         secret = (source.get("HOST_SHARED_SECRET") or "").strip()
         clients_file = (source.get("HOST_CLIENTS_FILE") or "").strip()
         if not clients_file and len(secret) < 24:
@@ -355,16 +413,6 @@ def normalize_ttl(raw: Any, settings: HostSettings) -> int:
     return max(5, min(requested, settings.max_ttl_seconds))
 
 
-def authorize(authorization_header: Optional[str], settings: HostSettings) -> bool:
-    """Constant-time check of `Authorization: Bearer <shared secret>`."""
-    if not authorization_header:
-        return False
-    scheme, _, presented = authorization_header.partition(" ")
-    if scheme.strip().lower() != "bearer":
-        return False
-    return hmac.compare_digest(presented.strip(), settings.shared_secret)
-
-
 # ---------------------------------------------------------------------------
 # Client identity
 # ---------------------------------------------------------------------------
@@ -505,6 +553,41 @@ def parse_token_response(payload: Any) -> Tuple[str, int]:
 GrantTransport = Callable[[str, str, int, float], Any]
 
 
+#: 2xx codes that may not carry a body, so they may not carry *this* body.
+#: Refusing them costs nothing and forecloses "the status said 2xx, so the
+#: payload we were handed must have come from Deepgram".
+GRANT_BODYLESS_STATUSES = frozenset({204, 205, 206})
+
+
+def response_is_a_grant(status_code: int) -> bool:
+    """True only for a 2xx that can carry the grant body.
+
+    Anything else is refused -- the whole 3xx family above all.
+    `follow_redirects` is off, so no credential is ever re-sent to a redirect
+    target, but the *body* of that answer would still be parsed as a token if
+    the status were not checked: a captive portal, an Apache `Redirect` rule or
+    a TLS-intercepting proxy that replies with JSON would otherwise mint a
+    session nobody obtained from Deepgram. A `No Content`/`Partial Content`
+    answer is refused for the same reason in reverse: a body there did not
+    come from the token endpoint's successful path.
+    """
+    return 200 <= status_code < 300 and status_code not in GRANT_BODYLESS_STATUSES
+
+
+def _grant_response_error(status_code: int, headers: Any) -> GrantError:
+    """The `GrantError` for an upstream answer `response_is_a_grant` refused.
+
+    The status is mapped for the client and any `Retry-After` is carried
+    through, so Deepgram's own backoff hint survives the proxy hop instead of
+    being replaced by the client guessing.
+    """
+    return GrantError(
+        f"Deepgram refused the token request (HTTP {status_code})",
+        _grant_error_status(status_code),
+        retry_after=_retry_after(headers.get("Retry-After") if headers is not None else None),
+    )
+
+
 def _httpx_grant(url: str, api_key: str, ttl_seconds: int, timeout: float) -> Any:
     """Default transport: a plain HTTPS POST to Deepgram.
 
@@ -512,31 +595,38 @@ def _httpx_grant(url: str, api_key: str, ttl_seconds: int, timeout: float) -> An
     application-level status, so a timeout or an unreachable upstream can
     never escape the route as an uncontrolled 500. Error messages contain
     no credential and no upstream response body.
+
+    Kept in step with `AsyncGrantClient.grant` (2xx-only, `Retry-After`,
+    every failure mapped) because tests, `scripts/measure_capacity.py` and
+    the benchmarks drive the synchronous path: a difference between the two
+    means the harness validates behaviour production never runs.
     """
     import httpx
 
     try:
-        response = httpx.post(
-            url,
-            headers={"Authorization": f"Token {api_key}", "Content-Type": "application/json"},
-            json={"ttl_seconds": ttl_seconds},
-            timeout=timeout,
-        )
-    except httpx.TimeoutException as exc:
-        raise GrantError("Deepgram token request timed out", 504) from exc
-    except httpx.RequestError as exc:
-        # Connection refused/reset, DNS failure, TLS failure, ...
-        raise GrantError("cannot reach Deepgram", 503) from exc
+        try:
+            response = httpx.post(
+                url,
+                headers={"Authorization": f"Token {api_key}", "Content-Type": "application/json"},
+                json={"ttl_seconds": ttl_seconds},
+                timeout=timeout,
+            )
+        except httpx.TimeoutException as exc:
+            raise GrantError("Deepgram token request timed out", 504) from exc
+        except httpx.RequestError as exc:
+            # Connection refused/reset, DNS failure, TLS failure, ...
+            raise GrantError("cannot reach Deepgram", 503) from exc
 
-    if response.status_code >= 400:
-        raise GrantError(
-            f"Deepgram refused the token request (HTTP {response.status_code})",
-            _grant_error_status(response.status_code),
-        )
-    try:
-        return response.json()
-    except ValueError as exc:
-        raise GrantError("Deepgram returned a non-JSON response", 502) from exc
+        if not response_is_a_grant(response.status_code):
+            raise _grant_response_error(response.status_code, response.headers)
+        try:
+            return response.json()
+        except ValueError as exc:
+            raise GrantError("Deepgram returned a non-JSON response", 502) from exc
+    except GrantError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - see AsyncGrantClient.grant
+        raise GrantError("Deepgram token request failed", 502) from exc
 
 
 def grant_session(
@@ -577,13 +667,17 @@ def is_valid_client_id(client_id: Any) -> bool:
     """True for a syntactically acceptable client id.
 
     Bounded on purpose: the id becomes a rate-limit key and appears in log
-    lines, so it must be short and free of control characters.
+    lines, so it must be short and free of control characters. The class is
+    pinned to ASCII (see `CLIENT_ID_PATTERN`) rather than `str.isalnum()`,
+    which would admit Unicode homoglyphs of an existing id.
     """
     if not isinstance(client_id, str):
         return False
-    if not 1 <= len(client_id) <= MAX_CLIENT_ID_LENGTH:
+    if _CLIENT_ID_RE.fullmatch(client_id) is None:
         return False
-    return all(ch.isalnum() or ch in "-_." for ch in client_id)
+    # `.` and `..` pass the character class but identify nothing; they would
+    # also become odd file names in `host/provision.py --secrets-dir`.
+    return any(ch.isdigit() or ch.isalpha() for ch in client_id)
 
 
 def normalize_client_id(client_id: Any) -> str:
@@ -623,8 +717,26 @@ class ClientRegistry:
 
     @classmethod
     def from_file(cls, path: str) -> "ClientRegistry":
-        """Load a registry file, ignoring blank lines and `#` comments."""
+        """Load a registry file, ignoring blank lines and `#` comments.
+
+        Two conditions are refused rather than tolerated, because both leave a
+        running service that no device can use:
+
+        * **zero clients** -- an empty, whitespace-only or comment-only file
+          (a truncated `rsync`, a half-finished first provisioning) starts a
+          host that answers `401` to every clinician, forever, while looking
+          perfectly healthy;
+        * a **malformed line** -- one bad entry would otherwise silently
+          provision a device that can never authenticate.
+
+        A *duplicated* `client_id` is accepted with a warning: `host.provision`
+        appends, so re-provisioning one device must not require rewriting the
+        file (and refusing would take the whole clinic down to fix one line).
+        The last entry wins; the warning names the ids so the operator can
+        delete the dead lines.
+        """
         clients: Dict[str, str] = {}
+        duplicated: List[str] = []
         try:
             text = Path(path).read_text(encoding="utf-8")
         except OSError as exc:
@@ -649,7 +761,26 @@ class ClientRegistry:
                     f"{path} line {lineno}: expected 'client_id:sha256hex' "
                     f"(generate one with: python -m host.provision)"
                 )
+            if client_id in clients:
+                duplicated.append(client_id)
             clients[client_id] = digest
+        if not clients:
+            raise ConfigurationError(
+                f"{path} contains no client entries. A registry file that "
+                "authenticates nobody is never what an operator wants: every "
+                "device would be rejected with 401 (and then locked out by the "
+                "brute-force budget) while the service looks healthy. Restore "
+                "the file, or unset HOST_CLIENTS_FILE to run in legacy "
+                "single-secret mode. Mint entries with: python -m host.provision"
+            )
+        if duplicated:
+            shown = ", ".join(duplicated[:5]) + (", ..." if len(duplicated) > 5 else "")
+            log.warning(
+                "%s: %d duplicated client_id line(s) (%s); the last entry wins, "
+                "so the earlier secret(s) no longer authenticate that device. "
+                "Delete the superseded line(s).",
+                path, len(duplicated), shown,
+            )
         return cls(clients)
 
     def __len__(self) -> int:
@@ -913,33 +1044,43 @@ class AsyncGrantClient:
         Every failure becomes a `GrantError` with an application-level
         status, so a network problem can never surface as an uncontrolled
         500. No credential or upstream body enters the message.
+
+        "Every failure" is the whole point of the outer handler: httpx raises
+        things that are neither `TimeoutException` nor `RequestError` -- a
+        `TypeError`/`UnicodeEncodeError` while encoding the `Authorization`
+        header, a `RuntimeError` once the pool has been closed, an
+        `InvalidURL` -- and each of those used to escape as a bare 500 that
+        the host's own counters never recorded, leaving an operator with a
+        fully down service that reported no failures at all.
         """
         import httpx
 
         try:
-            response = await self._client.post(
-                self._grant_url,
-                headers={
-                    "Authorization": f"Token {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={"ttl_seconds": ttl_seconds},
-            )
-        except httpx.TimeoutException as exc:
-            raise GrantError("Deepgram token request timed out", 504) from exc
-        except httpx.RequestError as exc:
-            raise GrantError("cannot reach Deepgram", 503) from exc
+            try:
+                response = await self._client.post(
+                    self._grant_url,
+                    headers={
+                        "Authorization": f"Token {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={"ttl_seconds": ttl_seconds},
+                )
+            except httpx.TimeoutException as exc:
+                raise GrantError("Deepgram token request timed out", 504) from exc
+            except httpx.RequestError as exc:
+                raise GrantError("cannot reach Deepgram", 503) from exc
 
-        if response.status_code >= 400:
-            raise GrantError(
-                f"Deepgram refused the token request (HTTP {response.status_code})",
-                _grant_error_status(response.status_code),
-                retry_after=_retry_after(response.headers.get("Retry-After")),
-            )
-        try:
-            return response.json()
-        except ValueError as exc:
-            raise GrantError("Deepgram returned a non-JSON response", 502) from exc
+            if not response_is_a_grant(response.status_code):
+                raise _grant_response_error(response.status_code, response.headers)
+            try:
+                return response.json()
+            except ValueError as exc:
+                raise GrantError("Deepgram returned a non-JSON response", 502) from exc
+        except GrantError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - the 500 must not escape
+            log.error("deepgram grant failed unexpectedly (%s)", type(exc).__name__)
+            raise GrantError("Deepgram token request failed", 502) from exc
 
     async def aclose(self) -> None:
         """Close the pool. Idempotent, so shutdown paths may repeat it."""

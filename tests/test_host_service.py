@@ -143,32 +143,61 @@ def test_per_client_defaults_are_small_enough_to_protect_the_shared_pool():
 
 
 # -- authentication ------------------------------------------------------
+#
+# These exercise `authenticate_client`, the only entry point the service has.
+# They used to call a separate `core.authorize()` that compared the shared
+# secret directly: nothing wired it up after per-device credentials landed, and
+# a second, older auth path sitting next to the live one is how a future edit
+# reintroduces a single identity for a 50-clinician site. The checks that made
+# that function safe (constant time, no partial-match oracle, scheme handling)
+# are checked here instead, on the path requests actually take.
+
+
+def _legacy_registry() -> "core.ClientRegistry":
+    return core.ClientRegistry({core.LEGACY_CLIENT_ID: core.hash_client_secret(SHARED_SECRET)})
 
 
 def test_correct_bearer_secret_is_authorized():
-    assert core.authorize(f"Bearer {SHARED_SECRET}", _settings()) is True
+    assert core.authenticate_client(f"Bearer {SHARED_SECRET}", None, _legacy_registry()) is not None
 
 
 def test_bearer_scheme_is_case_insensitive():
-    assert core.authorize(f"bearer {SHARED_SECRET}", _settings()) is True
+    assert core.authenticate_client(f"bearer {SHARED_SECRET}", None, _legacy_registry()) is not None
 
 
 def test_wrong_secret_is_rejected():
-    assert core.authorize("Bearer wrong-secret-value", _settings()) is False
+    assert core.authenticate_client("Bearer wrong-secret-value", None, _legacy_registry()) is None
 
 
 def test_missing_or_malformed_header_is_rejected():
-    settings = _settings()
-    assert core.authorize(None, settings) is False
-    assert core.authorize("", settings) is False
-    assert core.authorize(SHARED_SECRET, settings) is False  # no scheme
-    assert core.authorize(f"Basic {SHARED_SECRET}", settings) is False
+    registry = _legacy_registry()
+    assert core.authenticate_client(None, None, registry) is None
+    assert core.authenticate_client("", None, registry) is None
+    assert core.authenticate_client(SHARED_SECRET, None, registry) is None  # no scheme
+    assert core.authenticate_client(f"Basic {SHARED_SECRET}", None, registry) is None
+    # An empty presented token is not "the empty secret": it is no credential.
+    assert core.authenticate_client("Bearer ", None, core.ClientRegistry({"legacy": ""})) is None
 
 
 def test_authorization_does_not_reveal_which_part_failed():
-    """No partial-match oracle: both wrong-scheme and wrong-secret fail."""
-    settings = _settings()
-    assert core.authorize(f"Basic {SHARED_SECRET}", settings) == core.authorize("Basic x", settings)
+    """No partial-match oracle: wrong scheme, wrong id and wrong secret all fail alike."""
+    registry = _legacy_registry()
+    wrong_scheme = core.authenticate_client(f"Basic {SHARED_SECRET}", None, registry)
+    wrong_secret = core.authenticate_client("Bearer x", None, registry)
+    unknown_id = core.authenticate_client(f"Bearer {SHARED_SECRET}", "doctor-99", registry)
+    assert wrong_scheme is wrong_secret is unknown_id is None
+
+
+def test_a_registered_id_authenticates_only_with_its_own_secret():
+    digest = core.hash_client_secret("device-two-secret")
+    registry = core.ClientRegistry({"doctor-01": core.hash_client_secret("device-one-secret"),
+                                    "doctor-02": digest})
+    identity = core.authenticate_client("Bearer device-two-secret", "doctor-02", registry)
+    assert identity is not None and identity.client_id == "doctor-02"
+    # The same secret under the other id, and the other secret under this id,
+    # must both fail: the pair is the credential, not the secret alone.
+    assert core.authenticate_client("Bearer device-two-secret", "doctor-01", registry) is None
+    assert core.authenticate_client("Bearer device-one-secret", "doctor-02", registry) is None
 
 
 # -- rate limiting -------------------------------------------------------
@@ -391,8 +420,16 @@ def test_grant_hits_deepgram_over_https_only():
 
 
 class _FakeResponse:
-    def __init__(self, status_code=200, payload=None, json_error=False):
+    """Minimal stand-in for `httpx.Response`.
+
+    `headers` is not optional here even though the success tests never read it:
+    the grant path reads `Retry-After` off every non-2xx response, so a stub
+    without it would exercise an interface the real transport never has.
+    """
+
+    def __init__(self, status_code=200, payload=None, json_error=False, headers=None):
         self.status_code = status_code
+        self.headers = {} if headers is None else dict(headers)
         self._payload = payload
         self._json_error = json_error
 

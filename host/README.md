@@ -76,6 +76,16 @@ protected with Windows DPAPI; the client id is an identifier, not a
 credential, and may live in `settings.yaml` (or `MEDICALSTT_HOST_CLIENT_ID`
 for development).
 
+**The id grammar is ASCII on purpose.** A `client_id` is a rate-limit key,
+the handle you delete to revoke a device, and a field in every log line.
+`str.isalnum()` is Unicode-aware, so a permissive grammar accepts `саfé-01`
+(Cyrillic) as a *different* identity from `safe-01` while looking identical in
+an editor and in `grep` — which is exactly what makes revocation unsafe. The
+same rule is enforced in three places (`host/core.py`, `host/provision.py`,
+`medical_stt/config.py`) and `tests/test_backend_fixes.py::test_all_three_copies_of_the_grammar_agree`
+keeps them in step; an id one accepts and another refuses is a device that can
+never connect, reported as a credential error.
+
 **Why hashes are enough.** The secret is 256 bits of CSPRNG output, not a
 user-chosen password: there is no dictionary to attack, so a slow KDF buys
 nothing. What matters is that a leaked registry file or a process memory
@@ -92,9 +102,21 @@ With `HOST_CLIENTS_FILE` unset the service still runs, authenticating
 it migrates. **It is not a 50-user configuration** — with one identity the
 host can only ever rate limit and revoke one thing.
 
+An **empty** registry file — zero entries, or only comments — is a startup
+error rather than a running service that answers `401` to everyone. A
+half-finished `rsync` of `clients.txt` otherwise looks perfectly healthy from
+the outside while no device on the site can start a session.
+
 Once a registry is configured the client id becomes mandatory: a request
 without `X-Client-Id` resolves to `legacy`, which matches nothing, and is
 rejected. There is no silent fallback from per-device back to shared auth.
+
+While `HOST_CLIENTS_FILE` is unset the service logs **one warning at
+startup**, because this mode is easy to keep by accident: every device shares
+a single identity, so the whole site gets one token bucket (10 burst, 6 per
+minute sustained), and 50 clinicians pressing Start at once is 10 tokens and
+40 `429`s. Clinicians hear "the service is at capacity"; nothing tells the
+operator that the deployment was never configured for a clinic.
 
 ## Rate limiting
 
@@ -127,6 +149,10 @@ actually fails to authenticate.
 
 `Retry-After` is returned on every 429, and the client honors it (clamped),
 so a throttled client slows down when told to instead of guessing.
+
+A `429` is a request that produced no token, so it is counted in
+`session_failures_total` as well as in `rate_limited_total`; see
+[Monitoring](#monitoring) for the one accounting rule the counters obey.
 
 **Upgrading from a single shared secret?** `HOST_RATE_LIMIT_REQUESTS` is no
 longer used — see the table above. It is accepted and warned about rather
@@ -193,9 +219,9 @@ set -a; . host/.env; set +a
 
 | Variable | Required | Default | Meaning |
 |----------|----------|---------|---------|
-| `DEEPGRAM_API_KEY` | **yes** | — | The Deepgram key. Exists only here. |
+| `DEEPGRAM_API_KEY` | **yes** | — | The Deepgram key. Exists only here. Must be a printable ASCII token with no whitespace: a smart quote or stray newline from a paste makes the HTTP transport refuse the `Authorization` header, so it is checked at startup rather than failing every clinician's first Start. |
 | `DEEPGRAM_REGION` | no | `us` | Deepgram region the grant request goes to: `us`, `eu`, `au` or `in`. Tokens are valid in every region, so this only decides where the host's own traffic terminates; the client has its own `deepgram_region` setting for the audio. Unknown values refuse to start. |
-| `HOST_CLIENTS_FILE` | no* | — | `client_id:sha256hex` registry. *Required for many clinicians. |
+| `HOST_CLIENTS_FILE` | no* | — | `client_id:sha256hex` registry, ids limited to 1-64 ASCII `[A-Za-z0-9._-]`. Refuses to start if any line is malformed **or if the file lists no client at all**; duplicated ids load with a warning (last line wins). *Required for many clinicians. |
 | `HOST_SHARED_SECRET` | if no registry | — | Legacy single identity. |
 | `HOST_DEFAULT_TTL_SECONDS` | no | `30` | Requested token lifetime. |
 | `HOST_MAX_TTL_SECONDS` | no | `3600` | Upper bound a client may request. |
@@ -221,10 +247,18 @@ set -a; . host/.env; set +a
 | `HOST_FORWARDED_ALLOW_IPS` | no | `127.0.0.1` | Which peers may set `X-Forwarded-Proto`. |
 | `HOST_ALLOW_HTTP` | no | `0` | `1` serves plaintext. **Development only.** |
 
-The service **refuses to start** if `DEEPGRAM_API_KEY` is missing, or if
-`HOST_CLIENTS_FILE` contains a malformed entry. When `HOST_CLIENTS_FILE` is
-unset (legacy mode), `HOST_SHARED_SECRET` must be at least 24 characters.
+The service **refuses to start** if `DEEPGRAM_API_KEY` is missing or is not a
+printable ASCII token with no internal whitespace, if `HOST_CLIENTS_FILE`
+contains a malformed entry, or if that file **lists no client at all**.
+When `HOST_CLIENTS_FILE` is unset (legacy mode), `HOST_SHARED_SECRET` must be at least 24 characters.
 When a registry is configured, `HOST_SHARED_SECRET` is ignored.
+
+Every one of those is a startup refusal rather than a warning because each one
+leaves a *running* service that no clinician can use: a key the HTTP transport
+cannot send answers 502/500 forever, and a registry with zero entries answers
+401 to everybody while `/healthz` stays green. Fail the deploy, not the
+clinic. A key-shape refusal names the offending offset and character class and
+never echoes the value.
 
 ## Concurrency
 
@@ -247,6 +281,17 @@ Bounded by construction:
   host returns **503** — an explicit controlled error, never a silent drop
   and never an unbounded queue;
 * metrics label cardinality capped, with overflow folded away.
+
+**What the upstream answer has to look like.** Only a `2xx` that can carry a
+body is treated as a grant; `3xx` is refused even though `follow_redirects` is
+already off, because a captive portal, an Apache `Redirect` rule or a
+TLS-intercepting proxy that answers with JSON would otherwise have *its* body
+parsed into a token; `204`/`205`/`206` are refused for the mirror-image reason.
+A `Retry-After` from Deepgram is forwarded to the client. And every failure of
+the upstream call — timeout, refusal, an unencodable key, a pool closed during
+shutdown — arrives as a `GrantError` with a 502/503/504, never as a bare 500:
+an unhandled exception is invisible to `token_request_failures_total`, which
+would leave a fully broken host reporting zero failures.
 
 ## Running it
 
@@ -375,7 +420,20 @@ updates:
 | `registry_clients` | gauge | client identities the host can authenticate |
 | `session_starts_total` | counter | authenticated session requests received |
 | `session_success_total` | counter | tokens issued |
-| `session_failures_total` | counter | requests that produced no token |
+| `session_failures_total` | counter | authenticated requests that produced no token: rate-limited, malformed body, refused at capacity, or failed upstream |
+| `session_requests_by_client_total` | counter | the same outcomes per device: `{client_id, outcome}` with `outcome` in `ok`, `rate_limited`, `body_too_large`, `body_timeout`, `incomplete_body`, `invalid_request`, `upstream_saturated`, `upstream_error`, `internal_error` |
+
+`session_success_total + session_failures_total == session_starts_total` is the
+invariant every terminal outcome in the route must preserve — a request that
+produced no token is a failure, including the ones the host refuses itself.
+Without it, "nobody is calling" and "everything is failing" render
+identically, which is the one distinction a scrape of this service exists to
+make. It is asserted in
+`tests/test_backend_fixes.py::test_every_authenticated_request_is_counted_as_success_or_failure`.
+
+`session_requests_by_client_total` is the only labelled series, and it is
+labelled with the **authenticated** id, never a presented one: fabricated ids
+cannot inflate the cardinality bound or attribute someone else's traffic.
 | `token_requests_total`, `token_request_failures_total` | counter | upstream grant attempts / failures |
 | `deepgram_connection_failures_total` | counter | grant failed because Deepgram was unreachable or too slow (503/504) |
 | `auth_failures_total` | counter | rejected `POST /v1/session` credentials |
@@ -482,8 +540,10 @@ published per-project numbers and the secondary-project trap.
   route, including rejected input, capacity rejection and cancellation.
   `token_requests_total` / `token_request_failures_total` describe actual
   upstream attempts only; `grant_capacity_rejections_total` is separate.
-  Legacy `session_*` counters describe internal grant flow and must not be
-  used as all-request success ratios.
+  `session_success_total + session_failures_total == session_starts_total`
+  holds for every authenticated request, so the `session_*` trio *is* a
+  success ratio for the route — which is what makes a divergence during an
+  incident mean a code path was added without its accounting.
 - Failed-auth lockout still throttles bad credentials, but valid credentials
   bypass that budget so a broken device/attacker cannot lock out colleagues
   sharing a hospital NAT. Per-device and global authenticated limits still apply.
