@@ -128,7 +128,7 @@ def _fix_punctuation_spacing(text: str) -> str:
         if (
             ch in _PUNCT_SPACE_AFTER
             and i + 1 < n
-            and text[i + 1] not in " \n"
+            and text[i + 1] not in " \n" + ZWNJ
             and not _looks_numeric_context(text, i)
         ):
             out.append(" ")
