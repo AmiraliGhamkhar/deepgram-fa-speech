@@ -38,13 +38,17 @@ def _ci_check_commands() -> list[str]:
 
 
 def test_doc_installs_both_requirement_files() -> None:
-    """N-01: without host deps, the host suites skip whole modules, exit 0."""
+    """N-01: without host deps, the host suites skip whole modules, exit 0.
+
+    The two -dev files are now installed as their compiled union,
+    requirements/dev.lock (tests/test_lockfiles.py proves the lock covers
+    every package in host/requirements.txt); the doc must install THAT."""
     text = PS_DOC.read_text(encoding="utf-8")
-    assert "-r requirements-dev.txt" in text
-    assert "-r host/requirements-dev.txt" in text, (
-        "docs/WINDOWS_POWERSHELL.md must install the host requirements too: "
-        "five suites pytest.importorskip fastapi/httpx/a2wsgi/uvicorn and "
-        "skip silently without them (audit N-01)"
+    assert "--require-hashes -r requirements/dev.lock" in text, (
+        "docs/WINDOWS_POWERSHELL.md must install the hashed dev lock (which "
+        "includes the host requirements): five suites pytest.importorskip "
+        "fastapi/httpx/a2wsgi/uvicorn and skip silently without them "
+        "(audit N-01)"
     )
 
 

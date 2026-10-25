@@ -1,5 +1,7 @@
 # Dev tools for this project's CI (ruff, mypy, pytest).
-# Install once:  pip install -r requirements-dev.txt
+# Input file for requirements/dev.lock -- install the LOCK instead:
+#                pip install --require-hashes -r requirements/dev.lock
+# (Edit ranges here, then regenerate with scripts/update_locks.sh.)
 # Then:          ruff check medical_stt tests scripts host
 #                mypy medical_stt host/core.py
 #                pytest tests/ -q

@@ -1,3 +1,5 @@
+# Input file for requirements/dev.lock (with ../requirements-dev.txt);
+# CI installs the compiled lock with --require-hashes.
 -r requirements.txt
 
 # Only needed to exercise the ASGI layer in tests; the core logic in

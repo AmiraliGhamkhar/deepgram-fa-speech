@@ -33,7 +33,10 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libportaudio2
 
       - name: Install dependencies
-        # host/requirements-dev.txt is installed here too, on purpose. Several
+        # requirements/dev.lock is the compiled, hash-pinned union of
+        # requirements-dev.txt + host/requirements-dev.txt (see
+        # scripts/update_locks.sh), so the host dependencies are installed
+        # here too, on purpose. Several
         # host suites (test_host_app.py, test_audit_fixes.py,
         # test_host_concurrency.py) begin with pytest.importorskip("fastapi"),
         # so with only the client dependencies installed they skipped *whole
@@ -41,7 +44,7 @@ jobs:
         # build if that ever happens again.
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements-dev.txt -r host/requirements-dev.txt
+          pip install --require-hashes -r requirements/dev.lock
 
       - name: Record resolved dependencies
         run: python -m pip list --format=json > dependency-versions.json
@@ -98,11 +101,12 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        # host/requirements-dev.txt brings in fastapi/httpx/uvicorn so the
+        # requirements/dev.lock (the hashed union of both -dev files)
+        # brings in fastapi/httpx/uvicorn so the
         # ASGI-level suites (test_host_app.py, test_host_concurrency.py)
-        # actually run here. With only requirements-dev.txt they would be
+        # actually run here. With only the client dependencies they would be
         # *silently skipped* by importorskip -- a green job proving nothing.
-        run: python -m pip install --upgrade pip && pip install -r requirements-dev.txt -r host/requirements-dev.txt
+        run: python -m pip install --upgrade pip && pip install --require-hashes -r requirements/dev.lock
 
       - name: Run host service tests
         run: pytest tests/test_host_service.py tests/test_host_client.py -v
@@ -140,7 +144,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements-dev.txt -r host/requirements-dev.txt
+          pip install --require-hashes -r requirements/dev.lock
 
       # Windows runners cannot be debugged from a Linux checkout, so both
       # steps below surface their failure lines as GitHub annotations: the
@@ -194,13 +198,14 @@ jobs:
           cache: "pip"
 
       - name: Install dependencies
-        # host/requirements-dev.txt too: build_windows.ps1 runs the WHOLE
+        # The hashed dev lock covers host/requirements-dev.txt too:
+        # build_windows.ps1 runs the WHOLE
         # tests/ tree as a build gate, and the host suites would otherwise
         # be silently skipped by importorskip (same reasoning as the `test`
         # job's install step).
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements-dev.txt -r host/requirements-dev.txt
+          pip install --require-hashes -r requirements/dev.lock
 
       - name: Preflight (tkinter overlay + sounddevice import)
         # Fails with a clear annotation instead of a mid-build Nuitka error
@@ -262,8 +267,9 @@ jobs:
     name: Dependency audit (known CVEs)
     runs-on: ubuntu-latest
     # Advisories are published after a dependency is pinned, so a green build
-    # yesterday says nothing about today. This job resolves both requirement
-    # files (client and host) against the advisory database on every push.
+    # yesterday says nothing about today. This job audits both runtime
+    # LOCKFILES (client and host) -- the exact versions every other job and
+    # the Docker image install -- against the advisory database on every push.
     steps:
       - uses: actions/checkout@v4
 
@@ -275,7 +281,7 @@ jobs:
         run: python -m pip install --upgrade pip && pip install "pip-audit>=2.7,<3.0"
 
       - name: Audit client + host dependencies
-        run: pip-audit -r requirements.txt -r host/requirements.txt --strict
+        run: pip-audit -r requirements/client.lock -r requirements/host.lock --strict
 
   secret-scan:
     name: Secret scan

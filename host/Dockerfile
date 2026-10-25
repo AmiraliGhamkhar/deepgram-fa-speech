@@ -19,8 +19,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /srv
 
-COPY host/requirements.txt ./host/requirements.txt
-RUN pip install --no-cache-dir -r host/requirements.txt \
+COPY requirements/host.lock ./requirements/host.lock
+# Hash-pinned install of the exact reviewed dependency set (compiled from
+# host/requirements.txt; regenerate with scripts/update_locks.sh). A wheel
+# whose bytes differ from the reviewed ones fails the build instead of
+# quietly landing in the image.
+RUN pip install --no-cache-dir --require-hashes -r requirements/host.lock \
     && useradd --system --create-home --uid 10001 stt
 
 COPY host/ ./host/

@@ -43,8 +43,9 @@ cd deepgram-fa-speech
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
-# Both files: the host suites skip silently without the host dependencies.
-pip install -r requirements-dev.txt -r host/requirements-dev.txt
+# The hashed dev lock covers both -dev files: the host suites skip
+# silently without the host dependencies.
+pip install --require-hashes -r requirements/dev.lock
 ```
 
 If `Activate.ps1` is blocked by execution policy (error: *"running
