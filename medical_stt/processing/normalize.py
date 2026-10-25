@@ -70,7 +70,7 @@ _LEADING_TRAILING_RE = re.compile(r"^[ \t\r\f\v\u200c]+|[ \t\r\f\v\u200c]+$")
 # (real mid-word ZWNJ never has surrounding spaces) -- it is an ASR/typing
 # artifact between two otherwise separate words, so it collapses to a single
 # ordinary space rather than fusing the words together.
-_ZWNJ_BOTH_SIDES_SPACED_RE = re.compile(r"\s+" + ZWNJ + r"\s+")
+_ZWNJ_BOTH_SIDES_SPACED_RE = re.compile(r"[ \t]+" + ZWNJ + r"[ \t]+")
 _ZWNJ_DUPLICATED_RE = re.compile(ZWNJ + "{2,}")
 
 # Persian/Arabic punctuation that should have no space before it and one

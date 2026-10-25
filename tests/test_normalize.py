@@ -132,3 +132,10 @@ def test_punctuation_tables_have_no_duplicate_entries():
 
     for table in (_PUNCT_NO_SPACE_BEFORE, _PUNCT_SPACE_AFTER):
         assert len(table) == len(set(table)), f"duplicated marks in {table!r}"
+
+
+def test_zwnj_cleanup_never_joins_separate_lines():
+    for text in ("خط اول\n\u200c\nخط دوم", "خط اول\n \u200c \nخط دوم", "خط اول\t\u200c\nخط دوم"):
+        assert normalize(text).count("\n") == text.count("\n")
+        assert normalize(text).splitlines()[0].startswith("خط اول")
+        assert normalize(text).splitlines()[-1] == "خط دوم"
