@@ -437,6 +437,32 @@ def test_client_id_row_matches_the_other_settings_rows(monkeypatch):
     assert label.kwargs["font"] == ("Segoe UI", 8)
 
 
+# -- A3.1: a poisoned settings file must not kill the window -----------------
+
+
+def test_build_survives_a_config_error(monkeypatch):
+    """`get_settings()` raising inside `_build` used to kill the Tk thread:
+    `_run` only catches TclError, so `_ready` never set and Start timed out
+    with no window and no explanation."""
+    from medical_stt.ui import colors
+
+    _install_fake_tk(monkeypatch)
+
+    def poisoned():
+        raise control.ConfigError("settings.yaml: host_secret must not be stored in plaintext")
+
+    monkeypatch.setattr(control, "get_settings", poisoned)
+    window = ControlWindow(_StoppedController())
+
+    assert window.start() is True, "the window must still initialize"
+    assert window._initialized is True
+    assert "plaintext" in window._config_error, "start() must report the failure, not swallow it"
+    assert window._status.kwargs["text"] == "● خطای پیکربندی"
+    assert window._status.kwargs["fg"] == colors.REC
+    assert window._detail.kwargs["text"], "the detail line must carry a short Persian explanation"
+    assert window._client_id_var.get() == ""
+
+
 def test_recovery_popup_is_themed_modal_and_confirms_copy(monkeypatch):
     from medical_stt.ui import colors
 

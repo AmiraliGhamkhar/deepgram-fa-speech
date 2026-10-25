@@ -101,6 +101,8 @@ class ControlWindow:
         self._mailbox = dispatch.Mailbox()
         self._starting = False
         self._saving = False
+        #: Set when the window had to render without usable settings (A3.1).
+        self._config_error = ""
         self._start_done = threading.Event()
         self._start_done.set()
         self._client_id_var: Optional["tk.StringVar"] = None
@@ -256,7 +258,17 @@ class ControlWindow:
                  fg=_FG, insertbackground=_FG, relief="flat", justify="left",
                  font=("Segoe UI", 9)).pack(fill="x", pady=(2, 0), ipady=3)
 
-        self._client_id_var = tk.StringVar(value=get_settings().host_client_id)
+        try:
+            client_id_value = get_settings().host_client_id
+        except ConfigError as exc:
+            # A malformed settings file must not kill the Tk thread: `_run`
+            # only survives TclError, and a window that never renders can
+            # never tell the user what to fix. Render with empty fields and
+            # say so below instead.
+            client_id_value = ""
+            self._config_error = str(exc)
+            log.error("control window opened with unusable settings: %s", exc)
+        self._client_id_var = tk.StringVar(value=client_id_value)
         tk.Label(inner, text="شناسه دستگاه", bg=_BG, fg=_MUTED, anchor="e",
                  font=("Segoe UI", 8)).pack(fill="x", pady=(6, 0))
         tk.Entry(inner, textvariable=self._client_id_var, bg=_SURFACE, fg=_FG,
@@ -273,6 +285,12 @@ class ControlWindow:
         for widget in (root, inner, header, title, self._status, self._detail):
             widget.bind("<ButtonPress-1>", self._on_drag_start)
             widget.bind("<B1-Motion>", self._on_drag_move)
+
+        if self._config_error:
+            # Written directly, not via the mailbox: this IS the Tk thread,
+            # and the pump has not started yet.
+            self._status.config(text="● خطای پیکربندی", fg=_REC)
+            self._detail.config(text="فایل تنظیمات نامعتبر است؛ آن را اصلاح کنید و دوباره تلاش کنید")
 
         root.geometry("+40+40")
 
