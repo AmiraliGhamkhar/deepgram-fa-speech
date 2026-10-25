@@ -29,6 +29,12 @@
 #   numeric_in_source: false by default; true only for reviewed rules whose
 #                       normalized source and target have identical digit runs
 #
+# Normalization contract: source and target are both normalized at parse time
+# (Unicode letterforms, digits, separators, ZWNJ usage and spacing). Write new
+# rules in normalized Persian, but a legacy Arabic-yeh source can no longer be
+# silently dead, and a non-normalized target cannot be injected into a
+# normalized transcript. Digit-run validation compares both normalized sides.
+#
 # Regenerated from the legacy flat from/to list by
 # scripts/classify_corrections.py (see that file for the classification
 # heuristics and rationale). Manual review is still recommended before

@@ -31,6 +31,7 @@ import yaml
 from dotenv import load_dotenv
 
 from . import paths
+from .processing.normalize import normalize
 from .security import SecretStore, SecretStoreError
 
 log = logging.getLogger("medical_stt.config")
@@ -859,5 +860,8 @@ def load_correction_rules() -> List[Tuple[str, str]]:
         src = item.get("from") or item.get("source") or item.get("src")
         tgt = item.get("to") or item.get("target") or item.get("tgt")
         if src and tgt is not None:
-            pairs.append((str(src), str(tgt)))
+            # Legacy flat callers must see the same canonical form as the
+            # terminology engine: a raw Arabic-yeh source would otherwise stay
+            # unmatchable after normalize() has run on the transcript.
+            pairs.append((normalize(str(src)), normalize(str(tgt))))
     return pairs

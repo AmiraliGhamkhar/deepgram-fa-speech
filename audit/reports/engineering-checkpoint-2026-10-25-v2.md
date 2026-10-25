@@ -22,7 +22,8 @@ production code. Failures below were observed, not inferred.
 
 | Item | Commit | Before (targeted regression) | After (targeted regression) |
 |---|---|---|---|
-| P0-7 letter-glued numeric spans + Persian units | (this commit) | `17 failed, 50 passed` in `tests/test_numbers.py tests/test_terminology.py` | `67 passed` in the same targeted suite; census: `835 rules, 9 digit-bearing sources, 9 numeric-span sources, loader: OK, rejected: 0` |
+| P0-7 letter-glued numeric spans + Persian units | `783e7f7` | `17 failed, 50 passed` in `tests/test_numbers.py tests/test_terminology.py` | `67 passed` in the same targeted suite; census: `835 rules, 9 digit-bearing sources, 9 numeric-span sources, loader: OK, rejected: 0` |
+| P0-8 normalized terminology rule storage | (this commit) | `5 failed, 132 passed` in `tests/test_terminology.py tests/test_config.py tests/test_data_safety.py` | `137 passed` in the same targeted suite; census: `835 raw rules, 1 raw non-normalized side, 0 parsed non-normalized sides, Arabic-yeh source fires: True` |
 
 ### P0-7 details
 
@@ -83,8 +84,9 @@ Full-suite validation after P0-7: `1071 passed, 4 skipped, 1 warning`;
 
 ## Remaining acceptance limitations
 
-- P0-8 through P0-14, all P1/P2 items and all GUI changes are still pending
-  at this checkpoint revision.
+- This checkpoint is appended incrementally; the latest per-fix section is the
+  authoritative progress marker. P0-9 through P0-14, all P1/P2 items and all
+  GUI changes remain outstanding at this revision.
 - The accepted Starlette test-client warning is preserved; no warning filters
   or lockfile edits were added.
 - Native Windows injection, live microphone and live Deepgram behaviors
@@ -93,3 +95,48 @@ Full-suite validation after P0-7: `1071 passed, 4 skipped, 1 warning`;
 - The historical-key owner action from `SECURITY.md` remains: revoke the
   exposed key in the Deepgram console and follow the owner-managed history
   cleanup procedure. No rewrite was attempted here.
+
+### P0-8 details
+
+- `parse_rules` now normalizes both source and target once, stores the
+  canonical forms in `TerminologyRule`, validates the numeric opt-in flag
+  against digit runs from both normalized sides, and rejects a source that
+  normalizes to empty with a loud `ConfigError`.
+- The legacy flat pair loader also returns normalized pairs, so no caller can
+  build a dead automaton from raw Arabic-yeh sources.
+- `audit/repro/probe_normalization_census.py` swept all 835 shipped rules by
+  comparing each raw `from`/`to` with `normalize()` and with the parsed rule.
+  Exactly one raw difference remains, rule 776 `پايدار -> پایدار`; the parsed
+  rule set has zero non-normalized sides and the synthetic opt-in engine fires
+  on `پایدار`. The raw legacy spelling is intentionally retained in YAML as a
+  regression fixture; no rule semantics changed. A census test asserts that
+  no future parsed rule regresses.
+- Targets written with Persian digits and Arabic decimal separators are now
+  canonicalized before digit-run comparison and before injection.
+- `data/corrections.yaml` header documents the normalization contract.
+
+Before (excerpt from `/tmp/p0_8_before.txt`):
+
+```text
+FAILED tests/test_terminology.py::test_arabic_yeh_source_is_not_a_dead_rule_after_parse_time_normalization
+FAILED tests/test_terminology.py::test_non_normalized_target_is_normalized_before_injection
+FAILED tests/test_terminology.py::test_digit_run_validation_normalizes_both_source_and_target
+FAILED tests/test_terminology.py::test_shipped_rule_census_has_no_non_normalized_parsed_entries
+FAILED tests/test_terminology.py::test_flat_correction_pairs_use_normalized_rules
+5 failed, 132 passed in 0.61s
+```
+
+After `python audit/repro/probe_normalization_census.py`:
+
+```text
+total rules: 835, parsed rules: 835
+raw non-normalized sides: 1
+  776:from 'پايدار' -> 'پایدار'
+parsed non-normalized sides: 0
+Arabic-yeh source fires on normalized Persian: True
+```
+
+Full-suite validation after P0-8: `1076 passed, 4 skipped, 1 warning`;
+`ruff check .`, `mypy medical_stt host benchmarks` and secret scan clean.
+No existing test pin was changed for P0-8; five new regression tests were
+added.
