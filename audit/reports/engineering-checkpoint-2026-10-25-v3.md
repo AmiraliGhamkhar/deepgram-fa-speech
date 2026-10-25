@@ -50,3 +50,45 @@ body cancellation logs terminal failure before re-raising.
 Deliberately updated pin: `test_main_says_so_when_plaintext_is_deliberate`
 now changes the already-parsed settings instead of changing the environment
 after import (main no longer reparses it). Existing production guards remain.
+
+### P2 explicit list (one batch)
+
+Before: remaining-polish + provider-protocol suites **9 failed, 37 passed**.
+After (including updated metric pin): full Phase 1 validation below.
+
+- Uptime emits TYPE gauge; status-labelled HTTP outcomes no longer have an
+  unlabelled zero series. Cancellation uses numeric conventional `499` (not an
+  actual response) rather than `status="cancelled"`; authenticated per-client
+  outcome `cancelled` remains unchanged.
+- Clamp warnings identify TTL/body setting names only; obsolete rate setting
+  marked deprecated. Retry-After's delta-seconds-only parser documented.
+- Passenger limitation explicitly documented (allowed alternative to a new
+  watchdog): startup smoke check only; an exited/stalled loop needs external
+  health timeout + worker restart; daemon shutdown has no join/loop.close.
+- NFKC superscript/compatibility folding documented; fraction slash mapped.
+- Legacy streaming-backspace API marked public-API-only. App sends unmarked
+  text to injection; type mode opts into a single mark at its boundary, paste
+  keeps its existing boundary. Raw public type/delta callers are unchanged.
+- Positive jitter accepts an injectable RNG. Stereo uses documented
+  `multichannel`, not ignored `channels`.
+- Host-client socket timeout vs 25 s session-readiness deadline documented;
+  a dribbling fetch can outlive the session on its fenced daemon thread.
+- Existing keep-alive cross-reconnect worker bound/comment retained: a
+  stalled worker prevents another keep-alive until it dies. No P0-2 changes.
+
+Updated pin: `test_new_metrics_preseeds_counters_and_gauges_but_not_histograms`
+now explicitly excludes the status-labelled counter from unlabelled zeros.
+
+## Phase 1 full validation (observed)
+
+```
+pytest tests/ -q: 1205 passed, 4 skipped, 1 warning in 59.56s
+ruff check .: All checks passed!
+mypy medical_stt host benchmarks: Success: no issues found in 44 source files
+python scripts/scan_secrets.py: clean: no credentials found in the working tree
+note: 1 baseline entry matched nothing (existing scanner advisory)
+```
+
+Warning unchanged: Starlette/httpx TestClient deprecation; no filters or locks
+changed. Live/load/soak gates untouched. Native Windows/Tk visual acceptance
+is not claimed in this headless Linux environment.

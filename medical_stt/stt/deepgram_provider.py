@@ -419,7 +419,7 @@ class DeepgramProvider(STTProvider):
                 "language": s.language,
                 "encoding": "linear16",
                 "sample_rate": s.sample_rate,
-                "channels": s.channels,
+                "multichannel": s.channels == 2,
                 "interim_results": True,
                 "endpointing": s.endpointing,
                 "utterance_end_ms": s.utterance_end_ms,

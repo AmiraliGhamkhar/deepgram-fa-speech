@@ -267,7 +267,7 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
         is_session = request.url.path == "/v1/session" and request.method == "POST"
         admitted = False
         started = time.monotonic()
-        outcome = "cancelled"
+        outcome = "499"  # client closed request; conventional numeric status, not an HTTP response
         if is_session:
             metrics.increment("session_http_requests_total")
         try:

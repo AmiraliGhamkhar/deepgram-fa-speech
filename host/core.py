@@ -275,7 +275,14 @@ class HostSettings:
         def _float(name: str, fallback: float) -> float:
             return _number(name, fallback, float)
 
-        max_ttl = min(_int("HOST_MAX_TTL_SECONDS", MAX_TTL_SECONDS), MAX_TTL_SECONDS)
+        requested_max_ttl = _int("HOST_MAX_TTL_SECONDS", MAX_TTL_SECONDS)
+        max_ttl = max(5, min(requested_max_ttl, MAX_TTL_SECONDS))
+        if max_ttl != requested_max_ttl:
+            log.warning("clamping HOST_MAX_TTL_SECONDS to supported bounds")
+        requested_body_bytes = _int("HOST_MAX_REQUEST_BODY_BYTES", MAX_REQUEST_BODY_BYTES)
+        body_bytes = max(64, requested_body_bytes)
+        if body_bytes != requested_body_bytes:
+            log.warning("clamping HOST_MAX_REQUEST_BODY_BYTES to supported bounds")
         default_ttl = _int("HOST_DEFAULT_TTL_SECONDS", DEFAULT_TTL_SECONDS)
         window = max(1, _int("HOST_RATE_LIMIT_WINDOW_SECONDS", 60))
         region = (source.get("DEEPGRAM_REGION") or "us").strip().lower()
@@ -317,9 +324,7 @@ class HostSettings:
             global_rate_limit_requests=max(1, _int("HOST_GLOBAL_RATE_LIMIT_REQUESTS", 600)),
             global_burst=max(1, _int("HOST_GLOBAL_BURST", 1200)),
             auth_failure_limit=max(1, _int("HOST_AUTH_FAILURE_LIMIT", 20)),
-            max_request_body_bytes=max(
-                64, _int("HOST_MAX_REQUEST_BODY_BYTES", MAX_REQUEST_BODY_BYTES)
-            ),
+            max_request_body_bytes=body_bytes,
             max_inflight_grants=max(1, _int("HOST_MAX_INFLIGHT_GRANTS", 100)),
             max_active_requests=max(1, _int("HOST_MAX_ACTIVE_REQUESTS", 128)),
             request_body_timeout_seconds=max(0.1, _float("HOST_REQUEST_BODY_TIMEOUT_SECONDS", 2.0)),
@@ -1123,6 +1128,8 @@ def new_session_id() -> str:
 
 
 def _retry_after(value: Optional[str]) -> Optional[int]:
+    # Provider contract: delta-seconds only, not HTTP-date. Unrecognized date
+    # values are ignored; ordinary bounded reconnect backoff still applies.
     try:
         seconds = float(value) if value else 0.0
         return min(60, max(1, math.ceil(seconds))) if math.isfinite(seconds) and seconds > 0 else None

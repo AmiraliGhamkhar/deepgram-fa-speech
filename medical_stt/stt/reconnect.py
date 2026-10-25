@@ -139,7 +139,9 @@ def exponential_backoff_delay(
     return max(0.0, rng.uniform(floor, capped))
 
 
-def _positive_jitter(floor: float, policy: ReconnectPolicy, cap: float) -> float:
+def _positive_jitter(
+    floor: float, policy: ReconnectPolicy, cap: float, rng: _UniformRandom = _default_rng
+) -> float:
     """Spread retries without waking before the server's required minimum."""
     width = min(max(0.0, cap - floor), floor * min(1.0, max(0.0, policy.jitter)))
-    return floor + _default_rng.uniform(0.0, width) if width else floor
+    return floor + rng.uniform(0.0, width) if width else floor

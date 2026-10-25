@@ -26,6 +26,12 @@ a2wsgi does not implement the ASGI lifespan protocol, so the app's startup
 log line and its shutdown handler (`grant_client.aclose()`) never run here.
 A best-effort atexit hook closes the pool on the adapter's own loop during
 normal exit; abrupt Passenger termination relies on OS socket reclamation.
+Limitation: there is no runtime liveness watchdog after the startup smoke
+probe. If run_forever exits or the loop stalls, in-flight adapter requests
+can hang; use an external /healthz timeout and Passenger worker restart.
+Normal shutdown stops but does not join/close the daemon loop: abrupt process
+exit relies on OS reclamation. This bridge is not the preferred uvicorn path.
+
 Capacity gauges and `app.state.grant_client` are built in `create_app`, not
 `lifespan`, so they are still available in this deployment mode.
 

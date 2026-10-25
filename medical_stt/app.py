@@ -39,7 +39,6 @@ from .config import (
     validate_settings,
 )
 from .injection import TextInjector
-from .processing.bidi import to_injected
 from .processing.confidence import (
     MedicalConfidenceWarning,
     find_low_confidence_medical_words,
@@ -415,7 +414,7 @@ class LiveMedicalSTT:
             rewritten = self.terminology.apply(normalized, protected_ranges=uncertain_spans)
         terminology_end = time.monotonic()
 
-        injected_repr = to_injected(rewritten)
+        # Directional formatting belongs to the injection boundary only.
         bidi_end = time.monotonic()
 
         self.injector.reset_partial()
@@ -425,10 +424,10 @@ class LiveMedicalSTT:
             # with a stray leading space. (Paste mode does not need this
             # check -- TextInjector.paste_text recovers the separator via
             # _trailing_separator, which already drops it after \n.)
-            separator = "" if injected_repr[-1:].isspace() else " "
-            ok = self.injector.type_text(injected_repr + separator)
+            separator = "" if rewritten[-1:].isspace() else " "
+            ok = self.injector.type_text(rewritten + separator, add_directional_mark=True)
         else:
-            ok = self.injector.paste_text(injected_repr + " ", add_rtl_mark=True)
+            ok = self.injector.paste_text(rewritten + " ", add_rtl_mark=True)
         injection_end = time.monotonic()
         if not ok:
             log.warning("injection failed for a final transcript")

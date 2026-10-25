@@ -265,6 +265,7 @@ class Metrics:
                 lines.append(f"{name}_sum{base} {_as_number(histogram_sum)}")
                 lines.append(f"{name}_count{base} {count}")
 
+        lines.append("# TYPE host_uptime_seconds gauge")
         lines.append(f"host_uptime_seconds {_as_number(self.uptime_seconds)}")
         return "\n".join(lines) + "\n"
 
@@ -345,7 +346,8 @@ def new_metrics(max_labelled_clients: int = MAX_LABELLED_CLIENTS) -> Metrics:
     """
     metrics = Metrics(max_labelled_clients=max_labelled_clients)
     for name in DECLARED_COUNTERS:
-        metrics.increment(name, 0)
+        if name != "session_http_outcomes_total":
+            metrics.increment(name, 0)
     for name in DECLARED_GAUGES:
         metrics.set_gauge(name, 0)
     return metrics
