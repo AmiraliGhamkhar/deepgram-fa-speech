@@ -1,7 +1,11 @@
 """Mixed RTL/LTR handling tests (task section 5)."""
 from __future__ import annotations
 
+import pytest
+
 from medical_stt.processing.bidi import (
+    LRM,
+    RLM,
     base_direction,
     build_transcript_view,
     has_ltr_content,
@@ -15,8 +19,8 @@ def test_base_direction_rtl_when_persian_leads():
     assert base_direction("فشار خون 120/80 mmHg") == "rtl"
 
 
-def test_base_direction_ltr_when_latin_leads():
-    assert base_direction("MI در ECG مشاهده شد") == "ltr"
+def test_base_direction_uses_persian_majority_when_latin_leads():
+    assert base_direction("MI در ECG مشاهده شد") == "rtl"
 
 
 def test_base_direction_ltr_for_pure_numbers():
@@ -93,3 +97,54 @@ def test_empty_text():
     assert view.logical == ""
     assert view.display == ""
     assert view.injected == ""
+
+
+# -- P0-9: majority-strong paragraph direction ------------------------------
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        # Persian-dominant medical dictation often begins with a Latin drug
+        # name, abbreviation or lab marker. First-strong would flip the EMR
+        # paragraph to LTR and move trailing punctuation to the wrong side.
+        ("MI در ECG مشاهده شد", "rtl"),
+        ("TKA سمت راست انجام شد", "rtl"),
+        ("Aspirin برای بیمار تجویز شد", "rtl"),
+        ("HbA1c برابر 7.2 درصد است", "rtl"),
+        # A Persian lead does not force RTL when the sentence is Latin-dominant.
+        ("بیمار CT scan normal", "ltr"),
+        ("فشار خون 120/80 mmHg", "rtl"),
+        ("بیمار سابقه سکته قلبی دارد", "rtl"),
+        ("patient has stable vitals", "ltr"),
+        # Pure-neutral text keeps the existing LTR default.
+        ("120/80", "ltr"),
+        ("98%", "ltr"),
+        ("...", "ltr"),
+        # Ties fall back to the old first-strong rule.
+        ("AB حس", "ltr"),
+        ("حس AB", "rtl"),
+    ],
+)
+def test_base_direction_counts_strong_characters(text, expected):
+    assert base_direction(text) == expected
+
+
+@pytest.mark.parametrize(
+    "text,expected_mark",
+    [
+        ("MI در ECG مشاهده شد", RLM),
+        ("TKA سمت راست انجام شد", RLM),
+        ("HbA1c برابر 7.2 درصد است", RLM),
+        ("بیمار CT scan normal", LRM),
+        ("patient has stable vitals", LRM),
+        ("120/80", LRM),
+        ("98%", LRM),
+    ],
+)
+def test_injected_mark_follows_majority_without_embeddings(text, expected_mark):
+    injected = to_injected(text)
+    assert injected.startswith(expected_mark)
+    assert injected.count(LRM) + injected.count(RLM) == 1
+    assert "\u202b" not in injected and "\u202c" not in injected  # RLE/PDF
+    assert injected.lstrip(LRM + RLM) == text
+    assert to_injected(injected) == injected

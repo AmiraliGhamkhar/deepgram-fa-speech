@@ -420,3 +420,22 @@ def test_utterance_end_ms_is_validated_to_deepgrams_range():
     assert not [e for e in validate_settings(Settings(utterance_end_ms=5000, **base)) if "utterance_end_ms" in e]
     for bad in (0, 999, 5001, 20000):
         assert any("utterance_end_ms" in e for e in validate_settings(Settings(utterance_end_ms=bad, **base)))
+
+
+# -- P1: a late send after stop() is shutdown, not a network failure --------
+
+@pytest.mark.parametrize("method", ["send_audio", "keep_alive"])
+def test_late_send_after_stop_is_classified_as_shutdown(method):
+    from medical_stt.stt.deepgram_provider import DeepgramProvider
+
+    provider = DeepgramProvider(
+        Settings(host_url="https://stt.example.com", host_secret="fake"),
+        token_provider=lambda: "fake-token",
+    )
+    provider.stop()
+    with pytest.raises(ProviderError) as excinfo:
+        if method == "send_audio":
+            provider.send_audio(b"x")
+        else:
+            provider.keep_alive()
+    assert excinfo.value.category is ErrorCategory.SHUTDOWN

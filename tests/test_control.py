@@ -6,6 +6,8 @@ import threading
 import time
 from types import SimpleNamespace
 
+import pytest
+
 from medical_stt.ui import control
 from medical_stt.ui.control import ControlWindow, _darken
 
@@ -248,6 +250,7 @@ class _FakeWidget:
         self.grabbed = False
         self.transient_of = None
         self.clipboard = ""
+        self.attribute_calls = []
 
     def walk(self):
         yield self
@@ -295,8 +298,8 @@ class _FakeWidget:
     def overrideredirect(self, _value=None):
         pass
 
-    def attributes(self, *_args):
-        pass
+    def attributes(self, *args):
+        self.attribute_calls.append(args)
 
     def resizable(self, *_args):
         pass
@@ -460,27 +463,82 @@ def test_no_inline_hex_colours_outside_the_palette_module():
         assert not re.findall(r"#[0-9a-fA-F]{6}", source), f"{name} still spells a colour inline"
 
 
-def test_secondary_buttons_share_the_flat_style(monkeypatch):
+def _circle_texts(canvas):
+    return [item["text"] for item in canvas.items.values() if item["kind"] == "text"]
+
+
+def test_button_diameters_match_the_restyle_spec():
+    """The restyle sizes are a visual contract: primary 72, secondary 52, quit 20."""
+    assert control._TOGGLE_DIAMETER == 72
+    assert control._SECONDARY_DIAMETER == 52
+    assert control._QUIT_DIAMETER == 20
+
+
+def test_secondary_actions_are_52px_circles_in_rtl_order(monkeypatch):
+    """R1 replacement for `test_secondary_buttons_share_the_flat_style`:
+    the three settings actions are 52px Canvas circles in one RTL row, with
+    the same hover-only recoloring the flat buttons had (SURFACE -> BORDER)."""
     from medical_stt.ui import colors
 
     window = _built_window(monkeypatch)
-    buttons = {b.kwargs.get("text"): b for b in window._root.find("Button")}
-    for label in ("بررسی اتصال", "متن بازیابی", "ذخیره تنظیمات"):
-        button = buttons[label]
-        assert button.kwargs["bg"] == colors.SURFACE
-        assert button.kwargs["relief"] == "flat"
-        assert button.kwargs["bd"] == 0
-        assert "<Enter>" in button.bindings and "<Leave>" in button.bindings
+    row = window._action_row
+    assert row.kind == "Frame"
+    circles = row.children
+    assert len(circles) == 3
 
-    save = buttons["ذخیره تنظیمات"]
-    save.bindings["<Enter>"](_FakeEvent(0, 0))
-    assert save.kwargs["bg"] == colors.BORDER
-    save.bindings["<Leave>"](_FakeEvent(0, 0))
-    assert save.kwargs["bg"] == colors.SURFACE
+    labels = []
+    for canvas in circles:
+        assert canvas.kind == "Canvas"
+        assert canvas.kwargs["width"] == control._SECONDARY_DIAMETER
+        assert canvas.kwargs["height"] == control._SECONDARY_DIAMETER
+        assert canvas.kwargs["bg"] == colors.BG, "no rectangular halo around the circle"
+        assert canvas.kwargs["highlightthickness"] == 0
+        assert canvas.kwargs["cursor"] == "hand2"
+        assert canvas.pack_kwargs.get("side") == "right", "RTL row packs right-to-left"
+
+        oval = next(item for item in canvas.items.values() if item["kind"] == "oval")
+        x0, y0, x1, y1 = oval["args"]
+        assert x1 - x0 == y1 - y0, "square bounding box, so it is a circle"
+        assert oval["fill"] == colors.SURFACE
+
+        labels.append(_circle_texts(canvas)[0])
+        assert ("action", "<Button-1>") in canvas.tag_bindings
+        assert ("action", "<Enter>") in canvas.tag_bindings
+        assert ("action", "<Leave>") in canvas.tag_bindings
+        assert "<ButtonPress-1>" not in canvas.bindings, "a circle is not a drag handle"
+        assert "<B1-Motion>" not in canvas.bindings
+
+    # RTL reading order: first action at the right edge.
+    assert labels == ["بررسی\nاتصال", "متن\nبازیابی", "ذخیره\nتنظیمات"]
+
+    # Hover recolor matches the old flat-button behavior.
+    canvas = circles[0]
+    oval_id = next(i for i, item in canvas.items.items() if item["kind"] == "oval")
+    canvas.tag_bindings[("action", "<Enter>")](_FakeEvent(0, 0))
+    assert canvas.items[oval_id]["fill"] == colors.BORDER
+    canvas.tag_bindings[("action", "<Leave>")](_FakeEvent(0, 0))
+    assert canvas.items[oval_id]["fill"] == colors.SURFACE
+
+
+def test_quit_control_is_a_20px_circle_that_closes(monkeypatch):
+    window = _built_window(monkeypatch)
+    quit_canvas = window._quit
+
+    assert quit_canvas.kind == "Canvas"
+    assert quit_canvas.kwargs["width"] == control._QUIT_DIAMETER
+    assert quit_canvas.kwargs["height"] == control._QUIT_DIAMETER
+    oval = next(item for item in quit_canvas.items.values() if item["kind"] == "oval")
+    x0, y0, x1, y1 = oval["args"]
+    assert x1 - x0 == y1 - y0
+    assert _circle_texts(quit_canvas) == ["✕"]
+    assert ("quit", "<Button-1>") in quit_canvas.tag_bindings
+
+    quit_canvas.tag_bindings[("quit", "<Button-1>")](_FakeEvent(0, 0))
+    assert window._close_requested is True, "the quit circle must close the window"
 
 
 def test_client_id_row_matches_the_other_settings_rows(monkeypatch):
-    from medical_stt.ui import colors
+    from medical_stt.ui import colors, fonts
 
     window = _built_window(monkeypatch)
     entry = next(
@@ -490,7 +548,7 @@ def test_client_id_row_matches_the_other_settings_rows(monkeypatch):
     assert entry.kwargs["insertbackground"] == colors.FG
     assert entry.pack_kwargs.get("ipady") == 3
     label = next(w for w in window._root.find("Label") if w.kwargs.get("text") == "شناسه دستگاه")
-    assert label.kwargs["font"] == ("Segoe UI", 8)
+    assert label.kwargs["font"] == fonts.font(window._root, 8)
 
 
 # -- A3.1: a poisoned settings file must not kill the window -----------------
@@ -737,3 +795,114 @@ def test_close_destroys_the_window_after_a_confirmed_stop():
     assert fake_root.destroyed is True
     assert window._root is None
     assert window._closed is True
+
+
+# -- R2 fonts/DPI: process DPI awareness must precede any Tk interpreter ----
+
+
+def test_windows_dpi_awareness_is_applied_before_tk_is_created(monkeypatch):
+    """`SetProcessDpiAwareness` only affects interpreters created afterwards.
+
+    Windows bitmap-scales the whole UI at 125%/150% when the process is DPI
+    unaware, so the helper must run before `tk.Tk()` -- not after the window
+    exists.
+    """
+    from medical_stt.ui import fonts as fonts_module
+
+    order: list[str] = []
+    fake_tk = _install_fake_tk(monkeypatch)
+    real_tk = fake_tk.Tk
+
+    class _RecordingTk(real_tk):
+        def __init__(self, *args, **kwargs):
+            order.append("tk")
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(control.tk, "Tk", _RecordingTk)
+    monkeypatch.setattr(
+        fonts_module,
+        "enable_windows_dpi_awareness",
+        lambda loader=None: order.append("dpi") or True,
+    )
+
+    window = ControlWindow(_StoppedController())
+    assert window.start() is True
+    assert order == ["dpi", "tk"]
+
+
+# -- R3: RTL header, persistent drag, crisp opaque control surface ----------
+
+@pytest.fixture(autouse=True)
+def _isolated_ui_state(monkeypatch, tmp_path):
+    """Window-position persistence must never touch the real user profile."""
+    monkeypatch.setattr(
+        "medical_stt.paths.ui_state_path",
+        lambda: tmp_path / "ui_state.json",
+        raising=False,
+    )
+
+
+def test_control_window_is_fully_opaque(monkeypatch):
+    """R3/crisp: `-alpha` makes the control surface a layered window and
+    blurs it on Windows. Only the overlay may be translucent."""
+    window = _built_window(monkeypatch)
+    root = window._root
+    assert not [call for call in root.attribute_calls if "-alpha" in call]
+    assert ("-topmost", True) in root.attribute_calls, "topmost is not optional"
+
+
+def test_header_is_rtl_mirrored(monkeypatch):
+    """R3/RTL: the Persian layout mirrors the LTR default -- the title moves
+    to the right edge and the quit circle to the left; the status column
+    stays right-anchored."""
+    from medical_stt.ui import colors
+
+    window = _built_window(monkeypatch)
+    title = next(w for w in window._root.find("Label") if w.kwargs.get("text") == "Medical STT")
+    assert title.pack_kwargs.get("side") == "right"
+    assert window._quit.pack_kwargs.get("side") == "left"
+
+    status = window._status
+    assert status.kwargs["anchor"] == "e" and status.kwargs["justify"] == "right"
+    assert status.kwargs["fg"] == colors.MUTED
+    detail = window._detail
+    assert detail.kwargs["anchor"] == "e" and detail.kwargs["justify"] == "right"
+
+
+def test_window_position_persists_across_rebuilds(monkeypatch, tmp_path):
+    """R3/persistent drag: a finished drag is remembered and restored on the
+    next run. The drag math itself is untouched."""
+    import json as json_module
+
+    state_path = tmp_path / "ui_state.json"
+    window = _built_window(monkeypatch)
+    window._on_drag_start(_FakeEvent(520, 320))
+    window._on_drag_move(_FakeEvent(600, 400))    # press-time origin + pointer delta
+
+    moved = window._root.geometry_calls[-1]
+    window._on_drag_end(_FakeEvent(600, 400))
+    saved = json_module.loads(state_path.read_text(encoding="utf-8"))
+    x, y = (int(part) for part in moved.lstrip("+").split("+"))
+    assert (saved["x"], saved["y"]) == (x, y)
+
+    restored = _built_window(monkeypatch)
+    assert restored._root.geometry_calls[0] == moved
+
+    # A release without any drag must not rewrite the file.
+    before = state_path.read_text(encoding="utf-8")
+    restored._on_drag_end(_FakeEvent(0, 0))
+    assert state_path.read_text(encoding="utf-8") == before
+
+
+def test_corrupt_window_state_falls_back_to_the_default_position(monkeypatch, tmp_path):
+    (tmp_path / "ui_state.json").write_text("not json at all", encoding="utf-8")
+    window = _built_window(monkeypatch)
+    assert window._root.geometry_calls[0] == "+40+40"
+
+
+def test_window_position_is_saved_on_close(monkeypatch, tmp_path):
+    window = _built_window(monkeypatch)
+    window._root._x, window._root._y = 640, 480
+    window._destroy_window()
+    saved = (tmp_path / "ui_state.json").read_text(encoding="utf-8").replace(" ", "")
+    assert '"x":640' in saved and '"y":480' in saved

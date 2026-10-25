@@ -125,3 +125,9 @@ def test_the_env_template_does_not_carry_a_plaintext_secret():
             assert stripped == "MEDICALSTT_HOST_SECRET=", (
                 f".env.example carries a value for the secret: {stripped!r}"
             )
+
+
+def test_jitter_comment_describes_the_actual_full_jitter_policy():
+    text = SETTINGS_YAML.read_text(encoding="utf-8")
+    assert "+/-50%" not in text
+    assert "below the computed ceiling" in text

@@ -3,7 +3,12 @@ from __future__ import annotations
 
 import pytest
 
-from medical_stt.config import ConfigError, load_correction_rules_raw
+from medical_stt.config import (
+    ConfigError,
+    load_correction_rules,
+    load_correction_rules_raw,
+)
+from medical_stt.processing.normalize import normalize
 from medical_stt.processing.terminology import TerminologyEngine, parse_rules
 
 
@@ -186,10 +191,6 @@ def test_numeric_opt_in_requires_a_boolean():
         parse_rules([_rule("دکستروز 5%", "D5W", numeric_in_source="false")])
 
 
-def test_digit_in_latin_term_without_numeric_span_needs_no_opt_in():
-    engine = TerminologyEngine()
-    engine.load([_rule("لیزر CO2", "CO2 laser")])
-    assert engine.apply("لیزر CO2") == "CO2 laser"
 
 
 @pytest.mark.parametrize("rule", [
@@ -206,3 +207,77 @@ def test_yaml_loader_rejects_dead_or_digit_changing_rules(tmp_path, monkeypatch,
     monkeypatch.setattr(config_module, "_DATA_DIR", tmp_path)
     with pytest.raises(ConfigError, match="numeric_in_source|identical digit sequences"):
         config_module.load_correction_rules_raw()
+
+
+def test_letter_glued_digit_requires_numeric_opt_in():
+    """After P0-7, a digit in a Latin term is a protected numeric span."""
+    with pytest.raises(ConfigError, match="numeric_in_source"):
+        parse_rules([_rule("لیزر CO2", "CO2 laser")])
+
+    engine = TerminologyEngine()
+    engine.load([_rule("لیزر CO2", "CO2 laser", numeric_in_source=True)])
+    assert engine.apply("لیزر CO2") == "CO2 laser"
+
+
+def test_numeric_span_covers_persian_unit_against_terminology_rewrite():
+    engine = TerminologyEngine()
+    engine.load([_rule("گرم", "GRAM", category="specialty_terminology")])
+    assert engine.apply("دکستروز5 گرم") == "دکستروز5 گرم"
+
+
+# -- P0-8: normalized rule storage and digit-run validation -----------------
+
+def test_arabic_yeh_source_is_not_a_dead_rule_after_parse_time_normalization():
+    engine = TerminologyEngine(enable_context_dependent=True)
+    engine.load([_rule("پايدار", "stable", category="context_dependent", requires_context=True)])
+    assert engine.apply("وضعیت پایدار است") == "وضعیت stable است"
+
+
+def test_non_normalized_target_is_normalized_before_injection():
+    engine = TerminologyEngine()
+    engine.load([_rule("باثبات", "پايدار", category="safe_lexical")])
+    assert engine.apply("باثبات") == "پایدار"
+
+
+def test_digit_run_validation_normalizes_both_source_and_target():
+    raw = _rule("دکستروز 5٫0", "D۵٫۰W", numeric_in_source=True)
+    rules = parse_rules([raw])
+    assert rules[0].source == "دکستروز 5.0"
+    assert rules[0].target == "D5.0W"
+
+    engine = TerminologyEngine()
+    engine.load([raw])
+    assert engine.apply("دکستروز 5.0") == "D5.0W"
+
+
+def test_shipped_rule_census_has_no_non_normalized_parsed_entries():
+    rules = parse_rules(load_correction_rules_raw())
+    assert rules
+    assert all(r.source == normalize(r.source) and r.target == normalize(r.target) for r in rules)
+    assert any(r.source == "پایدار" and r.target == "stable" for r in rules)
+
+
+def test_flat_correction_pairs_use_normalized_rules():
+    pairs = load_correction_rules()
+    assert ("پایدار", "stable") in pairs
+    assert not any("ي" in source or "ي" in target for source, target in pairs)
+
+
+def test_extra_protected_ranges_block_only_the_uncertain_span():
+    engine = TerminologyEngine()
+    engine.load([
+        _rule("آی سی یو", "ICU", category="abbreviation_expansion"),
+        _rule("هایپرتنشن", "hypertension", category="specialty_terminology"),
+    ])
+    text = "آی سی یو و هایپرتنشن"
+    start = text.index("هایپرتنشن")
+    result = engine.apply(text, protected_ranges=[(start, start + len("هایپرتنشن"))])
+    assert result == "ICU و هایپرتنشن"
+
+
+def test_extra_protected_ranges_are_not_bypassed_by_numeric_opt_in():
+    engine = TerminologyEngine()
+    engine.load([_rule("دکستروز 5", "D5", numeric_in_source=True)])
+    text = "دکستروز 5"
+    assert engine.apply(text) == "D5"
+    assert engine.apply(text, protected_ranges=[(0, len(text))]) == text

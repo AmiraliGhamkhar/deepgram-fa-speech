@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
-from typing import Iterable, List
+from typing import Iterable, List, Sequence, Tuple
 
 from ..config import ConfigError
 from .fst import DeterministicFST, LoadResult, Rule
@@ -51,7 +51,14 @@ class TerminologyRule:
 def parse_rules(raw_items: Iterable[dict]) -> List[TerminologyRule]:
     """Parse raw YAML rule dicts into TerminologyRule, tolerating the
     legacy flat {from, to} shape (treated as specialty_terminology/high
-    confidence for backward compatibility, never as dangerous)."""
+    confidence for backward compatibility, never as dangerous).
+
+    Both sides are normalized at parse time: every transcript reaching the
+    FST has already been normalized, so a raw Arabic-yeh source would never
+    match, and a raw target would inject non-normalized text back into the
+    pipeline. Digit-run validation uses the same canonical representation on
+    both sides.
+    """
     rules: List[TerminologyRule] = []
     for item in raw_items:
         if not isinstance(item, dict):
@@ -64,20 +71,24 @@ def parse_rules(raw_items: Iterable[dict]) -> List[TerminologyRule]:
         if not isinstance(numeric_in_source, bool):
             raise ConfigError("terminology numeric_in_source must be a boolean")
         normalized_source = normalize(str(src))
+        normalized_target = normalize(str(tgt))
+        if not normalized_source:
+            raise ConfigError("terminology rule source normalizes to an empty string")
         source_digits = re.findall(r"\d+", normalized_source)
+        target_digits = re.findall(r"\d+", normalized_target)
         if numeric_in_source:
-            if not source_digits or source_digits != re.findall(r"\d+", str(tgt)):
+            if not source_digits or source_digits != target_digits:
                 raise ConfigError("numeric_in_source requires identical digit sequences in source and target")
         elif find_numeric_spans(normalized_source):
             raise ConfigError("terminology rule with a numeric span requires numeric_in_source: true")
         category = str(item.get("category", "specialty_terminology"))
         if category not in VALID_CATEGORIES:
-            log.warning("unknown terminology category %r for %r; treating as context_dependent", category, src)
+            log.warning("unknown terminology category %r for %r; treating as context_dependent", category, normalized_source)
             category = "context_dependent"
         rules.append(
             TerminologyRule(
-                source=str(src),
-                target=str(tgt),
+                source=normalized_source,
+                target=normalized_target,
                 category=category,
                 confidence=str(item.get("confidence", "high")),
                 requires_context=bool(item.get("requires_context", category in OPT_IN_CATEGORIES)),
@@ -138,10 +149,19 @@ class TerminologyEngine:
     def total_rule_count(self) -> int:
         return len(self._all_rules)
 
-    def apply(self, text: str) -> str:
-        """Rewrite `text`, protecting negation and numeric expressions.
+    def apply(
+        self,
+        text: str,
+        protected_ranges: Sequence[Tuple[int, int]] = (),
+    ) -> str:
+        """Rewrite `text`, protecting negation, numeric and caller-provided spans.
 
-        Only numeric-in-source rules may consume an entire numeric span.
+        `protected_ranges` are extra character spans (e.g. low-confidence
+        medical tokens) that no rule may touch, including rules explicitly
+        flagged `numeric_in_source`. They are merged with negation spans,
+        which have the same hard-protection semantics. Only numeric-in-source
+        rules may consume an entire numeric span when it is NOT in a protected
+        range.
 
         Word boundaries are required as well, and this is the single most
         important safety property in the pipeline. Aho-Corasick matches
@@ -164,8 +184,10 @@ class TerminologyEngine:
         if not text:
             return text
         numeric = [(s.start, s.end) for s in find_numeric_spans(text)]
-        # Negation is never eligible for the numeric-in-source exception.
+        # Negation and caller-provided low-confidence spans are never eligible
+        # for the numeric-in-source exception.
+        protected = list(find_negation_spans(text)) + list(protected_ranges)
         return self._fst.apply(
-            text, protected_ranges=find_negation_spans(text),
+            text, protected_ranges=protected,
             numeric_ranges=numeric, require_word_boundaries=True,
         )

@@ -583,3 +583,47 @@ def test_malformed_word_callback_not_fired_for_complete_words():
     seen: list[int] = []
     transcript_event_from_result(message, on_malformed_words=seen.append)
     assert seen == []
+
+
+# -- P1: host settings logging and atomic registry writes -------------------
+
+def test_invalid_numeric_host_setting_value_is_not_written_to_logs(caplog):
+    import logging
+
+    secret_like = "not-a-number-but-looks-like-a-secret"
+    env = {
+        "DEEPGRAM_API_KEY": "dg_fake_host_side_only",
+        "HOST_SHARED_SECRET": "s" * 40,
+        "HOST_GRANT_TIMEOUT_SECONDS": secret_like,
+    }
+    with caplog.at_level(logging.WARNING, logger="medical_stt.host"):
+        settings = core.HostSettings.from_env(env)
+    assert settings.grant_timeout_seconds == 10.0
+    assert secret_like not in caplog.text
+    assert "HOST_GRANT_TIMEOUT_SECONDS" in caplog.text
+
+
+def test_registry_update_is_atomic_when_the_final_replace_fails(monkeypatch, tmp_path):
+    out = tmp_path / "clients.txt"
+    original = "doctor-00:" + core.hash_client_secret("x" * 32) + "\n"
+    out.write_text(original, encoding="utf-8")
+
+    def fail_replace(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(provision.os, "replace", fail_replace)
+    with pytest.raises(OSError, match="disk full"):
+        provision.main(["--client-id", "doctor-01", "--out", str(out)])
+    assert out.read_text(encoding="utf-8") == original
+    assert not list(tmp_path.glob(".clients-*.tmp"))
+
+
+def test_registry_append_preserves_existing_entries_without_temp_files(tmp_path):
+    out = tmp_path / "clients.txt"
+    assert provision.main(["--client-id", "doctor-01", "--out", str(out)]) == 0
+    first = out.read_text(encoding="utf-8")
+    assert provision.main(["--client-id", "doctor-02", "--out", str(out)]) == 0
+    text = out.read_text(encoding="utf-8")
+    assert text.startswith(first)
+    assert "doctor-02:" in text
+    assert not list(tmp_path.glob(".clients-*.tmp"))

@@ -111,3 +111,16 @@ def test_dpapi_refuses_to_run_off_windows():
         protect(b"x")
     with pytest.raises(DPAPINotAvailable):
         unprotect(b"x")
+
+
+def test_invalid_utf8_blob_is_a_secret_store_error(tmp_path):
+    path = tmp_path / "host_secret.dpapi"
+    SecretStore(path, FakeProtector()).save(SECRET)
+
+    class InvalidUtf8Protector(FakeProtector):
+        def unprotect(self, blob: bytes) -> bytes:
+            return b"\xff\xfe"
+
+    with pytest.raises(SecretStoreError) as excinfo:
+        SecretStore(path, InvalidUtf8Protector()).load()
+    assert "decode" in str(excinfo.value).lower()

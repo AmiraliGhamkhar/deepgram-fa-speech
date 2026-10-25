@@ -40,7 +40,17 @@ def _same_word_span(first: Tuple[WordInfo, ...], second: Tuple[WordInfo, ...]) -
 
 
 class UtteranceLimitError(ValueError):
-    """The provider did not endpoint within the bounded utterance budget."""
+    """The provider did not endpoint within the bounded utterance budget.
+
+    `accumulated_text` is the complete utterance at the instant the budget
+    tripped: every retained finalized segment joined with the segment that
+    exceeded it. Callers must retain this in one recovery entry; the
+    accumulator has already been reset and cannot reproduce the text.
+    """
+
+    def __init__(self, message: str, accumulated_text: str = "") -> None:
+        super().__init__(message)
+        self.accumulated_text = accumulated_text
 
 
 class UtteranceAccumulator:
@@ -53,7 +63,9 @@ class UtteranceAccumulator:
         self._chars = 0
         self._started = 0.0
         self._segments: List[TranscriptEvent] = []
-        self._last_source_event: Optional[TranscriptEvent] = None
+        #: Source events parallel to _segments, so a re-sent event can be
+        #: recognized even when another segment arrived in between.
+        self._source_events: List[TranscriptEvent] = []
 
     def add(self, event: TranscriptEvent) -> Optional[TranscriptEvent]:
         if not event.is_final:
@@ -65,7 +77,15 @@ class UtteranceAccumulator:
             now = time.monotonic()
             if (self._chars + len(text) > self.max_chars or len(self._segments) >= self.max_segments
                     or (self._segments and now - self._started > self.max_seconds)):
-                raise UtteranceLimitError("Dictation exceeded the utterance budget; stop and review")
+                # Do not lose the already-finalized segments. The app retains
+                # this complete text once, and the reset prevents a later
+                # flush() from adding those segments a second time.
+                full_text = " ".join(part for part in (self.pending_text(), text) if part)
+                self.reset()
+                raise UtteranceLimitError(
+                    "Dictation exceeded the utterance budget; stop and review",
+                    accumulated_text=full_text,
+                )
             if not self._segments:
                 self._started = now
             self._chars += len(text)
@@ -79,20 +99,24 @@ class UtteranceAccumulator:
                     received_at=event.received_at,
                 )
             )
-            self._last_source_event = event
+            self._source_events.append(event)
 
         if not event.speech_final:
             return None
         return self.flush()
+
+    def pending_text(self) -> str:
+        """All currently retained finalized segments, in arrival order."""
+        return " ".join(segment.text for segment in self._segments)
 
     def flush(self) -> Optional[TranscriptEvent]:
         if not self._segments:
             return None
 
         segments, self._segments = self._segments, []
+        self._source_events = []
         self._chars = 0
         self._started = 0.0
-        self._last_source_event = None
         words = tuple(word for segment in segments for word in segment.words)
         confidences = [segment.confidence for segment in segments if segment.confidence is not None]
         confidence = sum(confidences) / len(confidences) if confidences else None
@@ -107,25 +131,27 @@ class UtteranceAccumulator:
 
     def reset(self) -> None:
         self._segments.clear()
+        self._source_events.clear()
         self._chars = 0
         self._started = 0.0
-        self._last_source_event = None
 
     def _is_duplicate(self, event: TranscriptEvent, text: str) -> bool:
-        """True only when this is provably the same segment as the last one.
+        """True only when this is provably a re-send of a retained segment.
 
-        * Identical text with overlapping word timings -> the provider
-          re-emitted the same finalized segment (dropped).
-        * Identical text with different timings -> a genuinely repeated
-          utterance, e.g. "بله" said twice (kept).
-        * No word timings at all -> only the exact same event object is
-          provably a repeat; identical text is kept.
+        Checking just the last segment let a provider re-sending segment N
+        after N+1 slip through. All retained segments are compared, but the
+        same conservative evidence is required: identical word timings, or
+        the exact same event object when timing metadata is unavailable.
+        Legitimate repetition (different timings or plain text) survives.
         """
-        if not self._segments:
-            return False
-        previous = self._segments[-1]
-        if text != previous.text:
-            return False
-        if event.words and previous.words:
-            return _same_word_span(event.words, previous.words)
-        return self._last_source_event is not None and event is self._last_source_event
+        for previous, previous_source in zip(
+            self._segments, self._source_events, strict=True
+        ):
+            if text != previous.text:
+                continue
+            if event.words and previous.words:
+                if _same_word_span(event.words, previous.words):
+                    return True
+            elif event is previous_source:
+                return True
+        return False

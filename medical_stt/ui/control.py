@@ -15,14 +15,18 @@ never written to `settings.yaml` and never logged.
 """
 from __future__ import annotations
 
+import json
 import logging
+import os
 import platform
+import tempfile
 import threading
 import time
 from typing import Any, Callable, Optional, Protocol
 
+from .. import paths
 from ..config import ConfigError, get_settings, initialize_user_config, save_host_credentials
-from . import colors, dispatch
+from . import colors, dispatch, fonts
 
 log = logging.getLogger("medical_stt.ui.control")
 
@@ -47,8 +51,11 @@ _REC = colors.REC
 _ACCENT = colors.ACCENT
 _ON_LIGHT = colors.ON_LIGHT
 
-#: Diameter of the circular Start/Stop button, in pixels.
-_TOGGLE_DIAMETER = 64
+#: Diameters of the Canvas-drawn circular controls (GUI R1):
+#: the Start/Stop toggle, the three settings actions, and the quit mark.
+_TOGGLE_DIAMETER = 72
+_SECONDARY_DIAMETER = 52
+_QUIT_DIAMETER = 20
 
 
 def _darken(color: str, factor: float = 0.9) -> str:
@@ -99,6 +106,7 @@ class ControlWindow:
         self._closed = False
         self._initialized = False
         self._mailbox = dispatch.Mailbox()
+        self._drag_origin: Optional[tuple[int, int]] = None
         self._starting = False
         self._saving = False
         #: Connection test in flight. Its OWN flag: it used to borrow
@@ -121,6 +129,8 @@ class ControlWindow:
         self._toggle_text: Optional[int] = None
         self._toggle_color: str = _OK
         self._toggle_hover = False
+        self._action_row: Optional["tk.Frame"] = None
+        self._quit: Optional["tk.Canvas"] = None
         self._url_var: Optional["tk.StringVar"] = None
         self._secret_var: Optional["tk.StringVar"] = None
 
@@ -152,6 +162,7 @@ class ControlWindow:
     def _destroy_window(self) -> None:
         def _destroy() -> None:
             if self._root is not None:
+                self._save_window_position()
                 try:
                     self._root.destroy()
                 except tk.TclError:  # pragma: no cover - already gone
@@ -180,6 +191,9 @@ class ControlWindow:
 
     def _run(self) -> None:
         try:
+            # Before the first interpreter exists: a Tk root created while the
+            # process is DPI-unaware gets bitmap-scaled on Windows (R2).
+            fonts.enable_windows_dpi_awareness()
             self._root = tk.Tk()
             dispatch.install_owner(self._root, self._mailbox)
             self._build(self._root)
@@ -221,43 +235,48 @@ class ControlWindow:
         root.attributes("-topmost", True)
         root.resizable(False, False)
         root.configure(bg=_BORDER)
-        try:
-            root.attributes("-alpha", 0.97)
-        except tk.TclError:  # pragma: no cover - platform dependent
-            pass
+        # Deliberately fully opaque (R3/crisp): `-alpha` turns the control
+        # surface into a layered window and blurs it on Windows. Only the
+        # overlay is translucent (it needs WS_EX_TRANSPARENT hit testing).
 
-        inner = tk.Frame(root, bg=_BG, padx=14, pady=10)
+        inner = tk.Frame(root, bg=_BG, padx=16, pady=12)
         inner.pack(fill="both", expand=True)
 
         header = tk.Frame(inner, bg=_BG)
         header.pack(fill="x")
         title = tk.Label(
             header, text="Medical STT", bg=_BG, fg=_FG, anchor="w",
-            font=("Segoe UI", 10, "bold"),
+            font=fonts.font(root, 10, "bold"),
         )
-        title.pack(side="left")
-        quit_btn = tk.Label(header, text="\u2715", bg=_BG, fg=_MUTED, cursor="hand2", padx=4)
-        quit_btn.pack(side="right")
-        quit_btn.bind("<Button-1>", lambda _e: self.close())
+        title.pack(side="right")
+        self._quit = self._circle_button(
+            header, _QUIT_DIAMETER, self.close,
+            text="\u2715", fill=_SURFACE, hover_fill=_REC, text_fill=_MUTED,
+            font=fonts.font(root, 7, "bold"), tag="quit",
+        )
+        self._quit.pack(side="left", padx=(0, 6))
 
         self._status = tk.Label(
             inner, text="\u25cf آماده", bg=_BG, fg=_MUTED, anchor="e", justify="right",
-            font=("Segoe UI", 10),
+            font=fonts.font(root, 10),
         )
-        self._status.pack(fill="x", pady=(6, 0))
+        self._status.pack(fill="x", pady=(8, 0))
 
-        toggle = self._circle_button(inner, _TOGGLE_DIAMETER, self._on_toggle)
+        toggle = self._circle_button(
+            inner, _TOGGLE_DIAMETER, self._on_toggle,
+            fill=self._toggle_color, remember=True,
+        )
         self._toggle = toggle
         # Centered, never fill="x": a circle must not stretch with the window.
         toggle.pack(anchor="center", pady=(8, 0))
 
         self._detail = tk.Label(
             inner, text="", bg=_BG, fg=_MUTED, anchor="e", justify="right",
-            wraplength=320, font=("Segoe UI", 8),
+            wraplength=320, font=fonts.font(root, 8),
         )
-        self._detail.pack(fill="x", pady=(6, 0))
+        self._detail.pack(fill="x", pady=(8, 0))
 
-        tk.Frame(inner, bg=_BORDER, height=1).pack(fill="x", pady=8)
+        tk.Frame(inner, bg=_BORDER, height=1).pack(fill="x", pady=10)
 
         # Host settings. The secret is write-only as far as this window is
         # concerned: it is loaded masked and saved straight to DPAPI.
@@ -265,16 +284,16 @@ class ControlWindow:
         self._secret_var = tk.StringVar(value="")
 
         tk.Label(inner, text="میزبان (https)", bg=_BG, fg=_MUTED, anchor="e",
-                 font=("Segoe UI", 8)).pack(fill="x")
+                 font=fonts.font(root, 8)).pack(fill="x")
         tk.Entry(inner, textvariable=self._url_var, bg=_SURFACE, fg=_FG,
                  insertbackground=_FG, relief="flat", justify="left",
-                 font=("Segoe UI", 9)).pack(fill="x", pady=(2, 0), ipady=3)
+                 font=fonts.font(root, 9)).pack(fill="x", pady=(2, 0), ipady=3)
 
         tk.Label(inner, text="کلید مشترک", bg=_BG, fg=_MUTED, anchor="e",
-                 font=("Segoe UI", 8)).pack(fill="x", pady=(6, 0))
+                 font=fonts.font(root, 8)).pack(fill="x", pady=(6, 0))
         tk.Entry(inner, textvariable=self._secret_var, show="\u2022", bg=_SURFACE,
                  fg=_FG, insertbackground=_FG, relief="flat", justify="left",
-                 font=("Segoe UI", 9)).pack(fill="x", pady=(2, 0), ipady=3)
+                 font=fonts.font(root, 9)).pack(fill="x", pady=(2, 0), ipady=3)
 
         try:
             client_id_value = get_settings().host_client_id
@@ -288,21 +307,32 @@ class ControlWindow:
             log.error("control window opened with unusable settings: %s", exc)
         self._client_id_var = tk.StringVar(value=client_id_value)
         tk.Label(inner, text="شناسه دستگاه", bg=_BG, fg=_MUTED, anchor="e",
-                 font=("Segoe UI", 8)).pack(fill="x", pady=(6, 0))
+                 font=fonts.font(root, 8)).pack(fill="x", pady=(6, 0))
         tk.Entry(inner, textvariable=self._client_id_var, bg=_SURFACE, fg=_FG,
                  insertbackground=_FG, relief="flat", justify="left",
-                 font=("Segoe UI", 9)).pack(fill="x", pady=(2, 0), ipady=3)
-        self._flat_button(inner, "بررسی اتصال", self._test_connection).pack(fill="x", pady=(8, 0))
-        self._flat_button(inner, "متن بازیابی", self._show_recovery).pack(fill="x", pady=(4, 0))
-
-        save = self._flat_button(inner, "ذخیره تنظیمات", self._on_save_settings)
-        save.pack(fill="x", pady=(8, 0))
+                 font=fonts.font(root, 9)).pack(fill="x", pady=(2, 0), ipady=3)
+        # The three settings actions are 52px circles in one RTL row: the
+        # first action sits at the right edge, reading order follows Persian.
+        self._action_row = tk.Frame(inner, bg=_BG)
+        self._action_row.pack(fill="x", pady=(8, 0))
+        for label, command in (
+            ("بررسی\nاتصال", self._test_connection),
+            ("متن\nبازیابی", self._show_recovery),
+            ("ذخیره\nتنظیمات", self._on_save_settings),
+        ):
+            circle = self._circle_button(
+                self._action_row, _SECONDARY_DIAMETER, command,
+                text=label, fill=_SURFACE, hover_fill=_BORDER, text_fill=_FG,
+                font=fonts.font(root, 8, "bold"), tag="action",
+            )
+            circle.pack(side="right", padx=4)
 
         # Drag support: the window is borderless, so there is no title bar
         # to move it with.
         for widget in (root, inner, header, title, self._status, self._detail):
             widget.bind("<ButtonPress-1>", self._on_drag_start)
             widget.bind("<B1-Motion>", self._on_drag_move)
+            widget.bind("<ButtonRelease-1>", self._on_drag_end)
 
         if self._config_error:
             # Written directly, not via the mailbox: this IS the Tk thread,
@@ -310,7 +340,8 @@ class ControlWindow:
             self._status.config(text="● خطای پیکربندی", fg=_REC)
             self._detail.config(text="فایل تنظیمات نامعتبر است؛ آن را اصلاح کنید و دوباره تلاش کنید")
 
-        root.geometry("+40+40")
+        x, y = self._load_window_position()
+        root.geometry(f"+{x}+{y}")
 
     # -- dragging ---------------------------------------------------------
 
@@ -338,6 +369,59 @@ class ControlWindow:
         dx = getattr(event, "x_root", 0) - origin[0]
         dy = getattr(event, "y_root", 0) - origin[1]
         self._root.geometry(f"+{wx + dx}+{wy + dy}")
+
+    def _on_drag_end(self, event: object = None) -> None:
+        """A finished drag persists its position (R3/persistent drag).
+
+        A release without a drag (a button click) must not touch the state
+        file: `_drag_origin` is only set by `_on_drag_start`.
+        """
+        if getattr(self, "_drag_origin", None) is None:
+            return
+        self._drag_origin = None
+        self._save_window_position()
+
+    def _load_window_position(self) -> "tuple[int, int]":
+        """Restore the last dragged position, or the default corner.
+
+        Corrupt or absurd state falls back to the default rather than
+        refusing to start; the file is a UI nicety, not configuration.
+        """
+        try:
+            raw = json.loads(paths.ui_state_path().read_text(encoding="utf-8"))
+            x, y = raw["x"], raw["y"]
+            if type(x) is int and type(y) is int and abs(x) <= 100000 and abs(y) <= 100000:
+                return x, y
+        except Exception as exc:  # noqa: BLE001 - see docstring
+            log.debug("window position not restored (%s)", type(exc).__name__)
+        return 40, 40
+
+    def _save_window_position(self) -> None:
+        """Persist the window position (atomic, best effort)."""
+        root = self._root
+        if root is None:
+            return
+        try:
+            x, y = int(root.winfo_x()), int(root.winfo_y())
+            target = paths.ui_state_path()
+            target.parent.mkdir(parents=True, exist_ok=True)
+            handle, temporary = tempfile.mkstemp(
+                dir=str(target.parent), prefix=".ui-state-", suffix=".tmp"
+            )
+            try:
+                with os.fdopen(handle, "w", encoding="utf-8") as stream:
+                    json.dump({"x": x, "y": y}, stream)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, target)
+            except BaseException:
+                try:
+                    os.unlink(temporary)
+                except OSError:
+                    pass
+                raise
+        except Exception as exc:  # noqa: BLE001 - a UI nicety, never fatal
+            log.debug("window position not saved (%s)", type(exc).__name__)
 
     # -- state / actions --------------------------------------------------
 
@@ -457,7 +541,7 @@ class ControlWindow:
             self._set_status("\u25cf آماده", _MUTED, getattr(self._controller, "health", {}).get("warning", ""))
 
     def _flat_button(self, parent: Any, text: str, command: Callable[[], None]) -> "tk.Button":
-        """One flat dark button style for every secondary control.
+        """One flat dark button style (now used by the recovery dialog only).
 
         `bd=0`/`relief="flat"` drops the raised system chrome, and the
         hover swap (surface -> border colour) is the only motion -- no
@@ -466,38 +550,70 @@ class ControlWindow:
         button = tk.Button(
             parent, text=text, command=command, bg=_SURFACE, fg=_FG,
             activebackground=_BORDER, activeforeground=_FG, relief="flat",
-            font=("Segoe UI", 9), cursor="hand2", bd=0, pady=4, padx=6,
+            font=fonts.font(parent, 9), cursor="hand2", bd=0, pady=4, padx=6,
         )
         button.bind("<Enter>", lambda _e: button.config(bg=_BORDER))
         button.bind("<Leave>", lambda _e: button.config(bg=_SURFACE))
         return button
 
-    def _circle_button(self, parent: Any, diameter: int, command: Callable[[], None]) -> "tk.Canvas":
-        """Build the circular Start/Stop button on a Canvas.
+    def _circle_button(
+        self,
+        parent: Any,
+        diameter: int,
+        command: Callable[[], None],
+        *,
+        text: str = "شروع",
+        fill: str = _OK,
+        text_fill: str = _ON_LIGHT,
+        font: Optional[tuple] = None,
+        tag: str = "toggle",
+        hover_fill: Optional[str] = None,
+        remember: bool = False,
+    ) -> "tk.Canvas":
+        """Build one circular control on a Canvas (GUI R1 sizes).
 
         A Canvas (not a styled tk.Button) is the only dependency-free way
         to get a real circle out of Tkinter. The canvas background is the
         window background so no rectangular halo shows around the oval;
         the oval and its label share one tag, which is the click target.
         Deliberately NOT part of the drag-binding widgets in `_build`:
-        a press here must start/stop, never start a window drag.
+        a press here must run its command, never start a window drag.
+
+        The Start/Stop toggle passes `remember=True` so `_paint_toggle`
+        keeps owning its recolors (state changes with the session); the
+        static circles recolor inline on hover only.
         """
         canvas = tk.Canvas(
             parent, width=diameter, height=diameter, bg=_BG,
             highlightthickness=0, cursor="hand2", takefocus=1,
         )
         pad = 2
-        self._toggle_oval = canvas.create_oval(
+        oval = canvas.create_oval(
             pad, pad, diameter - pad, diameter - pad,
-            fill=self._toggle_color, outline=self._toggle_color, tags=("toggle",),
+            fill=fill, outline=fill, tags=(tag,),
         )
-        self._toggle_text = canvas.create_text(
-            diameter / 2, diameter / 2, text="شروع", fill=_ON_LIGHT,
-            font=("Segoe UI", 12, "bold"), tags=("toggle",),
+        label = canvas.create_text(
+            diameter / 2, diameter / 2, text=text, fill=text_fill,
+            font=font or fonts.font(parent, 12, "bold"), tags=(tag,),
+            width=max(8, diameter - 10), justify="center",
         )
-        canvas.tag_bind("toggle", "<Button-1>", lambda _e: command())
-        canvas.tag_bind("toggle", "<Enter>", self._on_toggle_hover)
-        canvas.tag_bind("toggle", "<Leave>", self._on_toggle_leave)
+        canvas.tag_bind(tag, "<Button-1>", lambda _e: command())
+        if remember:
+            canvas.tag_bind(tag, "<Enter>", self._on_toggle_hover)
+            canvas.tag_bind(tag, "<Leave>", self._on_toggle_leave)
+            self._toggle_oval = oval
+            self._toggle_text = label
+        else:
+            hover = hover_fill or _darken(fill)
+
+            def on_enter(_event: object, c: Any = canvas, o: int = oval, h: str = hover) -> None:
+                c.itemconfig(o, fill=h, outline=h)
+
+            def on_leave(_event: object, c: Any = canvas, o: int = oval, f: str = fill) -> None:
+                c.itemconfig(o, fill=f, outline=f)
+
+            canvas.tag_bind(tag, "<Enter>", on_enter)
+            canvas.tag_bind(tag, "<Leave>", on_leave)
         # Clicking also takes keyboard focus, so Return/Space work after a
         # mouse press without a separate Tab.
         canvas.bind("<Button-1>", lambda _e: canvas.focus_set())
@@ -615,11 +731,11 @@ class ControlWindow:
             pass
         popup.bind("<Escape>", lambda _e: popup.destroy())
         text = tk.Text(popup, wrap="word", width=70, height=16, bg=_SURFACE, fg=_FG,
-                       insertbackground=_FG, relief="flat", font=("Segoe UI", 9))
+                       insertbackground=_FG, relief="flat", font=fonts.font(popup, 9))
         text.pack(fill="both", expand=True)
         text.insert("1.0", getattr(self._controller, "recovery_text", lambda: "")())
         text.configure(state="disabled")
-        feedback = tk.Label(popup, text="", bg=_BG, fg=_OK, anchor="e", font=("Segoe UI", 8))
+        feedback = tk.Label(popup, text="", bg=_BG, fg=_OK, anchor="e", font=fonts.font(popup, 8))
         feedback.pack(fill="x")
         def copy() -> None:
             popup.clipboard_clear()

@@ -94,6 +94,7 @@ def test_final_segments_inject_only_after_speech_final(monkeypatch):
 
 
 def test_low_confidence_medical_term_is_preserved(monkeypatch):
+    """P0-10: protect the uncertain token's span, not the whole utterance."""
     from medical_stt import app as app_module
 
     stt = app_module.LiveMedicalSTT(provider=FakeProvider([]))
@@ -101,16 +102,77 @@ def test_low_confidence_medical_term_is_preserved(monkeypatch):
     stt.injector = TextInjector(backend=backend, paste_settle_seconds=0.0)
     stt.overlay.enabled = False
     event = TranscriptEvent(
-        "هایپرتنشن",
+        "بیمار در آی سی یو بستری شد و هایپرتنشن دارد",
         is_final=True,
         speech_final=True,
-        words=(WordInfo("هایپرتنشن", 0.0, 1.0, 0.4),),
+        words=(
+            WordInfo("بیمار", 0.0, 0.3, 0.9),
+            WordInfo("در", 0.3, 0.5, 0.9),
+            WordInfo("آی", 0.5, 0.7, 0.9),
+            WordInfo("سی", 0.7, 0.9, 0.9),
+            WordInfo("یو", 0.9, 1.1, 0.9),
+            WordInfo("بستری", 1.1, 1.4, 0.9),
+            WordInfo("شد", 1.4, 1.6, 0.9),
+            WordInfo("و", 1.6, 1.7, 0.9),
+            WordInfo("هایپرتنشن", 1.7, 2.2, 0.4),
+            WordInfo("دارد", 2.2, 2.5, 0.9),
+        ),
     )
 
     stt._on_transcript(event)
     assert "هایپرتنشن" in backend.pasted[0]
     assert "hypertension" not in backend.pasted[0]
+    assert "ICU" in backend.pasted[0], "one uncertain token must not disable every correction"
     assert stt.last_confidence_warning is not None
+
+
+def test_low_confidence_numeric_token_keeps_other_corrections(monkeypatch):
+    from medical_stt import app as app_module
+
+    stt = app_module.LiveMedicalSTT(provider=FakeProvider([]))
+    backend = DryRunBackend()
+    stt.injector = TextInjector(backend=backend, paste_settle_seconds=0.0)
+    stt.overlay.enabled = False
+    event = TranscriptEvent(
+        "فشار 120/80 mmHg و آی سی یو",
+        is_final=True,
+        speech_final=True,
+        words=(
+            WordInfo("فشار", 0.0, 0.4, 0.9),
+            WordInfo("120/80", 0.4, 0.8, 0.3),
+            WordInfo("mmHg", 0.8, 1.1, 0.9),
+            WordInfo("و", 1.1, 1.2, 0.9),
+            WordInfo("آی", 1.2, 1.4, 0.9),
+            WordInfo("سی", 1.4, 1.6, 0.9),
+            WordInfo("یو", 1.6, 1.8, 0.9),
+        ),
+    )
+
+    stt._on_transcript(event)
+    assert "120/80" in backend.pasted[0]
+    assert "ICU" in backend.pasted[0], "a sub-threshold number must not disable ~727 rules"
+    assert stt.last_confidence_warning is not None
+    assert "number" in {item.category for item in stt.last_confidence_warning.uncertain_words}
+
+
+def test_unmappable_low_confidence_token_falls_back_to_full_preservation(monkeypatch):
+    """If timing/text alignment cannot locate a flagged token, stay conservative."""
+    from medical_stt import app as app_module
+
+    stt = app_module.LiveMedicalSTT(provider=FakeProvider([]))
+    backend = DryRunBackend()
+    stt.injector = TextInjector(backend=backend, paste_settle_seconds=0.0)
+    stt.overlay.enabled = False
+    event = TranscriptEvent(
+        "آی سی یو",
+        is_final=True,
+        speech_final=True,
+        words=(WordInfo("DVT", 0.0, 1.0, 0.3),),
+    )
+
+    stt._on_transcript(event)
+    assert "آی سی یو" in backend.pasted[0]
+    assert "ICU" not in backend.pasted[0]
 
 
 def test_dangerous_term_not_injected(monkeypatch):

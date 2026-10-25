@@ -1,6 +1,8 @@
 """Provider-side replacements never own units or Latin medical abbreviations."""
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 import yaml
 
@@ -47,3 +49,29 @@ def test_benign_ascii_pairs_are_not_rejected_as_substring_units(tmp_path, monkey
 
 def test_shipped_persian_spelling_correction_still_loads():
     assert config.load_asr_replacements() == ["هایپرتمشن:هایپرتنشن"]
+
+
+def _uppercase_latin_tokens_in_corrections() -> set[str]:
+    root = Path(__file__).resolve().parent.parent
+    rules = yaml.safe_load((root / "data" / "corrections.yaml").read_text(encoding="utf-8"))["rules"]
+    tokens: set[str] = set()
+    for rule in rules:
+        for side in ("from", "to"):
+            text = str(rule.get(side, "")) if isinstance(rule, dict) else ""
+            for match in config._ASR_LATIN_TOKEN_RE.finditer(text):  # noqa: SLF001
+                token = match.group()
+                if token.isupper() and len(token) >= 2:
+                    tokens.add(token.casefold())
+    return tokens
+
+
+def test_every_uppercase_latin_clinical_token_is_blocked_for_asr_replacements():
+    tokens = _uppercase_latin_tokens_in_corrections()
+    missing = tokens - config._ASR_BLOCKED_TOKENS  # noqa: SLF001
+    assert not missing, f"unblocked clinical tokens: {sorted(missing)}"
+
+
+@pytest.mark.parametrize("token", ["cbc", "tsh", "crp", "bmi", "cxr", "wbc"])
+def test_census_derived_clinical_abbreviations_are_rejected(tmp_path, monkeypatch, token):
+    with pytest.raises(ConfigError, match="Latin/English|unit"):
+        _load_pair(tmp_path, monkeypatch, "placeholder", token.upper())

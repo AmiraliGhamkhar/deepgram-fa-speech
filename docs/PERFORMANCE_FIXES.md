@@ -109,3 +109,15 @@ These are release-validation tasks, not claims of completed measurements.
 - For distinct load identities, `MEDICAL_STT_LOAD_CLIENTS_FILE` points to a **noncommitted** JSON list of `client_id`/`secret` objects with at least 50 entries, such as a locally protected `*.secret` file. No Deepgram account key is required on that driver. Do not put real credentials into chat, logs, example files, or shell history.
 - Run the opt-in 30–60 minute mocked soak, then explicitly authorized real-provider tests. Provider-account capacity and network latency cannot be inferred from the mocked host harness.
 - Run the repaired benchmark on consented/de-identified recordings. WER/CER and clinical accuracy still require actual recordings and expert review; no accuracy values were invented.
+
+## 2026-10-25 follow-ups
+
+The later P0-7..P0-14 and P1 fixes are documented with before/after test
+evidence in
+[`audit/reports/engineering-checkpoint-2026-10-25-v2.md`](../audit/reports/engineering-checkpoint-2026-10-25-v2.md).
+They add bounded microphone retries, per-final latency ownership, fail-closed
+overlay readiness, clipboard restoration, byte-free secret errors, retained
+utterance text, accumulator deduplication, an ASR blocked-token census, drained
+audio accounting, privacy-preserving host setting logs and atomic registry
+updates. The Windows and real-provider validation tasks above still apply;
+these follow-ups are code/test changes, not new clinical measurements.

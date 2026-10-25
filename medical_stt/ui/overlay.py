@@ -13,7 +13,7 @@ import threading
 from typing import Callable, Optional
 
 from ..processing.bidi import to_display
-from . import colors, dispatch
+from . import colors, dispatch, fonts
 
 log = logging.getLogger("medical_stt.ui.overlay")
 _SYSTEM = platform.system().lower()
@@ -21,7 +21,6 @@ _SYSTEM = platform.system().lower()
 _TK_AVAILABLE = False
 try:
     import tkinter as tk
-    import tkinter.font as tkfont
     _TK_AVAILABLE = True
 except ImportError:
     _TK_AVAILABLE = False
@@ -31,6 +30,10 @@ except ImportError:
 # from stealing a click meant for the EMR underneath it. The overlay runs
 # with `-alpha`, i.e. as a layered window on Windows, which is what makes
 # WS_EX_TRANSPARENT take effect for hit-testing.
+#: The shared-owner overlay is created by posting to the control window's
+#: mailbox. Wait this long for that callback before disabling the overlay.
+OVERLAY_READY_TIMEOUT_SECONDS = 4.0
+
 _GWL_EXSTYLE = -20
 _WS_EX_NOACTIVATE = 0x08000000
 _WS_EX_TRANSPARENT = 0x00000020
@@ -83,19 +86,9 @@ def _is_rtl(text: str) -> bool:
             return True
         if ch.isascii() and ch.isalpha():
             return False
-    return True
+    return False
 
 
-def _get_best_persian_font(root: "tk.Tk | tk.Toplevel") -> str:
-    preferred = ["Vazirmatn", "Vazir", "IRANSans", "B Yekan", "B Nazanin", "Segoe UI", "Tahoma", "Arial"]
-    try:
-        available = set(tkfont.families(root))
-        for font in preferred:
-            if font in available:
-                return font
-    except tk.TclError:
-        pass
-    return "Tahoma" if _SYSTEM == "windows" else "Arial"
 
 
 class TranscriptOverlay:
@@ -121,15 +114,22 @@ class TranscriptOverlay:
 
         if dispatch.owner_mailbox is not None:
             dispatch.owner_mailbox.post("overlay-create", self._run)
+            if not self._ready.wait(timeout=OVERLAY_READY_TIMEOUT_SECONDS):
+                log.warning("Overlay UI startup timed out")
+                self.enabled = False
             return
         self._thread = threading.Thread(target=self._run, name="overlay-ui", daemon=True)
         self._thread.start()
-        if not self._ready.wait(timeout=4.0):
+        if not self._ready.wait(timeout=OVERLAY_READY_TIMEOUT_SECONDS):
             log.warning("Overlay UI startup timed out")
             self.enabled = False
 
     def _run(self) -> None:
+        built = False
         try:
+            # Standalone overlay mode creates its own interpreter; the shared
+            # owner path already applied this on the control window's Tk.
+            fonts.enable_windows_dpi_awareness()
             if self._closed:
                 return
             shared = dispatch.owner_root
@@ -137,7 +137,7 @@ class TranscriptOverlay:
             self._root.title("Medical STT Overlay")
             self._root.overrideredirect(True)
             self._root.attributes("-topmost", True)
-            self._font_family = _get_best_persian_font(self._root)
+            self._font_family = fonts.family(self._root)
 
             try:
                 self._root.attributes("-alpha", 0.94)
@@ -172,14 +172,22 @@ class TranscriptOverlay:
             except tk.TclError:  # pragma: no cover - window already gone
                 pass
             self._ready.set()
+            built = True
             self._tick_follow()
             self._pump()
             if shared is None:
                 self._root.mainloop()
-        except tk.TclError as exc:
-            log.warning("Failed to initialize overlay: %s", exc)
+        except Exception as exc:
+            # Widget construction touches fonts and OS window APIs, so a
+            # non-Tcl failure is possible. Never leave `enabled=True` (and
+            # never hold start callers hostage) for an overlay that has no
+            # usable widgets. Log the type only: Tcl messages can carry text.
+            log.warning("Failed to initialize overlay (%s)", type(exc).__name__)
             self.enabled = False
+        finally:
             self._ready.set()
+            if not built:
+                self.enabled = False
 
     def _pump(self) -> None:
         self._mailbox.drain()

@@ -135,8 +135,8 @@ def get_default_backend(paste_settle_seconds: float = 0.12) -> InjectionBackend:
 
     `paste_settle_seconds` matters only to the fallback backend, whose
     "type" path is secretly a paste and therefore needs the configured
-    settle at construction time; the Windows backend receives it per
-    call.
+    settle at construction time; it also restores the prior clipboard
+    unconditionally. The Windows backend receives the settle per call.
     """
     if _SYSTEM == "windows":
         return _build_windows_backend()

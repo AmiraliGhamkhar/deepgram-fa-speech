@@ -31,6 +31,7 @@ import yaml
 from dotenv import load_dotenv
 
 from . import paths
+from .processing.normalize import normalize
 from .security import SecretStore, SecretStoreError
 
 log = logging.getLogger("medical_stt.config")
@@ -137,6 +138,25 @@ _ASR_BLOCKED_TOKENS = frozenset({
     "iv", "im", "po", "sc", "hr", "bid", "tid", "qid", "prn", "npo",
     # These extra Latin clinical terms occur in data/corrections.yaml.
     "icu", "ecg", "mi", "diabetes", "hypertension",
+    # Census-derived: every standalone uppercase Latin token of length >= 2
+    # that appears in a shipped terminology rule. A provider-side
+    # replacement must never introduce one of these without local review.
+    'abc', 'abg', 'ac', 'acl', 'acr', 'afi', 'am', 'apache',
+    'ards', 'arf', 'atfl', 'av', 'bd', 'bi', 'bmi', 'bnp',
+    'bp', 'bpd', 'bph', 'bps', 'bs', 'bun', 'cbc', 'cbd',
+    'cbr', 'ccu', 'chf', 'cmc', 'copd', 'cpr', 'cr', 'crif',
+    'crl', 'crp', 'cts', 'cva', 'cvp', 'cxr', 'dbp', 'dc',
+    'dj', 'ds', 'dvt', 'dw', 'dzp', 'edc', 'edv', 'ef',
+    'efw', 'ekg', 'ems', 'ent', 'ercp', 'esr', 'ett', 'fbs',
+    'ffp', 'fhr', 'fl', 'ga', 'gcs', 'ger', 'gfr', 'hc',
+    'hdl', 'hf', 'hl', 'hps', 'hpv', 'htn', 'hvd', 'id',
+    'ii', 'inr', 'iugr', 'ivc', 'lap', 'ldl', 'map', 'mcl',
+    'md', 'mn', 'ng', 'ns', 'nt', 'ob', 'or', 'orif',
+    'pcnl', 'pcwp', 'pds', 'pe', 'pfna', 'pi', 'plt', 'pm',
+    'psa', 'psv', 'pt', 'ptt', 'qh', 'qs', 'rads', 'rbc',
+    'ri', 'ros', 'rpoc', 'rr', 'sa', 'sbp', 'sofa', 'sol',
+    'tds', 'tg', 'tha', 'tka', 'tsh', 'tul', 'tur', 'turp',
+    'wbc',
 })
 _ASR_BLOCKED_TOKENS = frozenset(token.casefold() for token in _ASR_BLOCKED_TOKENS)
 _ASR_LATIN_TOKEN_RE = re.compile(r"(?<!\w)[A-Za-zµμ]+(?!\w)")
@@ -482,7 +502,7 @@ def load_host_secret() -> str:
     except SecretStoreError as exc:
         # A stale/corrupt blob must not crash startup with a traceback --
         # it becomes a normal configuration error instead.
-        log.warning("stored host secret is unusable: %s", exc)
+        log.warning("stored host secret is unusable (%s)", type(exc).__name__)
         return ""
     return secret or ""
 
@@ -859,5 +879,8 @@ def load_correction_rules() -> List[Tuple[str, str]]:
         src = item.get("from") or item.get("source") or item.get("src")
         tgt = item.get("to") or item.get("target") or item.get("tgt")
         if src and tgt is not None:
-            pairs.append((str(src), str(tgt)))
+            # Legacy flat callers must see the same canonical form as the
+            # terminology engine: a raw Arabic-yeh source would otherwise stay
+            # unmatchable after normalize() has run on the transcript.
+            pairs.append((normalize(str(src)), normalize(str(tgt))))
     return pairs

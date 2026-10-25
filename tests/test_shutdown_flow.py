@@ -691,3 +691,89 @@ def test_audio_dequeued_by_an_old_sender_is_dropped_after_session_replacement(mo
         stt.request_stop()
         if second is not None:
             second.join(timeout=5.0)
+
+
+# -- P0-12: a provider thread that exits without a reason -------------------
+
+class SilentProvider(STTProvider):
+    """`start()` returns without an error callback and without a stop request."""
+
+    def __init__(self) -> None:
+        self.starts = 0
+
+    def validate_config(self) -> None:
+        pass
+
+    def start(self, on_transcript: OnTranscript, on_error: OnError) -> None:
+        self.starts += 1
+
+    def send_audio(self, chunk: bytes) -> None:
+        pass
+
+    def stop(self) -> None:
+        pass
+
+
+class ErrorThenReturnProvider(SilentProvider):
+    def start(self, on_transcript: OnTranscript, on_error: OnError) -> None:
+        super().start(on_transcript, on_error)
+        on_error(ProviderError(ErrorCategory.NETWORK, "upstream failure"))
+
+
+class StoppableProvider(SilentProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def start(self, on_transcript: OnTranscript, on_error: OnError) -> None:
+        super().start(on_transcript, on_error)
+        self.started.set()
+        self.release.wait(timeout=2.0)
+
+    def stop(self) -> None:
+        self.release.set()
+
+
+def test_silent_provider_exit_raises_unknown_error_before_stop(monkeypatch):
+    stt, _backend = _build_session(SilentProvider(), monkeypatch)
+    with pytest.raises(ProviderError) as excinfo:
+        stt._run_session()
+    assert excinfo.value.category is ErrorCategory.UNKNOWN
+    assert "provider exited without error or stop" in str(excinfo.value)
+    assert stt._stop.is_set()
+    assert [error.category for error in stt._errors] == [ErrorCategory.UNKNOWN]
+
+
+def test_silent_provider_exit_does_not_report_a_successful_run(monkeypatch):
+    provider = SilentProvider()
+    stt, _backend = _build_session(provider, monkeypatch)
+    stt.settings.max_reconnect_attempts = 1
+    stt.settings.reconnect_delay = 0.0
+    stt.settings.reconnect_backoff_max = 0.0
+    stt.settings.reconnect_jitter = 0.0
+
+    assert stt.run() == 1, "a dead dictation must not exit with code 0"
+    assert stt._reconnect_count == 2
+    assert provider.starts == 2
+    assert all(error.category is ErrorCategory.UNKNOWN for error in stt._errors)
+
+
+def test_provider_exit_after_reported_error_does_not_add_a_duplicate(monkeypatch):
+    stt, _backend = _build_session(ErrorThenReturnProvider(), monkeypatch)
+    with pytest.raises(ProviderError) as excinfo:
+        stt._run_session()
+    assert excinfo.value.category is ErrorCategory.NETWORK
+    assert [error.category for error in stt._errors] == [ErrorCategory.NETWORK]
+
+
+def test_stop_requested_before_provider_exit_needs_no_synthetic_error(monkeypatch):
+    provider = StoppableProvider()
+    stt, _backend = _build_session(provider, monkeypatch)
+    session = threading.Thread(target=stt._run_session, daemon=True)
+    session.start()
+    assert provider.started.wait(timeout=2.0)
+    stt.request_stop()
+    session.join(timeout=5.0)
+    assert not session.is_alive()
+    assert stt._errors == []
