@@ -33,7 +33,8 @@ production code. Failures below were observed, not inferred.
 | P1 inferred follow-up batch | `313687b` | `20 failed, 167 passed` in nine targeted suites | `187 passed` in the same suites |
 | P2 docs/metrics polish | `571dfa5` | `5 failed` in `tests/test_docs_polish.py` | `5 passed` in the same file |
 | GUI R2 shared fonts + Windows DPI | `6ea4264` | `ImportError: cannot import name 'fonts'` collecting `tests/test_ui_fonts.py`; `2 failed` in `tests/test_control.py` | `47 passed` in `tests/test_ui_fonts.py tests/test_control.py tests/test_overlay.py` |
-| GUI R1 circular controls | (this commit) | `3 failed, 27 passed` in `tests/test_control.py` | `30 passed` in the same file |
+| GUI R1 circular controls | `2c4a73f` | `3 failed, 27 passed` in `tests/test_control.py` | `30 passed` in the same file |
+| GUI R3 RTL/persistent drag/crisp | (this commit) | `4 failed, 31 passed` in `tests/test_control.py` | `54 passed` in `tests/test_control.py tests/test_ui_fonts.py tests/test_overlay.py` |
 
 ### P0-7 details
 
@@ -535,3 +536,51 @@ Deliberately updated pin: `test_secondary_buttons_share_the_flat_style` was
 replaced by `test_secondary_actions_are_52px_circles_in_rtl_order` (the main
 window's secondary controls are circles now, not flat buttons). The flat
 factory remains pinned by `test_recovery_popup_is_themed_modal_and_confirms_copy`.
+
+### GUI R3 details — RTL layout, persistent drag, crisp surface
+
+Widget tree after `_build` (final Phase 2 shape):
+
+```text
+Tk (Medical STT, overrideredirect, topmost, OPAQUE — no -alpha)
+└── Frame (inner, bg=BG, padx=16, pady=12)
+    ├── Frame (header, bg=BG)
+    │   ├── Canvas quit circle 20px "✕"          (tag "quit",  pack side=left)
+    │   └── Label "Medical STT"                  (title,      pack side=right)
+    ├── Label  "● آماده"                         (status, anchor=e / justify=right)
+    ├── Canvas primary circle 72px "شروع"        (tag "toggle", pack anchor=center)
+    ├── Label  (detail, anchor=e / justify=right, wraplength=320)
+    ├── Frame (separator, pady=10)
+    ├── Label  "میزبان (https)" / Entry (host url, LTR)
+    ├── Label  "کلید مشترک" / Entry (secret, write-only, masked)
+    ├── Label  "شناسه دستگاه" / Entry (client id, LTR)
+    └── Frame action row (bg=BG)
+        ├── Canvas 52px "ذخیره\nتنظیمات"        (pack side=right, padx=4)
+        ├── Canvas 52px "متن\nبازیابی"          (pack side=right, padx=4)
+        └── Canvas 52px "بررسی\nاتصال"          (pack side=right, padx=4)
+```
+
+- **Crisp:** `root.attributes("-alpha", 0.97)` is gone — the control surface is
+  a fully opaque normal window (layered windows blur on Windows). The overlay
+  keeps its own `-alpha` (required for its click-through extended styles);
+  overlay behavior is otherwise untouched.
+- **RTL:** the header mirrors — title at the right edge, quit circle at the
+  left — matching the right-anchored status/detail column and the
+  right-to-left action row. Persian status strings keep their exact wording
+  and logical text (pinned); only layout sides changed.
+- **Persistent drag:** the window remembers its dragged position across runs
+  in `ui_state.json` (paths.ui_state_path: `{x, y}` only, never secrets),
+  written atomically on drag release and on close, restored on build. A
+  release without a drag does not write; corrupt/absurd state falls back to
+  `+40+40` instead of blocking startup. `_on_drag_start`/`_on_drag_move` are
+  byte-for-byte unchanged (A3.2 drag-math pins intact).
+- **Polish:** vertical rhythm tightened (inner 16/12, status and detail
+  `pady=(8, 0)`, separator `pady=10`). No color token added or changed; no
+  widget protocol, binding or threading behavior changed.
+
+Before (excerpt from `/tmp/r3_before.txt`): the opacity pin failed on the
+present `("-alpha", 0.97)` call, the header pin on `side="left"` title,
+`AttributeError: ... no attribute '_on_drag_end'`, and the close-persistence
+pin on a missing `ui_state.json` (`4 failed, 31 passed`). After: `54 passed`
+across the three UI test modules; full suite `1162 passed, 4 skipped,
+1 warning`; ruff, mypy and secret scan clean. Deliberately updated pins: none.

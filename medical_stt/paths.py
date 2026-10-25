@@ -9,6 +9,7 @@ tree):
         host_secret.dpapi             shared secret, Windows DPAPI-protected
         logs\\app.log                  rotating log file
         run.lock                      single-instance lock
+        ui_state.json                 UI window positions (no secrets)
 
 `MEDICALSTT_APP_DATA_DIR` overrides the location. It exists so tests and
 development runs can be fully isolated from the real user profile.
@@ -64,6 +65,11 @@ def log_path() -> Path:
 
 def lock_path() -> Path:
     return app_data_dir() / "run.lock"
+
+
+def ui_state_path() -> Path:
+    """Small JSON with UI window positions (never settings or secrets)."""
+    return app_data_dir() / "ui_state.json"
 
 
 def ensure_app_data_dir() -> Path:

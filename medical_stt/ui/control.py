@@ -15,12 +15,16 @@ never written to `settings.yaml` and never logged.
 """
 from __future__ import annotations
 
+import json
 import logging
+import os
 import platform
+import tempfile
 import threading
 import time
 from typing import Any, Callable, Optional, Protocol
 
+from .. import paths
 from ..config import ConfigError, get_settings, initialize_user_config, save_host_credentials
 from . import colors, dispatch, fonts
 
@@ -102,6 +106,7 @@ class ControlWindow:
         self._closed = False
         self._initialized = False
         self._mailbox = dispatch.Mailbox()
+        self._drag_origin: Optional[tuple[int, int]] = None
         self._starting = False
         self._saving = False
         #: Connection test in flight. Its OWN flag: it used to borrow
@@ -157,6 +162,7 @@ class ControlWindow:
     def _destroy_window(self) -> None:
         def _destroy() -> None:
             if self._root is not None:
+                self._save_window_position()
                 try:
                     self._root.destroy()
                 except tk.TclError:  # pragma: no cover - already gone
@@ -229,12 +235,11 @@ class ControlWindow:
         root.attributes("-topmost", True)
         root.resizable(False, False)
         root.configure(bg=_BORDER)
-        try:
-            root.attributes("-alpha", 0.97)
-        except tk.TclError:  # pragma: no cover - platform dependent
-            pass
+        # Deliberately fully opaque (R3/crisp): `-alpha` turns the control
+        # surface into a layered window and blurs it on Windows. Only the
+        # overlay is translucent (it needs WS_EX_TRANSPARENT hit testing).
 
-        inner = tk.Frame(root, bg=_BG, padx=14, pady=10)
+        inner = tk.Frame(root, bg=_BG, padx=16, pady=12)
         inner.pack(fill="both", expand=True)
 
         header = tk.Frame(inner, bg=_BG)
@@ -243,19 +248,19 @@ class ControlWindow:
             header, text="Medical STT", bg=_BG, fg=_FG, anchor="w",
             font=fonts.font(root, 10, "bold"),
         )
-        title.pack(side="left")
+        title.pack(side="right")
         self._quit = self._circle_button(
             header, _QUIT_DIAMETER, self.close,
             text="\u2715", fill=_SURFACE, hover_fill=_REC, text_fill=_MUTED,
             font=fonts.font(root, 7, "bold"), tag="quit",
         )
-        self._quit.pack(side="right", padx=(6, 0))
+        self._quit.pack(side="left", padx=(0, 6))
 
         self._status = tk.Label(
             inner, text="\u25cf آماده", bg=_BG, fg=_MUTED, anchor="e", justify="right",
             font=fonts.font(root, 10),
         )
-        self._status.pack(fill="x", pady=(6, 0))
+        self._status.pack(fill="x", pady=(8, 0))
 
         toggle = self._circle_button(
             inner, _TOGGLE_DIAMETER, self._on_toggle,
@@ -269,9 +274,9 @@ class ControlWindow:
             inner, text="", bg=_BG, fg=_MUTED, anchor="e", justify="right",
             wraplength=320, font=fonts.font(root, 8),
         )
-        self._detail.pack(fill="x", pady=(6, 0))
+        self._detail.pack(fill="x", pady=(8, 0))
 
-        tk.Frame(inner, bg=_BORDER, height=1).pack(fill="x", pady=8)
+        tk.Frame(inner, bg=_BORDER, height=1).pack(fill="x", pady=10)
 
         # Host settings. The secret is write-only as far as this window is
         # concerned: it is loaded masked and saved straight to DPAPI.
@@ -327,6 +332,7 @@ class ControlWindow:
         for widget in (root, inner, header, title, self._status, self._detail):
             widget.bind("<ButtonPress-1>", self._on_drag_start)
             widget.bind("<B1-Motion>", self._on_drag_move)
+            widget.bind("<ButtonRelease-1>", self._on_drag_end)
 
         if self._config_error:
             # Written directly, not via the mailbox: this IS the Tk thread,
@@ -334,7 +340,8 @@ class ControlWindow:
             self._status.config(text="● خطای پیکربندی", fg=_REC)
             self._detail.config(text="فایل تنظیمات نامعتبر است؛ آن را اصلاح کنید و دوباره تلاش کنید")
 
-        root.geometry("+40+40")
+        x, y = self._load_window_position()
+        root.geometry(f"+{x}+{y}")
 
     # -- dragging ---------------------------------------------------------
 
@@ -362,6 +369,59 @@ class ControlWindow:
         dx = getattr(event, "x_root", 0) - origin[0]
         dy = getattr(event, "y_root", 0) - origin[1]
         self._root.geometry(f"+{wx + dx}+{wy + dy}")
+
+    def _on_drag_end(self, event: object = None) -> None:
+        """A finished drag persists its position (R3/persistent drag).
+
+        A release without a drag (a button click) must not touch the state
+        file: `_drag_origin` is only set by `_on_drag_start`.
+        """
+        if getattr(self, "_drag_origin", None) is None:
+            return
+        self._drag_origin = None
+        self._save_window_position()
+
+    def _load_window_position(self) -> "tuple[int, int]":
+        """Restore the last dragged position, or the default corner.
+
+        Corrupt or absurd state falls back to the default rather than
+        refusing to start; the file is a UI nicety, not configuration.
+        """
+        try:
+            raw = json.loads(paths.ui_state_path().read_text(encoding="utf-8"))
+            x, y = raw["x"], raw["y"]
+            if type(x) is int and type(y) is int and abs(x) <= 100000 and abs(y) <= 100000:
+                return x, y
+        except Exception as exc:  # noqa: BLE001 - see docstring
+            log.debug("window position not restored (%s)", type(exc).__name__)
+        return 40, 40
+
+    def _save_window_position(self) -> None:
+        """Persist the window position (atomic, best effort)."""
+        root = self._root
+        if root is None:
+            return
+        try:
+            x, y = int(root.winfo_x()), int(root.winfo_y())
+            target = paths.ui_state_path()
+            target.parent.mkdir(parents=True, exist_ok=True)
+            handle, temporary = tempfile.mkstemp(
+                dir=str(target.parent), prefix=".ui-state-", suffix=".tmp"
+            )
+            try:
+                with os.fdopen(handle, "w", encoding="utf-8") as stream:
+                    json.dump({"x": x, "y": y}, stream)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, target)
+            except BaseException:
+                try:
+                    os.unlink(temporary)
+                except OSError:
+                    pass
+                raise
+        except Exception as exc:  # noqa: BLE001 - a UI nicety, never fatal
+            log.debug("window position not saved (%s)", type(exc).__name__)
 
     # -- state / actions --------------------------------------------------
 

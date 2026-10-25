@@ -6,6 +6,8 @@ import threading
 import time
 from types import SimpleNamespace
 
+import pytest
+
 from medical_stt.ui import control
 from medical_stt.ui.control import ControlWindow, _darken
 
@@ -248,6 +250,7 @@ class _FakeWidget:
         self.grabbed = False
         self.transient_of = None
         self.clipboard = ""
+        self.attribute_calls = []
 
     def walk(self):
         yield self
@@ -295,8 +298,8 @@ class _FakeWidget:
     def overrideredirect(self, _value=None):
         pass
 
-    def attributes(self, *_args):
-        pass
+    def attributes(self, *args):
+        self.attribute_calls.append(args)
 
     def resizable(self, *_args):
         pass
@@ -825,3 +828,81 @@ def test_windows_dpi_awareness_is_applied_before_tk_is_created(monkeypatch):
     window = ControlWindow(_StoppedController())
     assert window.start() is True
     assert order == ["dpi", "tk"]
+
+
+# -- R3: RTL header, persistent drag, crisp opaque control surface ----------
+
+@pytest.fixture(autouse=True)
+def _isolated_ui_state(monkeypatch, tmp_path):
+    """Window-position persistence must never touch the real user profile."""
+    monkeypatch.setattr(
+        "medical_stt.paths.ui_state_path",
+        lambda: tmp_path / "ui_state.json",
+        raising=False,
+    )
+
+
+def test_control_window_is_fully_opaque(monkeypatch):
+    """R3/crisp: `-alpha` makes the control surface a layered window and
+    blurs it on Windows. Only the overlay may be translucent."""
+    window = _built_window(monkeypatch)
+    root = window._root
+    assert not [call for call in root.attribute_calls if "-alpha" in call]
+    assert ("-topmost", True) in root.attribute_calls, "topmost is not optional"
+
+
+def test_header_is_rtl_mirrored(monkeypatch):
+    """R3/RTL: the Persian layout mirrors the LTR default -- the title moves
+    to the right edge and the quit circle to the left; the status column
+    stays right-anchored."""
+    from medical_stt.ui import colors
+
+    window = _built_window(monkeypatch)
+    title = next(w for w in window._root.find("Label") if w.kwargs.get("text") == "Medical STT")
+    assert title.pack_kwargs.get("side") == "right"
+    assert window._quit.pack_kwargs.get("side") == "left"
+
+    status = window._status
+    assert status.kwargs["anchor"] == "e" and status.kwargs["justify"] == "right"
+    assert status.kwargs["fg"] == colors.MUTED
+    detail = window._detail
+    assert detail.kwargs["anchor"] == "e" and detail.kwargs["justify"] == "right"
+
+
+def test_window_position_persists_across_rebuilds(monkeypatch, tmp_path):
+    """R3/persistent drag: a finished drag is remembered and restored on the
+    next run. The drag math itself is untouched."""
+    import json as json_module
+
+    state_path = tmp_path / "ui_state.json"
+    window = _built_window(monkeypatch)
+    window._on_drag_start(_FakeEvent(520, 320))
+    window._on_drag_move(_FakeEvent(600, 400))    # press-time origin + pointer delta
+
+    moved = window._root.geometry_calls[-1]
+    window._on_drag_end(_FakeEvent(600, 400))
+    saved = json_module.loads(state_path.read_text(encoding="utf-8"))
+    x, y = (int(part) for part in moved.lstrip("+").split("+"))
+    assert (saved["x"], saved["y"]) == (x, y)
+
+    restored = _built_window(monkeypatch)
+    assert restored._root.geometry_calls[0] == moved
+
+    # A release without any drag must not rewrite the file.
+    before = state_path.read_text(encoding="utf-8")
+    restored._on_drag_end(_FakeEvent(0, 0))
+    assert state_path.read_text(encoding="utf-8") == before
+
+
+def test_corrupt_window_state_falls_back_to_the_default_position(monkeypatch, tmp_path):
+    (tmp_path / "ui_state.json").write_text("not json at all", encoding="utf-8")
+    window = _built_window(monkeypatch)
+    assert window._root.geometry_calls[0] == "+40+40"
+
+
+def test_window_position_is_saved_on_close(monkeypatch, tmp_path):
+    window = _built_window(monkeypatch)
+    window._root._x, window._root._y = 640, 480
+    window._destroy_window()
+    saved = (tmp_path / "ui_state.json").read_text(encoding="utf-8").replace(" ", "")
+    assert '"x":640' in saved and '"y":480' in saved
