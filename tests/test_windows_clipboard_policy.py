@@ -149,47 +149,32 @@ def test_diagnostic_expected_target_cannot_be_replaced_by_another_app(win):
 # -- B19(c): modifier re-press must not leave a logical key stuck ------------
 
 
-def _drive_paste_keystroke(module, backend, user, shift_states):
-    """Run the REAL _send_paste_keystroke with recorded inputs.
-
-    `shift_states` is what GetAsyncKeyState(Shift) returns on successive
-    calls: the sweep first, the re-check second.
-    """
+@pytest.mark.parametrize("modifier", ["VK_SHIFT", "VK_MENU", "VK_LWIN", "VK_RWIN", "VK_CONTROL"])
+def test_snapshot_modifiers_are_restored_after_synthetic_keyup(win, modifier):
+    module, backend, user, _ = win
+    vk = getattr(module, modifier)
+    # Async state includes synthetic input: our keyup clears its high bit,
+    # even though the user has not physically released the key.
+    logical_down = {vk}
     sent = []
 
     def record(inputs):
-        sent.extend(inputs)
+        for inp in inputs:
+            key = inp.union.ki.wVk
+            sent.append((key, bool(inp.union.ki.dwFlags & module.KEYEVENTF_KEYUP)))
+            if inp.union.ki.dwFlags & module.KEYEVENTF_KEYUP:
+                logical_down.discard(key)
+            else:
+                logical_down.add(key)
         return True
 
     backend._send_inputs = record
-    remaining = list(shift_states)
-
-    def key_state(vk):
-        if vk == module.VK_SHIFT and remaining:
-            return remaining.pop(0)
-        return 0
-
-    user.GetAsyncKeyState.side_effect = key_state
+    user.GetAsyncKeyState.side_effect = lambda key: 0x8000 if key in logical_down else 0
     user.MapVirtualKeyW.return_value = 0
-    assert module.WindowsBackend._send_paste_keystroke(backend) is True
-    return [
-        i for i in sent
-        if i.union.ki.wVk == module.VK_SHIFT and not (i.union.ki.dwFlags & module.KEYEVENTF_KEYUP)
-    ]
-
-
-def test_a_modifier_released_during_paste_is_not_repressed(win):
-    module, backend, user, _ = win
-    # Down at the sweep (so it gets released for a clean Ctrl+V), up by the
-    # re-check: re-pressing it would stick a logical Shift with no key held.
-    re_presses = _drive_paste_keystroke(module, backend, user, [0x8000, 0])
-    assert re_presses == []
-
-
-def test_a_modifier_still_held_is_repressed(win):
-    module, backend, user, _ = win
-    re_presses = _drive_paste_keystroke(module, backend, user, [0x8000, 0x8000])
-    assert len(re_presses) == 1
+    assert module.WindowsBackend._send_paste_keystroke(backend)
+    assert vk in logical_down
+    assert sent[0] == (vk, True)
+    assert sent[-1] == (vk, False)
 
 
 def test_a_target_with_pid_zero_is_refused(win):

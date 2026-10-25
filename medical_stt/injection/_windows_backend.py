@@ -141,7 +141,7 @@ user32.GetForegroundWindow.restype = wintypes.HWND
 user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
 user32.GetWindowThreadProcessId.restype = wintypes.DWORD
 
-_INTERFERING_MODIFIERS = (VK_SHIFT, VK_MENU, VK_LWIN, VK_RWIN)
+_INTERFERING_MODIFIERS = (VK_SHIFT, VK_MENU, VK_LWIN, VK_RWIN, VK_CONTROL)
 
 
 def _key_input(vk: int, scan: int, flags: int) -> INPUT:
@@ -285,13 +285,9 @@ class WindowsBackend(InjectionBackend):
         ok = self._send_inputs(sequence)
 
         for vk in stuck:
-            # Re-press only a modifier that is STILL physically down at
-            # re-check time. Re-pressing one the user released in the
-            # meantime leaves a logical Shift/Alt/Win stuck with no key
-            # physically held: every later click becomes a modified click
-            # until the user happens to tap that key again.
-            if user32.GetAsyncKeyState(vk) & 0x8000:
-                self._set_modifier(vk, pressed=True)
+            # Restore the pre-injection snapshot. GetAsyncKeyState includes
+            # our own synthetic keyups and cannot reveal physical state now.
+            self._set_modifier(vk, pressed=True)
 
         return ok
 
