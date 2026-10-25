@@ -298,6 +298,9 @@ class ControlWindow:
 
     def _on_drag_start(self, event: object) -> None:
         self._drag_origin = (getattr(event, "x_root", 0), getattr(event, "y_root", 0))
+        self._drag_window_origin = (
+            (self._root.winfo_x(), self._root.winfo_y()) if self._root is not None else (0, 0)
+        )
 
     def _on_drag_move(self, event: object) -> None:
         if self._root is None:
@@ -306,12 +309,17 @@ class ControlWindow:
         if origin is None:
             return
         # `geometry("+x+y")` sets an ABSOLUTE screen position, so the drag
-        # delta offsets the window's current position: passing the delta
-        # itself parks the window near the screen origin on the first drag
-        # instead of moving it with the pointer (audit N-02).
+        # delta offsets the PRESS-TIME window origin -- never the current
+        # `winfo_x()`/`winfo_y()`. This handler used to add the cumulative
+        # delta-from-press to the current position on every motion event:
+        # once Tk applied the first move, each later event re-added the
+        # whole delta and the window accelerated away from the cursor.
+        # (The even older bug, audit N-02, passed the raw delta as the
+        # position and parked the window near the screen origin.)
+        wx, wy = getattr(self, "_drag_window_origin", (self._root.winfo_x(), self._root.winfo_y()))
         dx = getattr(event, "x_root", 0) - origin[0]
         dy = getattr(event, "y_root", 0) - origin[1]
-        self._root.geometry(f"+{self._root.winfo_x() + dx}+{self._root.winfo_y() + dy}")
+        self._root.geometry(f"+{wx + dx}+{wy + dy}")
 
     # -- state / actions --------------------------------------------------
 

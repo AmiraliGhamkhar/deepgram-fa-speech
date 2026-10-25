@@ -137,6 +137,25 @@ def test_drag_moves_the_window_with_the_cursor_not_to_the_delta():
     assert fake_root.geometry_calls == ["+580+380"]
 
 
+def test_drag_derives_position_from_the_press_origin_across_events():
+    """A3.2: the delta is cumulative-from-press, so adding it to the
+    *current* position on every motion event double-counts it once Tk has
+    applied the first move -- the window accelerated away from the cursor.
+    Position must be press-time window origin + pointer delta, always."""
+    window = ControlWindow(_StoppedController())
+    # A root whose position ACTUALLY moves when geometry() is applied, like
+    # the real window manager does between motion events.
+    root = _FakeWidget()
+    window._root = root  # at +500+300
+
+    window._on_drag_start(_FakeEvent(520, 320))
+    window._on_drag_move(_FakeEvent(540, 340))   # +20/+20
+    window._on_drag_move(_FakeEvent(580, 380))   # +60/+60 cumulative
+    window._on_drag_move(_FakeEvent(620, 420))   # +100/+100 cumulative
+
+    assert root.geometry_calls == ["+520+320", "+560+360", "+600+400"]
+
+
 def test_drag_without_a_window_or_origin_is_ignored():
     window = ControlWindow(_StoppedController())
     window._on_drag_move(_FakeEvent(0, 0))  # no _root yet
