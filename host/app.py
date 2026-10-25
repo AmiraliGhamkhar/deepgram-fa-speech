@@ -415,9 +415,13 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
             return JSONResponse({"detail": detail}, status_code=status_code, headers=headers)
 
         # -- layered rate limits, keyed on identity, not on the NAT IP ----
-        allowed, retry_after = client_limiter.allow(f"client:{identity.client_id}")
+        # Global first: a request the global ceiling refuses must not also
+        # burn one of the client's own tokens. With the old order, global
+        # saturation drained every client's personal budget on requests
+        # that were never going to be served anyway.
+        allowed, retry_after = global_limiter.allow("global")
         if allowed:
-            allowed, retry_after = global_limiter.allow("global")
+            allowed, retry_after = client_limiter.allow(f"client:{identity.client_id}")
         if not allowed:
             metrics.increment("rate_limited_total")
             log.warning(

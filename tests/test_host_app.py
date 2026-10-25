@@ -243,6 +243,37 @@ def test_rate_limit_returns_429_with_retry_after(host, monkeypatch):
     assert int(limited.headers["Retry-After"]) >= 1
 
 
+def test_global_rate_limit_does_not_debit_the_client_bucket(host, monkeypatch):
+    """B3: the limiters were checked client-first, so a global 429 still
+    burned a per-client token -- global saturation drained everyone's
+    personal budget on requests that were never going to be served."""
+    core = importlib.import_module("core")
+    app_module = importlib.import_module("app")
+
+    async def fake_grant(_self, _api_key, _ttl):
+        return dict(FAKE_GRANT)
+
+    monkeypatch.setattr(core.AsyncGrantClient, "grant", fake_grant)
+    service = app_module.create_app(
+        core.HostSettings.from_env(
+            {
+                **os.environ,
+                "HOST_GLOBAL_BURST": "1",
+                "HOST_GLOBAL_RATE_LIMIT_REQUESTS": "1",
+                "HOST_CLIENT_BURST": "10",
+                "HOST_CLIENT_RATE_LIMIT_REQUESTS": "1",
+            }
+        )
+    )
+    client = TestClient(service, base_url="https://stt.example.com")
+
+    assert _post(client).status_code == 200  # spends the one global token
+    assert _post(client).status_code == 429  # global ceiling refuses
+
+    bucket = service.state.client_limiter._buckets[f"client:{core.LEGACY_CLIENT_ID}"]
+    assert bucket[0] == 9.0, "only the served request may debit the client bucket"
+
+
 def test_allow_http_serves_plaintext_for_development(monkeypatch):
     monkeypatch.setenv("DEEPGRAM_API_KEY", "dg_fake_host_side_only")
     monkeypatch.setenv("HOST_SHARED_SECRET", SECRET)
