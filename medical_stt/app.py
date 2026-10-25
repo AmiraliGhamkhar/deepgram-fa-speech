@@ -315,9 +315,12 @@ class LiveMedicalSTT:
             return
         try:
             utterance = self._utterance.add(event)
-        except UtteranceLimitError:
+        except UtteranceLimitError as exc:
             self._injection_failed = True
-            self._retain_failed(event.text)
+            # The accumulator reset itself; its exception carries the whole
+            # utterance. Retain it once rather than appending only the final
+            # segment and duplicating earlier ones on shutdown's flush.
+            self._retain_failed(exc.accumulated_text or event.text)
             self._warn("گفتار طولانی است؛ متن بازیابی را بررسی کنید")
             self._on_provider_error(ProviderError(ErrorCategory.CONFIG, "Utterance limit reached; review recovery text"))
             return

@@ -1,4 +1,6 @@
-from medical_stt.stt.accumulator import UtteranceAccumulator
+import pytest
+
+from medical_stt.stt.accumulator import UtteranceAccumulator, UtteranceLimitError
 from medical_stt.stt.base import TranscriptEvent, WordInfo
 
 
@@ -99,3 +101,17 @@ def test_word_metadata_is_combined() -> None:
     assert utterance is not None
     assert utterance.words == (first, second)
     assert utterance.confidence == 0.75
+
+
+def test_utterance_limit_exposes_all_segments_and_resets() -> None:
+    accumulator = UtteranceAccumulator(max_segments=2)
+    accumulator.add(TranscriptEvent("بخش اول", True, speech_final=False))
+    accumulator.add(TranscriptEvent("بخش دوم", True, speech_final=False))
+    assert accumulator.pending_text() == "بخش اول بخش دوم"
+
+    with pytest.raises(UtteranceLimitError) as excinfo:
+        accumulator.add(TranscriptEvent("بخش سوم", True, speech_final=False))
+
+    assert excinfo.value.accumulated_text == "بخش اول بخش دوم بخش سوم"
+    assert accumulator.pending_text() == ""
+    assert accumulator.flush() is None

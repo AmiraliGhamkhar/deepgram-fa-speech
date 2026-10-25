@@ -40,7 +40,17 @@ def _same_word_span(first: Tuple[WordInfo, ...], second: Tuple[WordInfo, ...]) -
 
 
 class UtteranceLimitError(ValueError):
-    """The provider did not endpoint within the bounded utterance budget."""
+    """The provider did not endpoint within the bounded utterance budget.
+
+    `accumulated_text` is the complete utterance at the instant the budget
+    tripped: every retained finalized segment joined with the segment that
+    exceeded it. Callers must retain this in one recovery entry; the
+    accumulator has already been reset and cannot reproduce the text.
+    """
+
+    def __init__(self, message: str, accumulated_text: str = "") -> None:
+        super().__init__(message)
+        self.accumulated_text = accumulated_text
 
 
 class UtteranceAccumulator:
@@ -65,7 +75,15 @@ class UtteranceAccumulator:
             now = time.monotonic()
             if (self._chars + len(text) > self.max_chars or len(self._segments) >= self.max_segments
                     or (self._segments and now - self._started > self.max_seconds)):
-                raise UtteranceLimitError("Dictation exceeded the utterance budget; stop and review")
+                # Do not lose the already-finalized segments. The app retains
+                # this complete text once, and the reset prevents a later
+                # flush() from adding those segments a second time.
+                full_text = " ".join(part for part in (self.pending_text(), text) if part)
+                self.reset()
+                raise UtteranceLimitError(
+                    "Dictation exceeded the utterance budget; stop and review",
+                    accumulated_text=full_text,
+                )
             if not self._segments:
                 self._started = now
             self._chars += len(text)
@@ -84,6 +102,10 @@ class UtteranceAccumulator:
         if not event.speech_final:
             return None
         return self.flush()
+
+    def pending_text(self) -> str:
+        """All currently retained finalized segments, in arrival order."""
+        return " ".join(segment.text for segment in self._segments)
 
     def flush(self) -> Optional[TranscriptEvent]:
         if not self._segments:

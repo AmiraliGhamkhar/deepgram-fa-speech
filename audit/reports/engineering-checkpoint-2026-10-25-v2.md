@@ -28,7 +28,8 @@ production code. Failures below were observed, not inferred.
 | P0-10 span-level low-confidence protection | `69568a0` | `2 failed, 7 passed` in `tests/test_app.py` | `97 passed` in `tests/test_app.py tests/test_confidence.py tests/test_terminology.py tests/test_performance_fixes.py` |
 | P0-11 Start/Stop controller snapshot race | `6179094` | `1 failed, 1 passed` in the two controller race tests with the fix temporarily reverted | `2 passed` in the same tests; `14 passed` in `tests/test_session_lifecycle.py` |
 | P0-12 silent provider exit | `7c183dd` | `2 failed, 14 passed` in `tests/test_shutdown_flow.py` | `80 passed` in shutdown/app/performance/concurrency targeted suites |
-| P0-13 fallback clipboard PHI leak | (this commit) | `4 failed, 44 passed` in `tests/test_injection.py tests/test_edge_paths.py` | `68 passed` in injection/edge/Windows-policy targeted suites |
+| P0-13 fallback clipboard PHI leak | `2f8b6be` | `4 failed, 44 passed` in `tests/test_injection.py tests/test_edge_paths.py` | `68 passed` in injection/edge/Windows-policy targeted suites |
+| P0-14 utterance-limit recovery text | (this commit) | `3 failed, 62 passed` in accumulator/performance/app targeted suites | `65 passed` in the same suites |
 
 ### P0-7 details
 
@@ -90,8 +91,8 @@ Full-suite validation after P0-7: `1071 passed, 4 skipped, 1 warning`;
 ## Remaining acceptance limitations
 
 - This checkpoint is appended incrementally; the latest per-fix section is the
-  authoritative progress marker. P0-14, all P1/P2 items and all GUI changes
-  remain outstanding at this revision.
+  authoritative progress marker. All Phase 1 P0 fixes are complete at this revision. P1/P2 items
+  and all GUI changes remain outstanding.
 - The accepted Starlette test-client warning is preserved; no warning filters
   or lockfile edits were added.
 - Native Windows injection, live microphone and live Deepgram behaviors
@@ -306,3 +307,36 @@ now also asserts that `send_unicode_text` passes `restore_clipboard=True`.
 Four new regressions cover prior-copy restoration, unreadable refusal,
 verification-failure restore, and the newer-copy content guard. No Windows
 clipboard or security pins were weakened.
+
+### P0-14 details
+
+- `UtteranceLimitError` now carries `accumulated_text`: all retained finalized
+  segments joined with the segment that tripped the budget.
+  `UtteranceAccumulator.pending_text()` exposes the current joined segments,
+  and `add()` calls `reset()` at the instant the limit trips.
+- `LiveMedicalSTT._on_transcript` retains `exc.accumulated_text` in a single
+  `_retain_failed()` call (falling back to `event.text` only for an empty
+  exception payload). Because the accumulator is already empty, shutdown's
+  `_flush_pending_utterance()` cannot append the earlier segments again.
+- Recovery remains bounded by the existing 8000-character/16-entry policy;
+  the fix guarantees that all accumulated segments reach that buffer once,
+  in order, rather than only the final segment.
+
+Before (the fixed accumulator and app were temporarily replaced with HEAD):
+
+```text
+FAILED tests/test_utterance_accumulator.py::test_utterance_limit_exposes_all_segments_and_resets
+FAILED tests/test_performance_fixes.py::test_accumulator_has_a_size_budget
+FAILED tests/test_performance_fixes.py::test_utterance_limit_retains_the_whole_utterance_once
+3 failed, 62 passed in 2.86s
+```
+
+After: `65 passed` in those three targeted suites; an app-level test asserts
+`recovery_text() == "بخش اول بخش دوم بخش سوم"` even after
+`_flush_pending_utterance()`. Full suite `1118 passed, 4 skipped, 1 warning`;
+ruff, mypy and secret scan clean.
+
+Deliberately updated pin: `test_accumulator_has_a_size_budget` now asserts the
+exception's full accumulated text and that a tripped limit resets the
+accumulator, instead of expecting the old segments to survive `flush()`.
+No security, threading, or GUI pins were weakened.

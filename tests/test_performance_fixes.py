@@ -271,10 +271,26 @@ def test_audio_age_and_loss_accounting(monkeypatch):
 def test_accumulator_has_a_size_budget():
     accumulator = UtteranceAccumulator(max_chars=5)
     accumulator.add(TranscriptEvent("abc", True, speech_final=False))
-    with pytest.raises(UtteranceLimitError):
+    with pytest.raises(UtteranceLimitError) as excinfo:
         accumulator.add(TranscriptEvent("def", True, speech_final=False))
-    assert accumulator.flush().text == "abc"
-    accumulator.add(TranscriptEvent("def", True))  # budget reset after flush
+    assert excinfo.value.accumulated_text == "abc def"
+    assert accumulator.flush() is None  # the limit resets the accumulator
+    utterance = accumulator.add(TranscriptEvent("def", True))  # budget reset after the limit
+    assert utterance is not None and utterance.text == "def"
+
+
+def test_utterance_limit_retains_the_whole_utterance_once(build_session):
+    stt, _ = build_session()
+    stt._utterance = UtteranceAccumulator(max_segments=2)
+    stt._on_transcript(TranscriptEvent("بخش اول", True, speech_final=False))
+    stt._on_transcript(TranscriptEvent("بخش دوم", True, speech_final=False))
+    stt._on_transcript(TranscriptEvent("بخش سوم", True, speech_final=False))
+
+    assert stt.recovery_text() == "بخش اول بخش دوم بخش سوم"
+    stt._flush_pending_utterance()
+    assert stt.recovery_text() == "بخش اول بخش دوم بخش سوم"
+    assert stt._injection_failed is True
+    assert stt._errors[0].category is ErrorCategory.CONFIG
 
 
 @pytest.mark.parametrize("attempt", [1025, 1000000])
