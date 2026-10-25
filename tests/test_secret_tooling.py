@@ -198,9 +198,11 @@ def test_scripts_are_executable_and_documented(script):
 def test_scanner_reports_the_tracked_incident_without_failing():
     """The real repository is expected to be clean of *new* findings.
 
-    The historical `.env` blob is listed in scripts/secret_scan_baseline.txt
-    until the rewritten history is force-pushed, so the scan exits 0 while
-    still printing the accepted finding.
+    The historical `.env` blob used to be listed in
+    scripts/secret_scan_baseline.txt; the rewritten history has shipped
+    since, so today the scan simply reports clean. (The conditional below
+    keeps the redaction assertions should an accepted finding ever exist
+    again.)
     """
     result = run(SCAN, "--history")
     assert result.returncode == 0, result.stdout + result.stderr
@@ -257,7 +259,10 @@ def test_baseline_file_is_parseable_and_scoped():
     baseline_path = ROOT / "scripts" / "secret_scan_baseline.txt"
     assert baseline_path.is_file()
     entries = module.load_baseline(baseline_path)
-    assert entries, "the incident entry should be present until the rewrite ships"
+    # Empty is the expected state since the history rewrite shipped and the
+    # incident entry matched nothing (SECURITY.md tells you to delete the
+    # line at exactly that point). Any entry that IS present must still be
+    # well-formed and carry its reason.
     for key, reason in entries.items():
         assert len(key.split()) == 2
         assert reason, "every accepted finding must document why it is accepted"

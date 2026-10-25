@@ -77,13 +77,16 @@ python scripts/scrub_history.py --yes \
 python scripts/scan_secrets.py --history --strict # verify: must be clean
 ```
 
-Until the rewritten history is pushed, the incident blob is listed in
-`scripts/secret_scan_baseline.txt` so CI can tell "the known, tracked
-incident" apart from "a new leak". The entry is fingerprinted (not a value),
-carries its reason, is still printed on every scan, and makes the strict
-scan fail — so it can never be used to hide an unidentified finding. Delete
-the line once `python scripts/scan_secrets.py --history --strict` is clean;
-the scanner will tell you when it has become stale.
+While the incident blob was still reachable it was listed, fingerprinted,
+in `scripts/secret_scan_baseline.txt` so CI could tell "the known, tracked
+incident" apart from "a new leak" (a baseline entry is still printed on
+every scan and fails the strict scan, so it can never hide an unidentified
+finding). The rewritten history has since been pushed:
+`python scripts/scan_secrets.py --history --strict` is clean and the entry
+matched nothing, so the baseline line has been deleted, as this section
+always instructed. That changes nothing about the key itself — see the
+revocation steps above, which only the account owner can perform and
+which nothing here should be read as evidence of.
 
 `scripts/scrub_history.py` writes a `git bundle` backup *outside* the
 repository first, rewrites all refs with `git filter-branch`, deletes
