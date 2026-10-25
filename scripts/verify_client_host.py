@@ -3,7 +3,7 @@
 Not part of the test suite (it needs `fastapi`/`httpx`); run it manually
 after changing the credential path:
 
-    pip install -r host/requirements-dev.txt
+    pip install --require-hashes -r requirements/dev.lock
     python scripts/verify_client_host.py
 
 Only the outbound call to Deepgram is stubbed, so this exercises the real

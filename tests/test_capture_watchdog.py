@@ -234,7 +234,13 @@ def test_a_rate_limit_that_never_clears_keeps_the_message_and_keeps_retrying(mon
         assert _wait_for(lambda: provider.attempts >= 5)
         # Still cycling (connecting -> stopping -> reconnecting), never recording.
         assert stt.phase != "recording"
-        assert stt.warning == app_module.CAPACITY_WARNING
+        # Re-awaited rather than sampled once: `warning` is rewritten by the
+        # session thread on every cycle, and a slow teardown on a loaded
+        # runner can land a single sample on a transient teardown warning.
+        # The claim under test is "the message is (back) up while retrying",
+        # which is an eventually-true predicate -- the same shape as the
+        # two waits above. (Flaked once on the Windows build job.)
+        assert _wait_for(lambda: stt.warning == app_module.CAPACITY_WARNING)
     finally:
         stt.request_stop()
         runner.join(timeout=10.0)

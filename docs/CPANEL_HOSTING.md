@@ -83,11 +83,13 @@ In Terminal, using the venv cPanel created (path from the previous step):
 ```bash
 source ~/apps/medical-stt/host/venv/bin/activate
 pip install --upgrade pip
-pip install -r ~/apps/medical-stt/host/requirements.txt
+pip install --require-hashes -r ~/apps/medical-stt/requirements/host.lock
 ```
 
 That installs `fastapi`, `uvicorn`, `httpx`, and `a2wsgi` (the ASGI→WSGI
-bridge Passenger needs). If pip is killed by the host (shared-host memory
+bridge Passenger needs), pinned to the exact reviewed versions with
+SHA-256 hashes (`requirements/host.lock` is compiled from
+`host/requirements.txt`; see README > Development > Dependency locks). If pip is killed by the host (shared-host memory
 limits), install one package at a time.
 
 ## 5. Provision client identities

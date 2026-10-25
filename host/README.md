@@ -308,7 +308,7 @@ would leave a fully broken host reporting zero failures.
 
 ```bash
 python -m venv .venv && . .venv/bin/activate
-pip install -r host/requirements.txt
+pip install --require-hashes -r requirements/host.lock
 
 export DEEPGRAM_API_KEY='...'            # or use your secret manager
 export HOST_CLIENTS_FILE=/secure/host/clients.txt

@@ -131,7 +131,7 @@ The short version:
 
 ```bash
 python -m venv .venv && . .venv/bin/activate
-pip install -r host/requirements.txt
+pip install --require-hashes -r requirements/host.lock
 
 export DEEPGRAM_API_KEY='...'        # only ever here
 export HOST_SHARED_SECRET="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
@@ -401,7 +401,7 @@ also runs CI.
 git clone https://github.com/AmiraliGhamkhar/deepgram-fa-speech.git
 cd deepgram-fa-speech
 python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
-pip install -r requirements-dev.txt
+pip install --require-hashes -r requirements/dev.lock
 
 # Windows DPAPI is unavailable here, so point the dev client at the host
 # through the environment instead (development only -- never a real key):
@@ -430,6 +430,30 @@ The default run includes the 50-client concurrency suite
 (`tests/test_host_concurrency.py`, `tests/test_session_concurrency.py`) with
 Deepgram mocked, so CI never spends credit. The soak and real-provider load
 tests are opt-in via `MEDICAL_STT_SOAK=1` and `MEDICAL_STT_LOAD_TEST=1`.
+
+### Dependency locks
+
+The `requirements*.txt` files are the human-edited inputs (version
+ranges). What actually gets installed — in CI, in the host Docker
+image, and in the quickstarts above — is their compiled, hash-pinned
+resolution in `requirements/`:
+
+| Lock | Compiled from | Installed by |
+|---|---|---|
+| `requirements/client.lock` | `requirements.txt` | client deployments |
+| `requirements/host.lock` | `host/requirements.txt` | host deployments, `host/Dockerfile` |
+| `requirements/dev.lock` | both `-dev` files, constrained by the two locks above | every CI job |
+
+Each lock is *universal* — one file covers Linux + Windows on Python
+3.10–3.12 (note the environment-marker forks, e.g. `websockets`), with
+SHA-256 hashes for every artifact, installed via
+`pip install --require-hashes`. A byte different from the reviewed set
+fails the install instead of silently landing. To change a dependency:
+edit the range in the `.txt`, run `scripts/update_locks.sh` (uses `uv`
+as the generator only — installs stay plain pip), review the `.lock`
+diff like code, and commit both. The one unaudited exception is the
+Windows *build* tooling (Nuitka, installed by `scripts/build_windows.ps1`
+at build time, never shipped in the bundle's runtime set).
 
 ---
 
