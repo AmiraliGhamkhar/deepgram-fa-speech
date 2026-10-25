@@ -194,8 +194,20 @@ class ControlWindow:
             self._root.mainloop()
         except tk.TclError as exc:
             log.error("failed to create the control window: %s", exc)
-            self._ready.set()
+        except Exception as exc:  # noqa: BLE001 - any build fault, not just Tk's
+            # `_build` touches settings and the filesystem, so it can raise
+            # more than TclError (an unreadable settings file, a widget
+            # option Tk refuses, ...). Uncaught, that killed the UI thread
+            # with `_ready` never set: `start()` then blocked its full 5 s
+            # and reported a bare "cannot start" with nothing in the log.
+            # Only the exception TYPE is logged -- messages from the config
+            # layer are user-facing text, not log material.
+            log.error("control window build failed (%s)", type(exc).__name__)
         finally:
+            # Idempotent: the success path has already set it before
+            # `mainloop()`, so this only runs first for a failed build --
+            # which is exactly the case that must not hang `start()`.
+            self._ready.set()
             dispatch.clear_owner()
 
     def _pump(self) -> None:

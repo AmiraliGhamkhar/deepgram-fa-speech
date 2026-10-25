@@ -164,6 +164,23 @@ def test_drag_without_a_window_or_origin_is_ignored():
     assert window._root.geometry_calls == []
 
 
+# -- A3.1 (extension): a build fault must not hang the UI thread -----------
+
+
+def test_a_non_tcl_error_during_build_still_releases_start(monkeypatch):
+    """`_build` reads settings and the filesystem, so it can raise more than
+    TclError. Uncaught, the UI thread died with `_ready` never set and
+    `start()` blocked its whole 5 s timeout, reporting nothing."""
+    _install_fake_tk(monkeypatch)
+    monkeypatch.setattr(ControlWindow, "_build", lambda self, root: (_ for _ in ()).throw(OSError("unreadable")))
+
+    window = ControlWindow(_StoppedController())
+    started = time.monotonic()
+    assert window.start() is False
+    assert time.monotonic() - started < 2.0, "a failed build must not burn the full start timeout"
+    assert window._initialized is False
+
+
 # -- fake-Tk harness -------------------------------------------------------
 #
 # `_build` runs the real widget-construction code against these stand-ins,
