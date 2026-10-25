@@ -186,10 +186,6 @@ def test_numeric_opt_in_requires_a_boolean():
         parse_rules([_rule("دکستروز 5%", "D5W", numeric_in_source="false")])
 
 
-def test_digit_in_latin_term_without_numeric_span_needs_no_opt_in():
-    engine = TerminologyEngine()
-    engine.load([_rule("لیزر CO2", "CO2 laser")])
-    assert engine.apply("لیزر CO2") == "CO2 laser"
 
 
 @pytest.mark.parametrize("rule", [
@@ -206,3 +202,19 @@ def test_yaml_loader_rejects_dead_or_digit_changing_rules(tmp_path, monkeypatch,
     monkeypatch.setattr(config_module, "_DATA_DIR", tmp_path)
     with pytest.raises(ConfigError, match="numeric_in_source|identical digit sequences"):
         config_module.load_correction_rules_raw()
+
+
+def test_letter_glued_digit_requires_numeric_opt_in():
+    """After P0-7, a digit in a Latin term is a protected numeric span."""
+    with pytest.raises(ConfigError, match="numeric_in_source"):
+        parse_rules([_rule("لیزر CO2", "CO2 laser")])
+
+    engine = TerminologyEngine()
+    engine.load([_rule("لیزر CO2", "CO2 laser", numeric_in_source=True)])
+    assert engine.apply("لیزر CO2") == "CO2 laser"
+
+
+def test_numeric_span_covers_persian_unit_against_terminology_rewrite():
+    engine = TerminologyEngine()
+    engine.load([_rule("گرم", "GRAM", category="specialty_terminology")])
+    assert engine.apply("دکستروز5 گرم") == "دکستروز5 گرم"

@@ -60,7 +60,9 @@ def test_cer_is_computed_over_characters():
 def test_numeric_accuracy_requires_the_exact_clinical_expression():
     reference = "فشار خون 120/80 mmHg و HbA1c 7.2 درصد"
     assert numeric_accuracy(reference, reference) == 1.0
-    assert numeric_accuracy(reference, "فشار خون 120/80 و HbA1c 7.2 درصد") == pytest.approx(0.5)
+    # P0-7 also protects the letter-glued "1" in "HbA1c", so the reference has
+    # three numeric spans; dropping just "mmHg" preserves two of the three.
+    assert numeric_accuracy(reference, "فشار خون 120/80 و HbA1c 7.2 درصد") == pytest.approx(2 / 3)
     assert numeric_accuracy("بیمار بی‌حال بود", "بیمار بی‌حال بود") == 1.0
 
 

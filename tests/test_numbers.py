@@ -111,3 +111,45 @@ def test_a_date_is_protected_as_one_contiguous_span(text):
 def test_moving_dates_first_did_not_steal_ratios_ranges_or_times(text, expected):
     """A date needs two separators, so single-separator forms are untouched."""
     assert any(s.text == expected for s in find_numeric_spans(text))
+
+
+# -- P0-7: letter-glued digits and Persian clinical units -------------------
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("فشارخون120/80mmHg", "120/80mmHg"),
+        ("دکستروز5 درصد", "5 درصد"),
+        ("BP120/80", "120/80"),
+        ("دوز5گرم", "5گرم"),
+        ("CO2", "2"),
+    ],
+)
+def test_letter_glued_digit_starts_a_protected_span(text, expected):
+    """`\b` cannot see a boundary between Persian/Latin letters and digits."""
+    texts = [s.text for s in find_numeric_spans(text)]
+    assert expected in texts, texts
+
+
+@pytest.mark.parametrize(
+    "text,unit",
+    [
+        ("5 گرم", "گرم"),
+        ("500 میلی\u200cگرم", "میلی\u200cگرم"),
+        ("10 میلی لیتر", "میلی لیتر"),
+        ("70 کیلوگرم", "کیلوگرم"),
+        ("3 سانتی\u200cمتر", "سانتی\u200cمتر"),
+        ("5 میلی مول", "میلی مول"),
+        ("38 درجه", "درجه"),
+    ],
+)
+def test_persian_clinical_units_are_part_of_numeric_span(text, unit):
+    texts = [s.text for s in find_numeric_spans(text)]
+    assert any(unit in t for t in texts), texts
+
+
+@pytest.mark.parametrize("text", ["3-4 روز", "3-4 بار", "5-10 میلی\u200cگرم"])
+def test_range_span_does_not_end_with_a_detached_space(text):
+    spans = find_numeric_spans(text)
+    assert spans
+    assert all(not s.text.endswith(" ") for s in spans), [s.text for s in spans]

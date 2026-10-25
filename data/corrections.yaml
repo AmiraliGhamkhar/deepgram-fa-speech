@@ -4148,6 +4148,7 @@ rules:
   confidence: high
   requires_context: false
   dangerous: false
+  numeric_in_source: true
 - from: لیپوپروتئین با چگالی زیاد
   to: HDL
   category: specialty_terminology
