@@ -328,3 +328,35 @@ def test_keyterms_are_budgeted_by_characters_in_priority_order():
     assert sum(len(term) for term in budgeted) <= 60
     assert budgeted == everything[: len(budgeted)], "truncation keeps priority order"
     assert len(budgeted) < len(everything)
+
+
+def test_stalled_keep_alive_never_blocks_session_or_spawns_unbounded_workers(monkeypatch):
+    provider = KeepAliveProvider()
+    entered, release = threading.Event(), threading.Event()
+    calls = []
+
+    def stalled():
+        calls.append(threading.current_thread())
+        entered.set()
+        release.wait(3)
+
+    monkeypatch.setattr(provider, "keep_alive", stalled)
+    stt = _build_session(provider, monkeypatch)
+    stt._reset_capture_watch()
+    stt._last_capture_at -= 10
+    caller = threading.current_thread()
+    started = time.monotonic()
+    try:
+        stt._watch_capture(provider)
+        assert time.monotonic() - started < 0.2
+        assert entered.wait(1)
+        for _ in range(10):
+            stt._last_keep_alive_at = 0
+            stt._watch_capture(provider)
+        assert len(calls) == 1
+        assert calls[0] is not caller
+    finally:
+        release.set()
+        for worker in calls:
+            if worker is not caller:
+                worker.join(1)

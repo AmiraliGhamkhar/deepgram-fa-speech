@@ -180,6 +180,7 @@ class LiveMedicalSTT:
         self._injection_failed = False
         self._connected_at: Optional[float] = None
         self._abandoned_workers: list[threading.Thread] = []
+        self._keep_alive_worker: Optional[threading.Thread] = None
         #: Set to end the current session (error, endpoint, or Stop).
         self._stop = threading.Event()
         #: Set by `request_stop()` to end `run()` itself.
@@ -498,11 +499,22 @@ class LiveMedicalSTT:
             self._warn(MIC_SILENT_WARNING)
         if now - self._last_keep_alive_at >= KEEP_ALIVE_INTERVAL_SECONDS:
             self._last_keep_alive_at = now
-            try:
-                provider.keep_alive()
-            except ProviderError as exc:
-                # A dead connection is reported by the provider thread itself.
-                log.debug("keep-alive not sent: %s", exc)
+            # A sync websocket send can wait forever behind another writer.
+            # Keep at most one such worker across reconnects; never join it on
+            # the session/Stop path. The closure owns this session's provider.
+            if self._keep_alive_worker is not None and self._keep_alive_worker.is_alive():
+                return
+
+            def send_keep_alive() -> None:
+                try:
+                    provider.keep_alive()
+                except Exception as exc:
+                    # The receiver reports transport failure. No PHI/messages.
+                    log.debug("keep-alive not sent (%s)", type(exc).__name__)
+
+            self._keep_alive_worker = threading.Thread(
+                target=send_keep_alive, daemon=True, name="keep-alive-sender")
+            self._keep_alive_worker.start()
 
     # -- session lifecycle -------------------------------------------------
 
