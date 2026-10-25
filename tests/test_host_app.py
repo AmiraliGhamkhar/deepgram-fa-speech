@@ -177,6 +177,29 @@ def test_openapi_schema_is_not_exposed(host):
     assert client.get("/redoc").status_code == 404
 
 
+def test_legacy_host_explains_why_a_client_id_cannot_authenticate(host):
+    """B5: against a legacy (shared-secret) host, a device that sends
+    X-Client-Id resolves to a registry entry that does not exist, so the
+    CORRECT secret got an opaque 401 and the operator went hunting in the
+    wrong place. The 401 now names the trap."""
+    client = TestClient(host, base_url="https://stt.example.com")
+    response = client.post(
+        "/v1/session",
+        headers={"Authorization": f"Bearer {SECRET}", "X-Client-Id": "doctor-01"},
+        json={},
+    )
+    assert response.status_code == 401
+    assert "client id" in response.json()["detail"]
+
+    # The id is the problem, not the credential: without it the same
+    # secret is accepted...
+    assert _post(client).status_code == 200
+    # ...and a plainly wrong secret still gets the opaque detail (the hint
+    # must not become an oracle for anything else).
+    wrong = client.post("/v1/session", headers={"Authorization": "Bearer nope"}, json={})
+    assert wrong.json()["detail"] == "invalid credentials"
+
+
 def test_wrong_secret_is_rejected(host):
     client = TestClient(host, base_url="https://stt.example.com")
     response = client.post("/v1/session", headers={"Authorization": "Bearer nope"}, json={})

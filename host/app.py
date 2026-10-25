@@ -196,7 +196,12 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
             "site. One clinician is fine; a clinic is not. Provision per-device "
             "credentials (python -m host.provision --count N --out "
             "/secure/host/clients.txt) and set HOST_CLIENTS_FILE. Revoking one "
-            "device also revokes everything else while in this mode.",
+            "device also revokes everything else while in this mode. Devices "
+            "that send X-Client-Id cannot authenticate at all here -- the id "
+            "resolves to a registry entry that does not exist -- so a clinic "
+            "that provisions ids on the clients before setting "
+            "HOST_CLIENTS_FILE on the host sees only 401s; the 401 detail "
+            "names this trap.",
             resolved.client_burst, resolved.client_rate_limit_requests,
             resolved.rate_limit_window_seconds,
         )
@@ -373,8 +378,23 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
                 "rejected unauthenticated session request from %s", peer or "unknown"
             )
             headers = {"Retry-After": str(retry_after)} if retry_after else None
+            detail = "invalid credentials"
+            if x_client_id and not resolved.clients_file:
+                # The un-migrated-deployment trap: this host has exactly one
+                # shared-secret identity, so a presented client id resolves
+                # to a registry entry that does not exist and the correct
+                # secret still 401s. Name the trap so the operator can fix
+                # the deployment instead of rotating a good secret. This
+                # reveals nothing about which ids exist -- in this mode the
+                # answer is "none beyond the shared one" by definition.
+                detail = (
+                    "invalid credentials: this host uses a single shared secret "
+                    "and does not accept a client id (X-Client-Id); clear the "
+                    "device id in the client, or provision per-device "
+                    "identities and set HOST_CLIENTS_FILE"
+                )
             return JSONResponse(
-                {"detail": "invalid credentials"}, status_code=401, headers=headers
+                {"detail": detail}, status_code=401, headers=headers
             )
 
         # Counted only for authenticated callers: brute-force noise must not
