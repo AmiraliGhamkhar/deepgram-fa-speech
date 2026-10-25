@@ -349,6 +349,8 @@ class ControlWindow:
 
     def _on_toggle(self) -> None:
         if self._stopping:
+            # Say so: a press that silently does nothing reads as a frozen UI.
+            self._set_status("● در حال توقف...", _MUTED)
             return
         if self._running or self._starting:
             self._stop()
@@ -503,7 +505,11 @@ class ControlWindow:
         self._ui(_, key="button")
 
     def _on_save_settings(self) -> None:
-        if self._saving or self._starting or self._running or self._stopping:
+        if self._saving:
+            self._set_status("● در حال ذخیره…", _MUTED)
+            return
+        if self._starting or self._running or self._stopping:
+            self._set_status("● برای ذخیره، ابتدا ضبط را متوقف کنید", _MUTED)
             return
         url = self._url_var.get().strip() if self._url_var is not None else ""
         secret = self._secret_var.get().strip() if self._secret_var is not None else ""
@@ -529,7 +535,14 @@ class ControlWindow:
         threading.Thread(target=save, daemon=True, name="settings-save").start()
 
     def _test_connection(self) -> None:
-        if self._testing or self._saving or self._starting or self._running:
+        if self._testing:
+            self._set_status("● در حال بررسی اتصال…", _MUTED)
+            return
+        if self._saving:
+            self._set_status("● در حال ذخیره…", _MUTED)
+            return
+        if self._starting or self._running:
+            self._set_status("● برای بررسی اتصال، ابتدا ضبط را متوقف کنید", _MUTED)
             return
         self._testing = True
         self._set_status("● بررسی تنظیمات ذخیره‌شده...", _MUTED)

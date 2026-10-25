@@ -533,6 +533,48 @@ def test_connection_test_uses_its_own_flag_and_does_not_block_saving(monkeypatch
     assert window._testing is False
 
 
+# -- A3.3: guard hits must say why, not silently no-op ------------------------
+
+
+def test_toggle_while_stopping_posts_a_hint():
+    window = ControlWindow(_StoppedController())
+    statuses, _ = _capture_status(window)
+    window._stopping = True
+
+    window._on_toggle()
+
+    assert statuses and "توقف" in statuses[-1][0]
+    assert window._starting is False, "the guard still refuses the action itself"
+
+
+def test_save_guards_post_a_hint():
+    window = ControlWindow(_StoppedController())
+    statuses, _ = _capture_status(window)
+
+    window._saving = True
+    window._on_save_settings()
+    assert "ذخیره" in statuses[-1][0]
+
+    window._saving = False
+    window._running = True
+    window._on_save_settings()
+    assert "متوقف" in statuses[-1][0]
+
+
+def test_connection_test_guards_post_a_hint():
+    window = ControlWindow(_StoppedController())
+    statuses, _ = _capture_status(window)
+
+    window._testing = True
+    window._test_connection()
+    assert "بررسی اتصال" in statuses[-1][0]
+
+    window._testing = False
+    window._saving = True
+    window._test_connection()
+    assert "ذخیره" in statuses[-1][0]
+
+
 def test_recovery_popup_is_themed_modal_and_confirms_copy(monkeypatch):
     from medical_stt.ui import colors
 
