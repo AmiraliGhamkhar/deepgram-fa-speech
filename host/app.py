@@ -299,7 +299,7 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
                 metrics.observe("session_http_latency", time.monotonic() - started)
 
     @app.exception_handler(Exception)
-    async def unhandled_exception(request: Request, _exc: Exception) -> JSONResponse:
+    async def unhandled_exception(request: Request, exc: Exception) -> JSONResponse:
         """Unhandled 500s carry the security headers too.
 
         Starlette's ServerErrorMiddleware is the outermost layer and builds
@@ -307,7 +307,7 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
         skipped its own header loop for exactly the responses an incident
         produces. No exception detail crosses the wire.
         """
-        log.exception("unhandled host error path=%s", request.url.path)
+        log.error("unhandled host error (%s)", type(exc).__name__)
         return JSONResponse(
             {"detail": "internal error"}, status_code=500, headers=dict(_SECURITY_HEADERS)
         )
@@ -538,7 +538,6 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
             # Explicit controlled error, not a silent drop and not an
             # unbounded wait for a Deepgram slot.
             metrics.increment("grant_capacity_rejections_total")
-            log.error("session_error session_id=%s reason=upstream_saturated", session_id)
             return refuse(
                 503, "host is at capacity, retry shortly", "upstream_saturated",
                 headers={"Retry-After": "1"},
@@ -565,7 +564,6 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
                 # 429 we shed ourselves.
                 metrics.increment("deepgram_connection_failures_total")
             # The message never contains the Deepgram key or its body.
-            log.error("session_error session_id=%s status=%s", session_id, exc.status)
             return refuse(
                 exc.status, str(exc), "upstream_error",
                 headers={"Retry-After": str(exc.retry_after)} if exc.retry_after else None,
@@ -578,9 +576,9 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
             metrics.observe("token_request_latency", time.monotonic() - started)
             metrics.increment("token_request_failures_total")
             record_failure("cancelled")
-            log.info("session_cancelled session_id=%s", session_id)
+            log.info("session_error session_id=%s reason=cancelled", session_id)
             raise
-        except Exception:  # noqa: BLE001 - the grant path must reconcile
+        except Exception as exc:  # noqa: BLE001 - the grant path must reconcile
             # `core.grant_session_async` maps every known upstream failure onto
             # `GrantError`, so reaching here means an unexpected internal
             # fault. It is still a request that produced no token: record it
@@ -590,7 +588,7 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
             metrics.observe("token_request_latency", time.monotonic() - started)
             metrics.increment("token_request_failures_total")
             record_failure("internal_error")
-            log.exception("session_error session_id=%s reason=unexpected", session_id)
+            log.error("session_error session_id=%s reason=unexpected (%s)", session_id, type(exc).__name__)
             raise
         finally:
             inflight.release()

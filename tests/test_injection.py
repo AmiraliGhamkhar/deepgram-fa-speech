@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import types
+import pytest
 
 from medical_stt.injection.backend import DryRunBackend, FailingBackend
 from medical_stt.injection.text_injector import TextInjector
@@ -393,3 +394,13 @@ def test_fallback_restore_does_not_overwrite_a_newer_user_copy(monkeypatch):
     assert backend.send_unicode_text("راز بیمار") is True
     assert clipboard.value == "newer user copy"
     assert clipboard.copies == ["راز بیمار"], "restoration overwrote a newer copy"
+
+
+@pytest.mark.parametrize('method,args', [('type_text', ('گزارش',)), ('paste_text', ('گزارش',)),
+                                         ('send_backspaces', (2,))])
+def test_backend_exception_logs_only_type_not_potential_phi(caplog, method, args):
+    marker = 'SENSITIVE_TEST_TRANSCRIPT_DO_NOT_LOG'
+    injector = TextInjector(backend=_RaisingBackend(RuntimeError(marker)))
+    assert getattr(injector, method)(*args) is False
+    assert marker not in caplog.text
+    assert 'RuntimeError' in caplog.text

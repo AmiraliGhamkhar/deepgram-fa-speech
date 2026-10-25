@@ -216,3 +216,125 @@ P0 census rerun: **835 rules, 9 digit-bearing/numeric-span sources, loader OK,
 0 rejected**; **1 raw non-normalized side, 0 parsed non-normalized sides**,
 Arabic-yeh source fires on normalized Persian. Historical P0 before/after
 per-fix evidence remains in the v2 checkpoint; no duplicate P0 work needed.
+
+## New finding N1 — failure logging can disclose backend payloads
+
+This is separate from, and does not modify, P0-1…P0-6. Final review found
+`TextInjector` logging raw backend exceptions and the host logging unexpected
+exception tracebacks. Third-party exception messages can contain clinical text
+or credentials. New sentinel-payload regressions observed **4 failed,
+116 passed** in injection/backend suites before the fix; **120 passed** after.
+Only exception types now reach logs; existing user-facing last_error behavior
+and security/error-count pins remain intact.
+
+Additional P1-13 regression evidence: chunked-overflow, timeout and incomplete
+body tests each fail against original `0544e35` with an absent terminal log
+(**3 failed**), and pass with one matching session_error each. An upstream
+failure uniqueness test caught duplicate terminal logs introduced by moving
+logging into `refuse` (**1 failed, 3 passed**); removed the old duplicate lines
+and standardized cancellation terminals. No request or response protocol
+changes. Targeted performance/injection/backend suites: 172 passed, accepted
+warning (see final validation for authoritative full totals).
+
+## Full-prompt acceptance map
+
+“Preserved” means already implemented/tested in the actual starting checkout,
+not a new before/after experiment in this session. Historical observed failures
+are recorded in v2; this session's baseline and final suite reconfirm those
+pins. Every new regression below was executed against unfixed code first.
+
+| Item | Evidence / disposition |
+|---|---|
+| P0-7 | Preserved; v2 17 failures → 67 targeted passes; both censuses rerun here |
+| P0-8 | Preserved; v2 5 failures → 137 targeted passes; normalized-rule census rerun |
+| P0-9 | Preserved; v2 10 failures → 79 targeted passes |
+| P0-10 | Preserved; v2 2 failures → 97 targeted passes |
+| P0-11 | Preserved; v2 1 race failure → 2 race passes / 14 lifecycle passes |
+| P0-12 | Preserved; v2 2 failures → 80 targeted passes |
+| P0-13 | Preserved; v2 4 failures → 68 targeted passes |
+| P0-14 | Preserved; v2 3 failures → 65 targeted passes |
+| P1-1 | Preserved two-consecutive-microphone-failure cap and distinct warning (`test_microphone_reconnects_are_capped`) |
+| P1-2 | New sticky-loss documentation pin: fails before, passes after; queue recovery does not recover lost dictation |
+| P1-3 | Preserved bounded owner-overlay readiness wait and timeout regression |
+| P1-4 | Preserved shutdown-send/keepalive SHUTDOWN classification regressions |
+| P1-5 | New fake-lock counter-read regression: fails before, passes after; writes also locked |
+| P1-6 | Preserved invalid UTF-8 → SecretStoreError regression |
+| P1-7 | New one-helper ownership pin: fails before, passes after |
+| P1-8 | New rotation-before-post ownership pin: fails before, passes after |
+| P1-9 | New unequal-word-count acoustic-span regression: fails before, passes after |
+| P1-10 | 16 Persian-unit source/target guard regressions: fail before, pass after |
+| P1-11 | 4 invalid-bind and 1 single-parse regressions: fail before, pass after |
+| P1-12 | 5 count/private-dir/exclusive-file/symlink regressions: fail before, pass after; existing atomic fsync/replace preserved, directory fsync added |
+| P1-13 | Invalid-TTL and 3 streaming body terminal regressions: fail before, pass after; extra uniqueness pin prevents duplicate upstream errors |
+| P1-14 | 2 deployment-default/contiguous-table regressions: fail before, pass after |
+| P1-15 | Existing jitter-comment pin preserved; enqueue wording and Retry-After layering corrected |
+| P2 metrics | Uptime TYPE + no unlabelled status zero regression fails before, passes after; numeric cancellation status 499 |
+| P2 host config | 3 clamp-warning regressions fail before, pass after; delta-seconds/deprecated-setting doc pin passes |
+| P2 Passenger | Explicit no-watchdog/no-loop-close limitation documented (per prompt's allowed alternative) |
+| P2 normalization | Fraction/superscript regression fails before, passes after |
+| P2 injection | Single-boundary ownership + type opt-in regression fails before, passes after; legacy delta API documented |
+| P2 jitter | Injected RNG regression fails before, passes after |
+| P2 streaming params | Stereo documented multichannel regression fails before, passes after |
+| P2 deadlines | Per-op urllib vs app readiness deadline documented and pinned |
+| P2 keepalive | Existing one-worker-across-reconnect comment and watchdog tests preserved; no redesign |
+| R2.4 | Existing shared-font resolver/order preserved |
+| R2.5 | 2 new actual-DPI scaling regressions fail before, pass after; fake-DLL + before-Tk pins pass |
+| R1 | 3 new unified-circle/press/focus/disabled regressions fail before, pass after; updated Stop/popup pins in same commit |
+| R3 | 7 new busy/drag/RTL/status regressions fail before, pass after; opaque surface preserved |
+| N1 | 4 synthetic sensitive-exception regressions fail before, pass after |
+
+## Final validation after N1 (authoritative)
+
+```
+........................................................................ [  5%]
+........................................................................ [ 11%]
+........................................................................ [ 17%]
+........................................................................ [ 23%]
+........................................................................ [ 29%]
+........................................................................ [ 35%]
+........................................................................ [ 40%]
+........................................................................ [ 46%]
+........................................................................ [ 52%]
+........................................................................ [ 58%]
+........................................................................ [ 64%]
+..................ss.s.................................................. [ 70%]
+........................................................................ [ 76%]
+........................................................................ [ 81%]
+........................................................................ [ 87%]
+..................................s..................................... [ 93%]
+........................................................................ [ 99%]
+......                                                                   [100%]
+=============================== warnings summary ===============================
+.venv/lib/python3.11/site-packages/fastapi/testclient.py:1
+  /home/user/deepgram-fa-speech/.venv/lib/python3.11/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1226 passed, 4 skipped, 1 warning in 58.54s
+ruff check .
+All checks passed!
+mypy medical_stt host benchmarks
+Success: no issues found in 44 source files
+python scripts/scan_secrets.py
+clean: no credentials found in the working tree
+note: 1 baseline entry/entries matched nothing -- the history looks scrubbed.
+git diff --check
+(no output; clean)
+```
+
+## Remaining acceptance limitations / owner actions
+
+- No real Windows/Tk display, Win32 ABI, mic, clipboard or live Deepgram tests
+  were run. Widget-tree/fake-DLL tests validate layout/orchestration, not native
+  rendering. Live/load/soak tests remain gated. Verify on a Windows high-DPI
+  display before release (especially Persian font/glyph rendering).
+- Documented alternatives/trade-offs: sticky data-loss warning; bounded single
+  keep-alive worker across reconnects; urllib per-operation timeout bounded at
+  session-readiness level rather than cancellation of the socket; Passenger
+  runtime loop liveness/closure limitation; one provisioning writer at a time;
+  pyperclip plain-text/content-guard limitations from P0-13 unchanged.
+- Historical credential incident: owner must revoke the exposed key in the
+  Deepgram console and follow SECURITY.md's owner-managed history-cleanup
+  procedure. No credential rotation or history rewrite attempted here.
+- No dependency/lockfile, endpoint/protocol, palette value, single-instance,
+  mailbox/pump, or build-path changes. All commits on the assigned branch.

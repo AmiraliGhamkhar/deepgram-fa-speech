@@ -188,7 +188,7 @@ class TextInjector:
             ok = self.backend.send_unicode_text(text)
         except Exception as exc:  # noqa: BLE001 - see the docstring
             self.last_error = str(exc)
-            log.warning("type_text failed: %s", exc)
+            log.warning("type_text failed (%s)", type(exc).__name__)
             return False
         if not ok:
             self.last_error = "backend reported failure"
@@ -224,7 +224,7 @@ class TextInjector:
             ok = self.backend.paste_text(text, self.restore_clipboard, self.paste_settle_seconds)
         except Exception as exc:  # noqa: BLE001 - see the note on type_text
             self.last_error = str(exc)
-            log.warning("paste_text failed: %s", exc)
+            log.warning("paste_text failed (%s)", type(exc).__name__)
             return False
         if not ok:
             self.last_error = "backend reported failure"
@@ -239,7 +239,7 @@ class TextInjector:
             ok = self.backend.send_backspaces(count)
         except Exception as exc:  # noqa: BLE001 - see the note on type_text
             self.last_error = str(exc)
-            log.warning("send_backspaces failed: %s", exc)
+            log.warning("send_backspaces failed (%s)", type(exc).__name__)
             return False
         if not ok:
             self.last_error = "backend reported failure"
