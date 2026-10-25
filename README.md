@@ -1006,7 +1006,10 @@ Key operational changes:
 - **Clipboard preservation is conservative.** With `restore_clipboard: true`,
   rich/image/file clipboards are refused instead of destroyed. Use `inject_mode:
   type` or deliberately clear/replace that clipboard first. Newer user copies
-  are never intentionally overwritten by restoration.
+  are never intentionally overwritten by restoration. With
+  `restore_clipboard: false`, a successful paste replaces the clipboard with
+  a fixed non-PHI placeholder ("Medical STT — متن قبلی پاک شد") instead of
+  leaving dictated text on a shared clipboard indefinitely.
 - The GUI now includes a client-ID field and a connection check for **saved**
   configuration (one temporary token request, no audio). Start/settings work
   runs off Tk; the overlay shares its interpreter and uses coalesced updates.
