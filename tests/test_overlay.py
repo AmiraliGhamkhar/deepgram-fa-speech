@@ -3,6 +3,8 @@ section 6: "Add tests wherever practical without requiring a real Windows
 GUI in CI")."""
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from medical_stt.ui import overlay as overlay_module
 from medical_stt.ui.overlay import (
     _WS_EX_NOACTIVATE,
@@ -113,3 +115,50 @@ def test_close_schedules_destroy_even_though_closed_flag_is_set():
     overlay._mailbox.drain()  # the owning Tk thread pumps the mailbox
     assert overlay._root is None
 
+
+
+# -- P1: overlay readiness must not leave a dead GUI "enabled" --------------
+
+class _SilentMailbox:
+    def __init__(self) -> None:
+        self.posts: list[tuple[str, object]] = []
+
+    def post(self, key, fn):
+        self.posts.append((key, fn))
+
+
+def test_shared_owner_overlay_disables_itself_on_ready_timeout(monkeypatch):
+    mailbox = _SilentMailbox()
+    monkeypatch.setattr(overlay_module.dispatch, "owner_mailbox", mailbox, raising=False)
+    monkeypatch.setattr(overlay_module, "_TK_AVAILABLE", True)
+    monkeypatch.setattr(overlay_module, "OVERLAY_READY_TIMEOUT_SECONDS", 0.01, raising=False)
+
+    overlay = TranscriptOverlay(enabled=True)
+
+    assert overlay.enabled is False
+    assert mailbox.posts, "the overlay-create callback was not scheduled"
+
+
+def test_non_tcl_overlay_build_failure_disables_and_signals_ready(monkeypatch):
+    class _FakeTclError(Exception):
+        pass
+
+    def failing_toplevel(*_args, **_kwargs):
+        raise RuntimeError("widget build failed")
+
+    fake_tk = SimpleNamespace(TclError=_FakeTclError, Toplevel=failing_toplevel)
+    monkeypatch.setattr(overlay_module, "tk", fake_tk, raising=False)
+    monkeypatch.setattr(overlay_module, "_TK_AVAILABLE", True)
+    monkeypatch.setattr(overlay_module.dispatch, "owner_root", object(), raising=False)
+
+    overlay = TranscriptOverlay(enabled=False)
+    overlay.enabled = True
+    overlay._ready.clear()
+    overlay._run()  # must not raise a non-Tcl exception
+
+    assert overlay.enabled is False
+    assert overlay._ready.is_set()
+
+
+def test_neutral_overlay_text_is_not_forced_rtl():
+    assert _is_rtl("120/80 !!") is False

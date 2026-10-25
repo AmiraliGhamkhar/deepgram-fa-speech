@@ -152,6 +152,9 @@ class BoundedAudioQueue:
         with self._lock:
             if drained:
                 self._drained_total += drained
+                # Drained pre-Stop audio is lost audio too. Count it in the
+                # cumulative diagnostics, but not as a sender failure streak.
+                self._dropped_total += drained
             # A session reset is a clean slate even when the sender consumed
             # the last chunk before drain() ran. The next session must not
             # inherit the previous one's degraded streak.

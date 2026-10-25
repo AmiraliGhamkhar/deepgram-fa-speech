@@ -90,3 +90,16 @@ def test_empty_drain_resets_a_degraded_streak_after_sender_consumes_queue():
     assert stats.consecutive_drops == 0
     assert stats.degraded is False
     assert stats.dropped_total == 3  # cumulative diagnostics remain intact
+
+
+def test_drain_counts_discarded_chunks_as_lost_audio_without_degrading_health():
+    q = BoundedAudioQueue(maxsize=5)
+    q.put_nowait(b"abc")
+    q.put_nowait(b"de")
+    assert q.drain() == 2
+    stats = q.stats()
+    assert stats.dropped_total == 2
+    assert stats.dropped_bytes == 5
+    assert stats.drained_total == 2
+    assert stats.consecutive_drops == 0
+    assert stats.degraded is False

@@ -104,7 +104,14 @@ class SecretStore:
             plaintext = self._protector.unprotect(payload[len(_MAGIC):])
         except DPAPIError as exc:
             raise SecretStoreError(str(exc)) from exc
-        return plaintext.decode("utf-8")
+        try:
+            return plaintext.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            # A corrupt DPAPI result must become a normal configuration
+            # error. Never include the undecodable bytes in the message.
+            raise SecretStoreError(
+                "stored host secret cannot be decoded as UTF-8; re-enter the shared secret"
+            ) from exc
 
     def clear(self) -> bool:
         """Delete the stored secret. Returns True if a file was removed."""

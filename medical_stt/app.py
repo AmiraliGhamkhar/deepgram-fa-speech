@@ -73,9 +73,15 @@ PROVIDER_JOIN_TIMEOUT_SECONDS = 4.0
 AUDIO_SILENCE_SECONDS = 3.0
 KEEP_ALIVE_INTERVAL_SECONDS = 3.0
 
+#: A missing/unusable microphone is not a network condition. Retrying it
+#: forever burns session tokens and shows "reconnecting" instead of the real
+#: cause. Two consecutive MICROPHONE failures end the session with an error.
+MAX_MICROPHONE_FAILURES = 2
+
 #: Warnings the session loop sets and later clears itself.
 MIC_SILENT_WARNING = "میکروفون صدایی ارسال نمی‌کند؛ دستگاه ضبط را بررسی کنید"
 CAPACITY_WARNING = "ظرفیت سرویس گفتار پر است؛ تا آزاد شدن ظرفیت دوباره تلاش می‌شود"
+MICROPHONE_UNAVAILABLE_WARNING = "میکروفون در دسترس نیست؛ دستگاه را بررسی و برنامه را دوباره اجرا کنید"
 
 
 def load_sounddevice() -> Any:
@@ -292,17 +298,29 @@ class LiveMedicalSTT:
         """
         return generation is None or generation == self._session_generation
 
-    def _on_transcript(self, event: TranscriptEvent, generation: Optional[int] = None) -> None:
+    def _on_transcript(
+        self,
+        event: TranscriptEvent,
+        generation: Optional[int] = None,
+        latency: Optional[LatencyTracker] = None,
+    ) -> None:
+        """Handle one transcript event with its own per-utterance tracker.
+
+        Finals are processed on a worker thread; swapping `self.latency`
+        there could attach one utterance's marks to another. Direct callers
+        (tests and the interim path) keep using the shared tracker.
+        """
+        tracker = latency or self.latency
         if not self._is_current_session(generation):
             # A transcript from a superseded session must never be injected
             # into the one the user is dictating into now.
             log.debug("dropped a transcript from a superseded session")
             return
         if event.speech_started:
-            self.latency.mark_utterance_start(event.received_at)
+            tracker.mark_utterance_start(event.received_at)
             return
         if not event.is_final:
-            self.latency.mark_first_interim(event.received_at)
+            tracker.mark_first_interim(event.received_at)
             # Same 8000-char bound the session callback applies (below):
             # an interim is display-only, and an unbounded one must not
             # reach the overlay just because it arrived by this path.
@@ -327,10 +345,10 @@ class LiveMedicalSTT:
         if utterance is None:
             return
 
-        self.latency.mark_speech_final(event.received_at)
-        self._finalize_utterance(utterance)
+        tracker.mark_speech_final(event.received_at)
+        self._finalize_utterance(utterance, latency=tracker)
 
-    def _flush_pending_utterance(self) -> None:
+    def _flush_pending_utterance(self, latency: Optional[LatencyTracker] = None) -> None:
         """Emit an utterance the provider finalized but never endpointed.
 
         Called once per session, right after shutdown has been requested
@@ -339,6 +357,7 @@ class LiveMedicalSTT:
         `speech_final`/`UtteranceEnd` would be recognized but never
         injected -- i.e. the last words of a dictation would be lost.
         """
+        tracker = latency or self.latency
         pending = self._utterance.flush()
         if pending is None:
             return
@@ -346,20 +365,25 @@ class LiveMedicalSTT:
         if self._injection_failed:
             self._retain_failed(pending.text)
         else:
-            self.latency.mark_speech_final(pending.received_at)
-            self._finalize_utterance(pending)
+            tracker.mark_speech_final(pending.received_at)
+            self._finalize_utterance(pending, latency=tracker)
 
-    def _finalize_utterance(self, utterance: TranscriptEvent) -> None:
+    def _finalize_utterance(
+        self, utterance: TranscriptEvent, latency: Optional[LatencyTracker] = None
+    ) -> None:
         """Preserve the whole accumulated utterance if any processing stage fails."""
         try:
-            self._render_and_inject(utterance)
+            self._render_and_inject(utterance, latency=latency)
         except Exception:
             self._retain_failed(utterance.text)
             self._injection_failed = True
             self._warn("پردازش متن ناموفق بود؛ متن بازیابی را بررسی کنید")
             self._on_provider_error(ProviderError(ErrorCategory.CONFIG, "Transcript processing failed; review recovery text"))
 
-    def _render_and_inject(self, utterance: TranscriptEvent) -> None:
+    def _render_and_inject(
+        self, utterance: TranscriptEvent, latency: Optional[LatencyTracker] = None
+    ) -> None:
+        tracker = latency or self.latency
         self.last_confidence_warning = find_low_confidence_medical_words(
             utterance.words, self.settings.medical_confidence_threshold
         )
@@ -417,7 +441,7 @@ class LiveMedicalSTT:
         log.info("latency: terminology=%.3fs bidi=%.3fs injection_acceptance=%.3fs",
                  terminology_end - terminology_start, bidi_end - terminology_end,
                  injection_end - bidi_end)
-        self.latency.mark_final(
+        tracker.mark_final(
             terminology_s=terminology_end - terminology_start,
             bidi_s=bidi_end - terminology_end,
             injection_s=injection_end - bidi_end,
@@ -624,16 +648,18 @@ class LiveMedicalSTT:
                 on_error(ProviderError(ErrorCategory.CONFIG, "Transcript queue full; review recovery text"))
 
         def process_finals() -> None:
+            pending_tracker = receive_latency
             while not processing_done.is_set() or not finals.empty():
                 try:
                     event, tracker = finals.get(timeout=0.05)
                 except queue.Empty:
                     continue
                 try:
-                    # This worker is fully drained before session state is reused.
-                    self.latency = tracker
+                    # Pass the tracker explicitly: assigning self.latency here
+                    # races with _reset_session_state and with other finals.
+                    pending_tracker = tracker
                     log.debug("latency: transcript_queue=%.3fs", time.monotonic() - event.received_at)
-                    self._on_transcript(event)
+                    self._on_transcript(event, latency=tracker)
                 except Exception:
                     self._retain_failed(event.text)
                     self._injection_failed = True
@@ -642,7 +668,7 @@ class LiveMedicalSTT:
                 finally:
                     finals.task_done()
             try:
-                self._flush_pending_utterance()
+                self._flush_pending_utterance(latency=pending_tracker)
             except Exception:
                 self._on_provider_error(ProviderError(ErrorCategory.CONFIG, "Final transcript processing failed"))
 
@@ -791,6 +817,7 @@ class LiveMedicalSTT:
         self.overlay.set_idle()
         exit_code = 0
         consecutive_failures = 0
+        microphone_failures = 0
 
         try:
             while not self._shutdown.is_set():
@@ -807,6 +834,11 @@ class LiveMedicalSTT:
                     self._reconnect_count += 1
                     if self._connected_at is not None and time.monotonic() - self._connected_at >= 30.0:
                         consecutive_failures = 0
+                        microphone_failures = 0
+                    if exc.category is ErrorCategory.MICROPHONE:
+                        microphone_failures += 1
+                    else:
+                        microphone_failures = 0
                     consecutive_failures += 1
                     self.phase = "reconnecting"
                     if exc.category is ErrorCategory.RATE_LIMIT:
@@ -816,6 +848,18 @@ class LiveMedicalSTT:
                         self._warn(CAPACITY_WARNING)
                     else:
                         self._clear_warning(CAPACITY_WARNING)
+                    if (
+                        exc.category is ErrorCategory.MICROPHONE
+                        and microphone_failures >= MAX_MICROPHONE_FAILURES
+                    ):
+                        log.error(
+                            "microphone unavailable after %d consecutive failures; not reconnecting",
+                            microphone_failures,
+                        )
+                        self.phase = "idle"
+                        self._warn(MICROPHONE_UNAVAILABLE_WARNING)
+                        exit_code = 1
+                        break
                     # `exc.retry_after` is honored when the host sent one, so
                     # a rate-limited client slows down when told to instead of
                     # guessing -- which is what would otherwise turn 50

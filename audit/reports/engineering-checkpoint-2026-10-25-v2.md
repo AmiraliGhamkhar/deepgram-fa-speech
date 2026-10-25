@@ -29,7 +29,8 @@ production code. Failures below were observed, not inferred.
 | P0-11 Start/Stop controller snapshot race | `6179094` | `1 failed, 1 passed` in the two controller race tests with the fix temporarily reverted | `2 passed` in the same tests; `14 passed` in `tests/test_session_lifecycle.py` |
 | P0-12 silent provider exit | `7c183dd` | `2 failed, 14 passed` in `tests/test_shutdown_flow.py` | `80 passed` in shutdown/app/performance/concurrency targeted suites |
 | P0-13 fallback clipboard PHI leak | `2f8b6be` | `4 failed, 44 passed` in `tests/test_injection.py tests/test_edge_paths.py` | `68 passed` in injection/edge/Windows-policy targeted suites |
-| P0-14 utterance-limit recovery text | (this commit) | `3 failed, 62 passed` in accumulator/performance/app targeted suites | `65 passed` in the same suites |
+| P0-14 utterance-limit recovery text | `8c56329` | `3 failed, 62 passed` in accumulator/performance/app targeted suites | `65 passed` in the same suites |
+| P1 inferred follow-up batch | (this commit) | `20 failed, 167 passed` in nine targeted suites | `187 passed` in the same suites |
 
 ### P0-7 details
 
@@ -91,8 +92,8 @@ Full-suite validation after P0-7: `1071 passed, 4 skipped, 1 warning`;
 ## Remaining acceptance limitations
 
 - This checkpoint is appended incrementally; the latest per-fix section is the
-  authoritative progress marker. All Phase 1 P0 fixes are complete at this revision. P1/P2 items
-  and all GUI changes remain outstanding.
+  authoritative progress marker. All Phase 1 P0 and P1 fixes are complete at this revision. P2
+  documentation/metrics polish and all GUI changes remain outstanding.
 - The accepted Starlette test-client warning is preserved; no warning filters
   or lockfile edits were added.
 - Native Windows injection, live microphone and live Deepgram behaviors
@@ -340,3 +341,72 @@ Deliberately updated pin: `test_accumulator_has_a_size_budget` now asserts the
 exception's full accumulated text and that a tripped limit resets the
 accumulator, instead of expecting the old segments to survive `flush()`.
 No security, threading, or GUI pins were weakened.
+
+### P1 batch details (inferred list, confirmed by the user)
+
+The original P1/P2 prompt was available only as a condensed category list in
+this session. The user confirmed proceeding from those categories. Each item
+below received a regression that failed against the previous implementation;
+no existing security, threading, behavior, or GUI pin was weakened.
+
+- **MICROPHONE reconnect/status:** `run()` counts consecutive
+  `ErrorCategory.MICROPHONE` failures and stops after
+  `MAX_MICROPHONE_FAILURES = 2` with exit code 1, phase `idle`, and the
+  distinct warning `MICROPHONE_UNAVAILABLE_WARNING`. Other retryable categories
+  and a stable 30 s connection reset the counter.
+- **Overlay readiness:** the shared-owner path now waits for the posted
+  `overlay-create` callback using `OVERLAY_READY_TIMEOUT_SECONDS` and disables
+  itself on timeout. `_run()` catches any build exception (not just
+  `tk.TclError`), disables the overlay, and always signals `_ready`; exception
+  logs use types only. Pure-neutral text is no longer forced RTL by `_is_rtl`.
+- **Deepgram shutdown-send:** a late `send_audio()`/`keep_alive()` after `stop()`
+  has cleared the connection is `SHUTDOWN`, not a retryable `NETWORK` error.
+- **Secret decode errors:** an invalid UTF-8 DPAPI result becomes a
+  `SecretStoreError` with a byte-free message. `load_host_secret()` logs the
+  exception type, not its message.
+- **Latency tracker ownership:** finals pass their per-utterance
+  `LatencyTracker` explicitly through `_on_transcript`, `_finalize_utterance`,
+  `_render_and_inject`, and `_flush_pending_utterance` instead of swapping the
+  shared `self.latency` on the transcript worker.
+- **Accumulator dedupe:** retained source events are kept parallel to segments;
+  a re-sent event is recognized even after an intervening segment. Conservative
+  evidence (identical word timings or the exact same event object) is still
+  required, so legitimate repetition survives.
+- **ASR blocked tokens:** `audit/repro/probe_asr_blocked_tokens.py` sweeps every
+  standalone uppercase Latin token of length >= 2 in `data/corrections.yaml`.
+  Census: `uppercase Latin tokens: 131, blocked: 131, missing: 0`; 121 tokens
+  were added to `_ASR_BLOCKED_TOKENS`. Single-letter placeholders (`x:y`)
+  remain legal. A test pins the census and six representative rejections.
+- **Audio counters:** `BoundedAudioQueue.drain()` now counts discarded pre-Stop
+  chunks in `dropped_total` as well as `dropped_bytes`, while not marking the
+  next session degraded.
+- **Host settings/logging/registry:** invalid numeric environment values are
+  reported by setting name only, never by raw value. `host.provision` builds
+  all secrets/lines first and atomically replaces the registry via a temporary
+  file + `os.replace`; a failed replace leaves the original registry and no
+  temporary files. Existing append/duplicate-warning behavior is preserved.
+- **Config comment:** `reconnect_jitter` now documents the implemented full
+  negative jitter ("below the computed ceiling"), not a symmetric +/- range.
+
+Before (excerpt from `/tmp/p1_before.txt`):
+
+```text
+FAILED tests/test_performance_fixes.py::test_microphone_reconnects_are_capped
+FAILED tests/test_performance_fixes.py::test_final_transcript_uses_the_event_latency_tracker
+FAILED tests/test_overlay.py::test_shared_owner_overlay_disables_itself_on_ready_timeout
+FAILED tests/test_overlay.py::test_non_tcl_overlay_build_failure_disables_and_signals_ready
+FAILED tests/test_overlay.py::test_neutral_overlay_text_is_not_forced_rtl
+FAILED tests/test_deepgram_protocol.py::test_late_send_after_stop_is_classified_as_shutdown[send_audio]
+FAILED tests/test_secret_store.py::test_invalid_utf8_blob_is_a_secret_store_error
+FAILED tests/test_utterance_accumulator.py::test_resent_segment_is_deduplicated_after_an_intervening_segment
+FAILED tests/test_asr_replacements.py::test_every_uppercase_latin_clinical_token_is_blocked_for_asr_replacements
+FAILED tests/test_audio_queue.py::test_drain_counts_discarded_chunks_as_lost_audio_without_degrading_health
+FAILED tests/test_config_docs.py::test_jitter_comment_describes_the_actual_full_jitter_policy
+FAILED tests/test_audit_fixes.py::test_invalid_numeric_host_setting_value_is_not_written_to_logs
+FAILED tests/test_audit_fixes.py::test_registry_update_is_atomic_when_the_final_replace_fails
+20 failed, 167 passed, 1 warning in 3.80s
+```
+
+After: targeted nine-suite run `187 passed, 1 warning`; full suite
+`1141 passed, 4 skipped, 1 warning in 54.35s`; ruff, mypy and secret scan
+clean. Deliberately updated pins: none.

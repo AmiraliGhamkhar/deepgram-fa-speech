@@ -264,7 +264,9 @@ class HostSettings:
                     raise ValueError("nonfinite")
                 return value
             except (ValueError, OverflowError):
-                log.warning("ignoring non-numeric %s=%r", name, raw)
+                # Env values may be mistyped secrets. Name the setting, not
+                # the value it carried, in an operator-visible log.
+                log.warning("ignoring non-numeric %s; check the environment value", name)
                 return fallback
 
         def _int(name: str, fallback: int) -> int:

@@ -56,7 +56,7 @@ overlay_enabled: true
 reconnect_delay: 2.0
 max_reconnect_attempts: 0   # 0 = unlimited
 reconnect_backoff_max: 30.0
-reconnect_jitter: 0.5       # fraction of computed delay, e.g. 0.5 = +/-50%
+reconnect_jitter: 0.5       # fraction below the computed ceiling (full negative jitter), e.g. 0.5 = up to 50% below the computed ceiling
 
 # Terminology safety: "context_dependent" rules map a common standalone
 # word to an abbreviation (e.g. "نبض" -> "HR") and are disabled by default

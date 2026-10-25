@@ -31,6 +31,10 @@ except ImportError:
 # from stealing a click meant for the EMR underneath it. The overlay runs
 # with `-alpha`, i.e. as a layered window on Windows, which is what makes
 # WS_EX_TRANSPARENT take effect for hit-testing.
+#: The shared-owner overlay is created by posting to the control window's
+#: mailbox. Wait this long for that callback before disabling the overlay.
+OVERLAY_READY_TIMEOUT_SECONDS = 4.0
+
 _GWL_EXSTYLE = -20
 _WS_EX_NOACTIVATE = 0x08000000
 _WS_EX_TRANSPARENT = 0x00000020
@@ -83,7 +87,7 @@ def _is_rtl(text: str) -> bool:
             return True
         if ch.isascii() and ch.isalpha():
             return False
-    return True
+    return False
 
 
 def _get_best_persian_font(root: "tk.Tk | tk.Toplevel") -> str:
@@ -121,14 +125,18 @@ class TranscriptOverlay:
 
         if dispatch.owner_mailbox is not None:
             dispatch.owner_mailbox.post("overlay-create", self._run)
+            if not self._ready.wait(timeout=OVERLAY_READY_TIMEOUT_SECONDS):
+                log.warning("Overlay UI startup timed out")
+                self.enabled = False
             return
         self._thread = threading.Thread(target=self._run, name="overlay-ui", daemon=True)
         self._thread.start()
-        if not self._ready.wait(timeout=4.0):
+        if not self._ready.wait(timeout=OVERLAY_READY_TIMEOUT_SECONDS):
             log.warning("Overlay UI startup timed out")
             self.enabled = False
 
     def _run(self) -> None:
+        built = False
         try:
             if self._closed:
                 return
@@ -172,14 +180,22 @@ class TranscriptOverlay:
             except tk.TclError:  # pragma: no cover - window already gone
                 pass
             self._ready.set()
+            built = True
             self._tick_follow()
             self._pump()
             if shared is None:
                 self._root.mainloop()
-        except tk.TclError as exc:
-            log.warning("Failed to initialize overlay: %s", exc)
+        except Exception as exc:
+            # Widget construction touches fonts and OS window APIs, so a
+            # non-Tcl failure is possible. Never leave `enabled=True` (and
+            # never hold start callers hostage) for an overlay that has no
+            # usable widgets. Log the type only: Tcl messages can carry text.
+            log.warning("Failed to initialize overlay (%s)", type(exc).__name__)
             self.enabled = False
+        finally:
             self._ready.set()
+            if not built:
+                self.enabled = False
 
     def _pump(self) -> None:
         self._mailbox.drain()

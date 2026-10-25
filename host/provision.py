@@ -21,7 +21,10 @@ Output split, by design:
   Transferred to that machine and deleted here.
 
 The plaintext secret is never written to the registry, never logged by the
-host, and never recoverable from the host later -- that is the point.
+host, and never recoverable from the host later -- that is the point. Registry
+updates are atomic (temporary file + replace): `ClientRegistry.from_file`
+refuses the whole file on one malformed line, so a crash mid-append must not
+be able to take every deployed device offline.
 """
 from __future__ import annotations
 
@@ -30,6 +33,7 @@ import os
 import re
 import secrets
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, List, Optional, Sequence
 
@@ -140,6 +144,38 @@ def _write_secret_file(directory: Path, client_id: str, secret: str) -> Path:
     return path
 
 
+def _atomic_append_registry(registry_path: Path, lines: List[str]) -> None:
+    """Replace the registry with its old content plus `lines`, atomically.
+
+    A partially appended line is worse than a failed provisioning run: the
+    host's loader rejects the entire registry on any malformed entry. Secrets
+    are generated before this call, but only printed after it succeeds.
+    """
+    try:
+        previous = registry_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        previous = ""
+    if previous and not previous.endswith("\n"):
+        previous += "\n"
+    payload = previous + "".join(line + "\n" for line in lines)
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    handle, temporary = tempfile.mkstemp(
+        dir=str(registry_path.parent), prefix=".clients-", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, registry_path)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+
+
 def _existing_registry_ids(registry_path: Path) -> set:
     """Client ids already present in the registry file (best effort).
 
@@ -214,21 +250,21 @@ def _generate(
     registry_path = Path(args.out)
     existing_ids = _existing_registry_ids(registry_path)
     duplicates = [client_id for client_id in ids if client_id in existing_ids]
-    # Append, so re-provisioning one extra device does not revoke the 50
-    # already deployed.
-    with registry_path.open("a", encoding="utf-8") as handle:
-        if registry_path.stat().st_size:
-            handle.write("\n")
-        for client_id in ids:
-            secret = generate_secret()
-            handle.write(registry_line(client_id, secret) + "\n")
-            if args.secrets_dir:
-                path = _write_secret_file(Path(args.secrets_dir), client_id, secret)
-                out.append(f"{client_id} -> {path}")
-            else:
-                # Printed once, on the operator's terminal, for manual
-                # transfer. Never echoed into a log or a shell history file.
-                out.append(f"{client_id} -> {secret}")
+    # Build every secret and registry line first, then replace the registry
+    # in one operation. Re-provisioning one extra device does not revoke the
+    # 50 already deployed, and a failed replace does not corrupt their file.
+    lines: List[str] = []
+    for client_id in ids:
+        secret = generate_secret()
+        lines.append(registry_line(client_id, secret))
+        if args.secrets_dir:
+            path = _write_secret_file(Path(args.secrets_dir), client_id, secret)
+            out.append(f"{client_id} -> {path}")
+        else:
+            # Printed once, on the operator's terminal, for manual transfer.
+            # Never echoed into a log or a shell history file.
+            out.append(f"{client_id} -> {secret}")
+    _atomic_append_registry(registry_path, lines)
 
     if duplicates:
         # Loud, on stderr, and non-fatal: the operator chose to re-provision

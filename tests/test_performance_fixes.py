@@ -10,7 +10,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from medical_stt.app import LiveMedicalSTT, SessionController
+from medical_stt.app import LatencyTracker, LiveMedicalSTT, SessionController
 from medical_stt.audio import BoundedAudioQueue
 from medical_stt.config import ConfigError, Settings, validate_settings
 from medical_stt.injection.backend import DryRunBackend, FailingBackend
@@ -634,3 +634,58 @@ def test_sdk_callbacks_contain_cosmetic_failures(build_session, monkeypatch, cap
         stt.request_stop()
         thread.join(2)
     assert not errors
+
+
+# -- P1: bounded microphone reconnects and per-event latency ownership -----
+
+def test_microphone_reconnects_are_capped(build_session, monkeypatch):
+    stt, _ = build_session()
+    stt.settings.max_reconnect_attempts = 0
+    stt.settings.reconnect_delay = 0.0
+    stt.settings.reconnect_backoff_max = 0.0
+    stt.settings.reconnect_jitter = 0.0
+    calls: list[int] = []
+
+    def fail_five_times():
+        calls.append(1)
+        if len(calls) <= 5:
+            raise ProviderError(ErrorCategory.MICROPHONE, "Microphone unavailable")
+        return None
+
+    monkeypatch.setattr(stt, "_run_session", fail_five_times)
+    assert stt.run() == 1, "a dead microphone must not be reported as a clean exit"
+    assert len(calls) == 2, "consecutive MICROPHONE retries must be bounded"
+    assert stt.warning and "میکروفون" in stt.warning
+
+
+def test_other_retryable_errors_are_not_capped_by_the_microphone_limit(build_session, monkeypatch):
+    stt, _ = build_session()
+    stt.settings.max_reconnect_attempts = 0
+    stt.settings.reconnect_delay = 0.0
+    stt.settings.reconnect_backoff_max = 0.0
+    stt.settings.reconnect_jitter = 0.0
+    calls: list[int] = []
+
+    def fail_three_times():
+        calls.append(1)
+        if len(calls) <= 3:
+            raise ProviderError(ErrorCategory.NETWORK, "connection reset")
+        return None
+
+    monkeypatch.setattr(stt, "_run_session", fail_three_times)
+    assert stt.run() == 0
+    assert len(calls) == 4
+
+
+def test_final_transcript_uses_the_event_latency_tracker(build_session):
+    stt, _ = build_session()
+    first = LatencyTracker()
+    second = LatencyTracker()
+    first.mark_utterance_start(0.0)
+    second.mark_utterance_start(0.0)
+    stt.latency = second
+
+    stt._on_transcript(TranscriptEvent("بیمار", True), latency=first)
+
+    assert first._capture_start is None, "the event tracker was not finalized"
+    assert second._capture_start == 0.0, "the shared tracker was mutated instead"

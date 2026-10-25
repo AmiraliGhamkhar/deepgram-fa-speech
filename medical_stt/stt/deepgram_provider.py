@@ -607,6 +607,12 @@ class DeepgramProvider(STTProvider):
             connection = self._connection
             generation = self._stop_generation
         if connection is None:
+            # After stop() clears the connection, a late send is a normal
+            # shutdown, not a transport failure that should trigger reconnect.
+            with self._connection_lock:
+                stopping = self._stop_event.is_set() or self._stop_generation != generation
+            if stopping:
+                raise ProviderError(ErrorCategory.SHUTDOWN, "Audio transport stopped")
             raise ProviderError(ErrorCategory.NETWORK, "Audio transport is not ready")
         try:
             operation(connection)
