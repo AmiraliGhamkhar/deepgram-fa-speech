@@ -32,7 +32,8 @@ production code. Failures below were observed, not inferred.
 | P0-14 utterance-limit recovery text | `8c56329` | `3 failed, 62 passed` in accumulator/performance/app targeted suites | `65 passed` in the same suites |
 | P1 inferred follow-up batch | `313687b` | `20 failed, 167 passed` in nine targeted suites | `187 passed` in the same suites |
 | P2 docs/metrics polish | `571dfa5` | `5 failed` in `tests/test_docs_polish.py` | `5 passed` in the same file |
-| GUI R2 shared fonts + Windows DPI | (this commit) | `ImportError: cannot import name 'fonts'` collecting `tests/test_ui_fonts.py`; `2 failed` in `tests/test_control.py` | `47 passed` in `tests/test_ui_fonts.py tests/test_control.py tests/test_overlay.py` |
+| GUI R2 shared fonts + Windows DPI | `6ea4264` | `ImportError: cannot import name 'fonts'` collecting `tests/test_ui_fonts.py`; `2 failed` in `tests/test_control.py` | `47 passed` in `tests/test_ui_fonts.py tests/test_control.py tests/test_overlay.py` |
+| GUI R1 circular controls | (this commit) | `3 failed, 27 passed` in `tests/test_control.py` | `30 passed` in the same file |
 
 ### P0-7 details
 
@@ -487,3 +488,50 @@ After: `47 passed` across the three UI test modules; full suite
 Deliberately updated pin: `test_client_id_row_matches_the_other_settings_rows`
 now compares the label font with `fonts.font(window._root, 8)` instead of the
 hardcoded `("Segoe UI", 8)`.
+
+### GUI R1 details — circular 72/52/20px controls
+
+Widget tree after `_build` (geometry annotations; colors unchanged):
+
+```text
+Tk (Medical STT, overrideredirect, topmost, opaque)
+└── Frame (inner, bg=BG)
+    ├── Frame (header, bg=BG)
+    │   ├── Label "Medical STT"                 (title, pack side=left)
+    │   └── Canvas quit circle 20px "✕"         (tag "quit", pack side=right)
+    ├── Label  "● آماده"                        (status)
+    ├── Canvas primary circle 72px "شروع"       (tag "toggle", pack anchor=center)
+    ├── Label  (detail)
+    ├── Frame (separator)
+    ├── Label  "میزبان (https)" / Entry (host url)
+    ├── Label  "کلید مشترک" / Entry (secret, write-only, masked)
+    ├── Label  "شناسه دستگاه" / Entry (client id)
+    └── Frame action row (bg=BG, pack fill=x)
+        ├── Canvas 52px "ذخیره\nتنظیمات"        (created third,  pack side=right)
+        ├── Canvas 52px "متن\nبازیابی"          (created second, pack side=right)
+        └── Canvas 52px "بررسی\nاتصال"          (created first,  pack side=right)
+```
+
+- The primary toggle is `_TOGGLE_DIAMETER = 72` (was 64); its `_paint_toggle`
+  painter, `شروع/توقف` text swap, keyboard activation and hover-darken
+  behavior are unchanged.
+- The three settings actions are 52px Canvas circles (`_SECONDARY_DIAMETER`)
+  in one row packed right-to-left, so the first action is rightmost (Persian
+  reading order). Two-line labels keep the previous wording. Hover recolors
+  SURFACE -> BORDER, the same pair the flat buttons used.
+- Quit is a 20px Canvas circle (`_QUIT_DIAMETER`) with the same `✕` glyph and
+  the same close command; no `WM_DELETE_WINDOW` protocol, Escape still closes.
+- The recovery dialog keeps the flat `_flat_button` factory (its long labels
+  do not fit a circle). No color token was added or changed.
+
+Before (excerpt from `/tmp/r1_before.txt`): `assert 64 == 72`,
+`AttributeError: 'ControlWindow' object has no attribute '_action_row'`,
+`AttributeError: 'ControlWindow' object has no attribute '_quit'`
+(`3 failed, 27 passed`). After: `30 passed` in `tests/test_control.py`;
+full suite `1157 passed, 4 skipped, 1 warning`; ruff, mypy and secret scan
+clean.
+
+Deliberately updated pin: `test_secondary_buttons_share_the_flat_style` was
+replaced by `test_secondary_actions_are_52px_circles_in_rtl_order` (the main
+window's secondary controls are circles now, not flat buttons). The flat
+factory remains pinned by `test_recovery_popup_is_themed_modal_and_confirms_copy`.

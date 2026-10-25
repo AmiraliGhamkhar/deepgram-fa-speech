@@ -460,23 +460,78 @@ def test_no_inline_hex_colours_outside_the_palette_module():
         assert not re.findall(r"#[0-9a-fA-F]{6}", source), f"{name} still spells a colour inline"
 
 
-def test_secondary_buttons_share_the_flat_style(monkeypatch):
+def _circle_texts(canvas):
+    return [item["text"] for item in canvas.items.values() if item["kind"] == "text"]
+
+
+def test_button_diameters_match_the_restyle_spec():
+    """The restyle sizes are a visual contract: primary 72, secondary 52, quit 20."""
+    assert control._TOGGLE_DIAMETER == 72
+    assert control._SECONDARY_DIAMETER == 52
+    assert control._QUIT_DIAMETER == 20
+
+
+def test_secondary_actions_are_52px_circles_in_rtl_order(monkeypatch):
+    """R1 replacement for `test_secondary_buttons_share_the_flat_style`:
+    the three settings actions are 52px Canvas circles in one RTL row, with
+    the same hover-only recoloring the flat buttons had (SURFACE -> BORDER)."""
     from medical_stt.ui import colors
 
     window = _built_window(monkeypatch)
-    buttons = {b.kwargs.get("text"): b for b in window._root.find("Button")}
-    for label in ("بررسی اتصال", "متن بازیابی", "ذخیره تنظیمات"):
-        button = buttons[label]
-        assert button.kwargs["bg"] == colors.SURFACE
-        assert button.kwargs["relief"] == "flat"
-        assert button.kwargs["bd"] == 0
-        assert "<Enter>" in button.bindings and "<Leave>" in button.bindings
+    row = window._action_row
+    assert row.kind == "Frame"
+    circles = row.children
+    assert len(circles) == 3
 
-    save = buttons["ذخیره تنظیمات"]
-    save.bindings["<Enter>"](_FakeEvent(0, 0))
-    assert save.kwargs["bg"] == colors.BORDER
-    save.bindings["<Leave>"](_FakeEvent(0, 0))
-    assert save.kwargs["bg"] == colors.SURFACE
+    labels = []
+    for canvas in circles:
+        assert canvas.kind == "Canvas"
+        assert canvas.kwargs["width"] == control._SECONDARY_DIAMETER
+        assert canvas.kwargs["height"] == control._SECONDARY_DIAMETER
+        assert canvas.kwargs["bg"] == colors.BG, "no rectangular halo around the circle"
+        assert canvas.kwargs["highlightthickness"] == 0
+        assert canvas.kwargs["cursor"] == "hand2"
+        assert canvas.pack_kwargs.get("side") == "right", "RTL row packs right-to-left"
+
+        oval = next(item for item in canvas.items.values() if item["kind"] == "oval")
+        x0, y0, x1, y1 = oval["args"]
+        assert x1 - x0 == y1 - y0, "square bounding box, so it is a circle"
+        assert oval["fill"] == colors.SURFACE
+
+        labels.append(_circle_texts(canvas)[0])
+        assert ("action", "<Button-1>") in canvas.tag_bindings
+        assert ("action", "<Enter>") in canvas.tag_bindings
+        assert ("action", "<Leave>") in canvas.tag_bindings
+        assert "<ButtonPress-1>" not in canvas.bindings, "a circle is not a drag handle"
+        assert "<B1-Motion>" not in canvas.bindings
+
+    # RTL reading order: first action at the right edge.
+    assert labels == ["بررسی\nاتصال", "متن\nبازیابی", "ذخیره\nتنظیمات"]
+
+    # Hover recolor matches the old flat-button behavior.
+    canvas = circles[0]
+    oval_id = next(i for i, item in canvas.items.items() if item["kind"] == "oval")
+    canvas.tag_bindings[("action", "<Enter>")](_FakeEvent(0, 0))
+    assert canvas.items[oval_id]["fill"] == colors.BORDER
+    canvas.tag_bindings[("action", "<Leave>")](_FakeEvent(0, 0))
+    assert canvas.items[oval_id]["fill"] == colors.SURFACE
+
+
+def test_quit_control_is_a_20px_circle_that_closes(monkeypatch):
+    window = _built_window(monkeypatch)
+    quit_canvas = window._quit
+
+    assert quit_canvas.kind == "Canvas"
+    assert quit_canvas.kwargs["width"] == control._QUIT_DIAMETER
+    assert quit_canvas.kwargs["height"] == control._QUIT_DIAMETER
+    oval = next(item for item in quit_canvas.items.values() if item["kind"] == "oval")
+    x0, y0, x1, y1 = oval["args"]
+    assert x1 - x0 == y1 - y0
+    assert _circle_texts(quit_canvas) == ["✕"]
+    assert ("quit", "<Button-1>") in quit_canvas.tag_bindings
+
+    quit_canvas.tag_bindings[("quit", "<Button-1>")](_FakeEvent(0, 0))
+    assert window._close_requested is True, "the quit circle must close the window"
 
 
 def test_client_id_row_matches_the_other_settings_rows(monkeypatch):

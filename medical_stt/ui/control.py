@@ -47,8 +47,11 @@ _REC = colors.REC
 _ACCENT = colors.ACCENT
 _ON_LIGHT = colors.ON_LIGHT
 
-#: Diameter of the circular Start/Stop button, in pixels.
-_TOGGLE_DIAMETER = 64
+#: Diameters of the Canvas-drawn circular controls (GUI R1):
+#: the Start/Stop toggle, the three settings actions, and the quit mark.
+_TOGGLE_DIAMETER = 72
+_SECONDARY_DIAMETER = 52
+_QUIT_DIAMETER = 20
 
 
 def _darken(color: str, factor: float = 0.9) -> str:
@@ -121,6 +124,8 @@ class ControlWindow:
         self._toggle_text: Optional[int] = None
         self._toggle_color: str = _OK
         self._toggle_hover = False
+        self._action_row: Optional["tk.Frame"] = None
+        self._quit: Optional["tk.Canvas"] = None
         self._url_var: Optional["tk.StringVar"] = None
         self._secret_var: Optional["tk.StringVar"] = None
 
@@ -239,9 +244,12 @@ class ControlWindow:
             font=fonts.font(root, 10, "bold"),
         )
         title.pack(side="left")
-        quit_btn = tk.Label(header, text="\u2715", bg=_BG, fg=_MUTED, cursor="hand2", padx=4)
-        quit_btn.pack(side="right")
-        quit_btn.bind("<Button-1>", lambda _e: self.close())
+        self._quit = self._circle_button(
+            header, _QUIT_DIAMETER, self.close,
+            text="\u2715", fill=_SURFACE, hover_fill=_REC, text_fill=_MUTED,
+            font=fonts.font(root, 7, "bold"), tag="quit",
+        )
+        self._quit.pack(side="right", padx=(6, 0))
 
         self._status = tk.Label(
             inner, text="\u25cf آماده", bg=_BG, fg=_MUTED, anchor="e", justify="right",
@@ -249,7 +257,10 @@ class ControlWindow:
         )
         self._status.pack(fill="x", pady=(6, 0))
 
-        toggle = self._circle_button(inner, _TOGGLE_DIAMETER, self._on_toggle)
+        toggle = self._circle_button(
+            inner, _TOGGLE_DIAMETER, self._on_toggle,
+            fill=self._toggle_color, remember=True,
+        )
         self._toggle = toggle
         # Centered, never fill="x": a circle must not stretch with the window.
         toggle.pack(anchor="center", pady=(8, 0))
@@ -295,11 +306,21 @@ class ControlWindow:
         tk.Entry(inner, textvariable=self._client_id_var, bg=_SURFACE, fg=_FG,
                  insertbackground=_FG, relief="flat", justify="left",
                  font=fonts.font(root, 9)).pack(fill="x", pady=(2, 0), ipady=3)
-        self._flat_button(inner, "بررسی اتصال", self._test_connection).pack(fill="x", pady=(8, 0))
-        self._flat_button(inner, "متن بازیابی", self._show_recovery).pack(fill="x", pady=(4, 0))
-
-        save = self._flat_button(inner, "ذخیره تنظیمات", self._on_save_settings)
-        save.pack(fill="x", pady=(8, 0))
+        # The three settings actions are 52px circles in one RTL row: the
+        # first action sits at the right edge, reading order follows Persian.
+        self._action_row = tk.Frame(inner, bg=_BG)
+        self._action_row.pack(fill="x", pady=(8, 0))
+        for label, command in (
+            ("بررسی\nاتصال", self._test_connection),
+            ("متن\nبازیابی", self._show_recovery),
+            ("ذخیره\nتنظیمات", self._on_save_settings),
+        ):
+            circle = self._circle_button(
+                self._action_row, _SECONDARY_DIAMETER, command,
+                text=label, fill=_SURFACE, hover_fill=_BORDER, text_fill=_FG,
+                font=fonts.font(root, 8, "bold"), tag="action",
+            )
+            circle.pack(side="right", padx=4)
 
         # Drag support: the window is borderless, so there is no title bar
         # to move it with.
@@ -460,7 +481,7 @@ class ControlWindow:
             self._set_status("\u25cf آماده", _MUTED, getattr(self._controller, "health", {}).get("warning", ""))
 
     def _flat_button(self, parent: Any, text: str, command: Callable[[], None]) -> "tk.Button":
-        """One flat dark button style for every secondary control.
+        """One flat dark button style (now used by the recovery dialog only).
 
         `bd=0`/`relief="flat"` drops the raised system chrome, and the
         hover swap (surface -> border colour) is the only motion -- no
@@ -475,32 +496,64 @@ class ControlWindow:
         button.bind("<Leave>", lambda _e: button.config(bg=_SURFACE))
         return button
 
-    def _circle_button(self, parent: Any, diameter: int, command: Callable[[], None]) -> "tk.Canvas":
-        """Build the circular Start/Stop button on a Canvas.
+    def _circle_button(
+        self,
+        parent: Any,
+        diameter: int,
+        command: Callable[[], None],
+        *,
+        text: str = "شروع",
+        fill: str = _OK,
+        text_fill: str = _ON_LIGHT,
+        font: Optional[tuple] = None,
+        tag: str = "toggle",
+        hover_fill: Optional[str] = None,
+        remember: bool = False,
+    ) -> "tk.Canvas":
+        """Build one circular control on a Canvas (GUI R1 sizes).
 
         A Canvas (not a styled tk.Button) is the only dependency-free way
         to get a real circle out of Tkinter. The canvas background is the
         window background so no rectangular halo shows around the oval;
         the oval and its label share one tag, which is the click target.
         Deliberately NOT part of the drag-binding widgets in `_build`:
-        a press here must start/stop, never start a window drag.
+        a press here must run its command, never start a window drag.
+
+        The Start/Stop toggle passes `remember=True` so `_paint_toggle`
+        keeps owning its recolors (state changes with the session); the
+        static circles recolor inline on hover only.
         """
         canvas = tk.Canvas(
             parent, width=diameter, height=diameter, bg=_BG,
             highlightthickness=0, cursor="hand2", takefocus=1,
         )
         pad = 2
-        self._toggle_oval = canvas.create_oval(
+        oval = canvas.create_oval(
             pad, pad, diameter - pad, diameter - pad,
-            fill=self._toggle_color, outline=self._toggle_color, tags=("toggle",),
+            fill=fill, outline=fill, tags=(tag,),
         )
-        self._toggle_text = canvas.create_text(
-            diameter / 2, diameter / 2, text="شروع", fill=_ON_LIGHT,
-            font=fonts.font(parent, 12, "bold"), tags=("toggle",),
+        label = canvas.create_text(
+            diameter / 2, diameter / 2, text=text, fill=text_fill,
+            font=font or fonts.font(parent, 12, "bold"), tags=(tag,),
+            width=max(8, diameter - 10), justify="center",
         )
-        canvas.tag_bind("toggle", "<Button-1>", lambda _e: command())
-        canvas.tag_bind("toggle", "<Enter>", self._on_toggle_hover)
-        canvas.tag_bind("toggle", "<Leave>", self._on_toggle_leave)
+        canvas.tag_bind(tag, "<Button-1>", lambda _e: command())
+        if remember:
+            canvas.tag_bind(tag, "<Enter>", self._on_toggle_hover)
+            canvas.tag_bind(tag, "<Leave>", self._on_toggle_leave)
+            self._toggle_oval = oval
+            self._toggle_text = label
+        else:
+            hover = hover_fill or _darken(fill)
+
+            def on_enter(_event: object, c: Any = canvas, o: int = oval, h: str = hover) -> None:
+                c.itemconfig(o, fill=h, outline=h)
+
+            def on_leave(_event: object, c: Any = canvas, o: int = oval, f: str = fill) -> None:
+                c.itemconfig(o, fill=f, outline=f)
+
+            canvas.tag_bind(tag, "<Enter>", on_enter)
+            canvas.tag_bind(tag, "<Leave>", on_leave)
         # Clicking also takes keyboard focus, so Return/Space work after a
         # mouse press without a separate Tab.
         canvas.bind("<Button-1>", lambda _e: canvas.focus_set())
