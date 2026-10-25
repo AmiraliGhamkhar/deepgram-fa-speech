@@ -168,7 +168,6 @@ class LiveMedicalSTT:
         )
 
         self.injector = TextInjector(
-            dry_run=False,
             enable_smart_rewrite=True,
             restore_clipboard=self.settings.restore_clipboard,
             paste_settle_seconds=self.settings.paste_settle_seconds,

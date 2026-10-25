@@ -6,15 +6,17 @@ it is only imported lazily by `get_default_backend()` when
 """
 from __future__ import annotations
 
+import atexit
 import ctypes
 import logging
 import os
 import platform
+import threading
 import time
 from ctypes import wintypes
 from typing import List, Optional
 
-from .backend import InjectionBackend, _INJECT_SIGNATURE
+from .backend import CLIPBOARD_CLEARED_PLACEHOLDER, InjectionBackend, _INJECT_SIGNATURE
 
 log = logging.getLogger("medical_stt.injection.windows")
 
@@ -40,6 +42,15 @@ CF_UNICODETEXT = 13
 GMEM_MOVEABLE = 0x0002
 ERROR_ACCESS_DENIED = 5
 MAPVK_VK_TO_VSC = 0
+WS_POPUP = 0x80000000
+#: Special parent that makes a window message-only: it can own the
+#: clipboard and receive its notifications, but can never be shown.
+HWND_MESSAGE = -3
+
+#: Upper bound on one clipboard read: 1 MiB of UTF-16. Dictated utterances
+#: are kilobytes; anything near this on a clinician's clipboard is not ours
+#: to haul through memory (or to restore byte-for-byte).
+_MAX_CLIPBOARD_CHARS = (1024 * 1024) // 2
 
 ULONG_PTR = ctypes.c_ulonglong if ctypes.sizeof(ctypes.c_void_p) == 8 else ctypes.c_ulong
 
@@ -141,6 +152,15 @@ user32.GetForegroundWindow.restype = wintypes.HWND
 user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
 user32.GetWindowThreadProcessId.restype = wintypes.DWORD
 
+user32.CreateWindowExW.argtypes = [
+    wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD,
+    ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+    wintypes.HWND, wintypes.HMENU, wintypes.HINSTANCE, wintypes.LPVOID,
+]
+user32.CreateWindowExW.restype = wintypes.HWND
+user32.DestroyWindow.argtypes = [wintypes.HWND]
+user32.DestroyWindow.restype = wintypes.BOOL
+
 _INTERFERING_MODIFIERS = (VK_SHIFT, VK_MENU, VK_LWIN, VK_RWIN, VK_CONTROL)
 
 
@@ -157,6 +177,60 @@ def _unicode_input(code_unit: int, key_up: bool) -> INPUT:
     inp.type = INPUT_KEYBOARD
     inp.union.ki = KEYBDINPUT(0, code_unit, flags, 0, _INJECT_SIGNATURE)
     return inp
+
+
+# ---- clipboard owner window -------------------------------------------------
+#
+# `OpenClipboard` needs an owner window, and `EmptyClipboard` assigns
+# clipboard ownership TO that window. This code used to pass
+# `GetForegroundWindow()` -- i.e. it made the EMR application the clipboard
+# owner, so that process started receiving WM_RENDERFORMAT /
+# WM_DESTROYCLIPBOARD for data it never put there, and delayed rendering
+# could break the paste. Passing NULL instead is documented to associate
+# the clipboard with the current task, but a NULL owner makes
+# `SetClipboardData` unusable for our write sequence in practice. So: one
+# hidden message-only window of our own (the predefined STATIC class needs
+# no class registration and its default proc absorbs clipboard messages),
+# created lazily on first clipboard use, never shown, destroyed at exit.
+
+_clipboard_owner_lock = threading.Lock()
+_clipboard_owner_hwnd: Optional[object] = None
+_clipboard_owner_attempted = False
+
+
+def _destroy_clipboard_owner_window() -> None:
+    global _clipboard_owner_hwnd
+    hwnd, _clipboard_owner_hwnd = _clipboard_owner_hwnd, None
+    if hwnd:
+        try:
+            user32.DestroyWindow(hwnd)
+        except Exception:  # noqa: BLE001 - process exit; the OS reclaims it
+            pass
+
+
+def _clipboard_owner_window() -> Optional[object]:
+    """Our process's hidden clipboard owner window, or None if it could
+    not be created (write paths must then fail rather than borrow the
+    foreground application's window -- see `_open_clipboard`)."""
+    global _clipboard_owner_hwnd, _clipboard_owner_attempted
+    with _clipboard_owner_lock:
+        if _clipboard_owner_attempted:
+            return _clipboard_owner_hwnd
+        _clipboard_owner_attempted = True
+        try:
+            hwnd = user32.CreateWindowExW(
+                0, "STATIC", "", WS_POPUP, 0, 0, 0, 0,
+                HWND_MESSAGE, None, None, None,
+            )
+        except Exception as exc:  # noqa: BLE001 - no owner, writes fail closed
+            log.warning("clipboard owner window unavailable (%s)", type(exc).__name__)
+            return None
+        if not hwnd:
+            log.warning("clipboard owner window could not be created")
+            return None
+        _clipboard_owner_hwnd = hwnd
+        atexit.register(_destroy_clipboard_owner_window)
+        return hwnd
 
 
 # Sequence numbers let restoration avoid overwriting a newer user copy.
@@ -181,6 +255,13 @@ class WindowsBackend(InjectionBackend):
     def _target_allowed(self, target: int) -> bool:
         if self._expected_target is not None and target != self._expected_target:
             return False
+        if not target:
+            # Checked first on purpose: this branch used to sit AFTER the
+            # GetWindowThreadProcessId call, which already fails for a NULL
+            # window -- so the one case the "focus an external document"
+            # guidance exists for never produced it.
+            log.warning("focus an external document before dictating")
+            return False
         pid = wintypes.DWORD()
         if not user32.GetWindowThreadProcessId(target, ctypes.byref(pid)):
             return False
@@ -190,7 +271,7 @@ class WindowsBackend(InjectionBackend):
             # never a document: refuse rather than type into the void.
             log.warning("foreground window has no owning process; not injecting")
             return False
-        if not target or (pid.value == os.getpid() and not self._allow_own_process):
+        if pid.value == os.getpid() and not self._allow_own_process:
             log.warning("focus an external document before dictating")
             return False
         return True
@@ -238,7 +319,14 @@ class WindowsBackend(InjectionBackend):
         for code in code_units:
             inputs.append(_unicode_input(code, key_up=False))
             inputs.append(_unicode_input(code, key_up=True))
-        return self._send_inputs(inputs)
+        # Same hygiene as the paste keystroke: this path used to release
+        # nothing, so a physically held Alt/Win during typing turned the
+        # dictated characters into menu accelerators and shortcuts.
+        stuck = self._release_interfering_modifiers()
+        try:
+            return self._send_inputs(inputs)
+        finally:
+            self._restore_modifiers(stuck)
 
     def send_backspaces(self, count: int) -> bool:
         if count <= 0:
@@ -262,13 +350,36 @@ class WindowsBackend(InjectionBackend):
             flags |= KEYEVENTF_EXTENDEDKEY
         self._send_inputs([_key_input(vk, scan, flags)])
 
-    def _send_paste_keystroke(self) -> bool:
-        """Synthesize a clean Ctrl+V with no foreign modifiers attached."""
+    def _release_interfering_modifiers(self) -> List[int]:
+        """Snapshot the physically held modifiers and release them all."""
         stuck = self._stuck_modifiers()
         for vk in stuck:
             self._set_modifier(vk, pressed=False)
         if stuck:
             time.sleep(0.01)
+        return stuck
+
+    def _restore_modifiers(self, stuck: List[int]) -> None:
+        """Re-press only modifiers that are STILL held after injection.
+
+        The snapshot used to be re-pressed verbatim: if the user released
+        Ctrl during the few milliseconds of the paste, we pressed it again
+        and left it logically stuck, so the clinician's next keystrokes
+        became shortcuts. A modifier is restored only when it is both in
+        the snapshot AND still reported down by a fresh `GetAsyncKeyState`
+        read taken after the synthetic keyups settle.
+        """
+        if not stuck:
+            return
+        time.sleep(0.01)
+        still_down = set(self._stuck_modifiers())
+        for vk in stuck:
+            if vk in still_down:
+                self._set_modifier(vk, pressed=True)
+
+    def _send_paste_keystroke(self) -> bool:
+        """Synthesize a clean Ctrl+V with no foreign modifiers attached."""
+        stuck = self._release_interfering_modifiers()
 
         ctrl_scan = user32.MapVirtualKeyW(VK_CONTROL, MAPVK_VK_TO_VSC)
         v_scan = user32.MapVirtualKeyW(VK_V, MAPVK_VK_TO_VSC)
@@ -284,25 +395,41 @@ class WindowsBackend(InjectionBackend):
         ]
         ok = self._send_inputs(sequence)
 
-        for vk in stuck:
-            # Restore the pre-injection snapshot. GetAsyncKeyState includes
-            # our own synthetic keyups and cannot reveal physical state now.
-            self._set_modifier(vk, pressed=True)
-
+        self._restore_modifiers(stuck)
         return ok
 
     # -- clipboard ----------------------------------------------------------
 
-    def _open_clipboard(self, attempts: int = 12, delay: float = 0.02) -> bool:
-        """OpenClipboard fails while another process holds it open. A
-        single try meant a whole dictated sentence vanished, so retry
-        briefly."""
-        hwnd = user32.GetForegroundWindow()
+    def _open_clipboard(
+        self, attempts: int = 12, delay: float = 0.02, *, for_write: bool = False
+    ) -> bool:
+        """Open the clipboard under OUR window's ownership, with retries.
+
+        OpenClipboard fails while another process holds it open; a single
+        try meant a whole dictated sentence vanished, so retry briefly.
+
+        Write paths (`EmptyClipboard`/`SetClipboardData` ahead) open ONLY
+        with our own hidden owner window -- never the foreground app's
+        window (which would make that process the clipboard owner) and
+        never NULL. If our window could not be created, a write fails
+        closed. Reads prefer our window too and only then fall back to the
+        historical foreground/NULL owners, which are harmless for reads.
+        """
+        owner = _clipboard_owner_window()
+        candidates: List[object] = []
+        if owner:
+            candidates.append(owner)
+            if not for_write:
+                candidates.append(None)
+        elif for_write:
+            log.warning("clipboard write refused: no owner window of our own")
+            return False
+        else:
+            candidates.extend([user32.GetForegroundWindow(), None])
         for i in range(attempts):
-            if user32.OpenClipboard(hwnd):
-                return True
-            if user32.OpenClipboard(None):
-                return True
+            for hwnd in candidates:
+                if user32.OpenClipboard(hwnd):
+                    return True
             time.sleep(delay * (1 + i * 0.25))
         log.warning("clipboard busy — another application is holding it open")
         return False
@@ -320,11 +447,29 @@ class WindowsBackend(InjectionBackend):
             if not ptr:
                 return None
             try:
-                return ctypes.c_wchar_p(ptr).value
+                # Bounded read: `c_wchar_p(ptr).value` scanned to the first
+                # NUL however far away it was, so a malformed or hostile
+                # clipboard buffer could run the read off the allocation.
+                # The allocation's own size bounds it, capped at 1 MiB of
+                # UTF-16; a buffer with no terminator inside that bound is
+                # refused (callers already treat None as "unreadable").
+                size_bytes = int(kernel32.GlobalSize(handle))
+                if size_bytes <= 0:
+                    return None
+                max_chars = min(size_bytes // 2, _MAX_CLIPBOARD_CHARS)
+                if max_chars <= 0:
+                    return None
+                value = ctypes.wstring_at(ptr, max_chars)
+                if "\0" in value:
+                    return value.split("\0", 1)[0]
+                if len(value) < max_chars:
+                    return value  # the read itself stopped at a terminator
+                log.warning("clipboard text has no terminator within its bounds; refusing it")
+                return None
             finally:
                 kernel32.GlobalUnlock(handle)
-        except OSError as exc:
-            log.debug("clipboard read failed: %s", exc)
+        except Exception as exc:  # noqa: BLE001 - fail safe: unreadable clipboard
+            log.debug("clipboard read failed (%s)", type(exc).__name__)
             return None
         finally:
             user32.CloseClipboard()
@@ -406,6 +551,8 @@ class WindowsBackend(InjectionBackend):
             if count and previous is None:
                 return False
         owned_sequence = None
+        paste_sent = False
+        clipboard_changed_after_paste = False
         try:
             written = self._set_clipboard_text(text, expected_sequence=before)
             owned_sequence = self._last_written_sequence
@@ -418,16 +565,33 @@ class WindowsBackend(InjectionBackend):
                 log.warning("focused window changed; paste cancelled")
                 return False
             ok = self._send_paste_keystroke()
+            paste_sent = ok
+            # Close the verify->paste race: the content check above ran
+            # BEFORE Ctrl+V, so a clipboard manager (or the user) copying in
+            # between could still make the target paste the wrong data.
+            # Re-check the sequence of our successful write immediately
+            # after the keystroke, before any restore/clear below.
+            if (
+                owned_sequence is not None
+                and user32.GetClipboardSequenceNumber() != owned_sequence
+            ):
+                clipboard_changed_after_paste = True
+                log.warning(
+                    "clipboard changed after the paste keystroke; the paste "
+                    "is unverifiable and the newer copy is left alone"
+                )
             if settle_seconds:
                 time.sleep(settle_seconds)
             return ok
         finally:
-            if restore_clipboard and owned_sequence is not None:
+            if clipboard_changed_after_paste:
+                pass  # the newer copy wins: never restore/clear over it
+            elif restore_clipboard and owned_sequence is not None:
                 try:
                     if previous is not None:
                         if not self._set_clipboard_text(previous, expected_sequence=owned_sequence):
                             log.warning("clipboard restore failed (WriteFailure)")
-                    elif self._open_clipboard():
+                    elif self._open_clipboard(for_write=True):
                         try:
                             if user32.GetClipboardSequenceNumber() == owned_sequence:
                                 if not user32.EmptyClipboard():
@@ -438,3 +602,16 @@ class WindowsBackend(InjectionBackend):
                         log.warning("clipboard restore failed (OpenFailure)")
                 except Exception as exc:
                     log.warning("clipboard restore failed (%s)", type(exc).__name__)
+            elif not restore_clipboard and paste_sent and owned_sequence is not None:
+                # restore_clipboard=false must not leave dictated PHI on a
+                # shared clipboard forever: clear it to a fixed placeholder
+                # (still sequence-guarded, so a newer user copy survives).
+                try:
+                    if self._set_clipboard_text(
+                        CLIPBOARD_CLEARED_PLACEHOLDER, expected_sequence=owned_sequence
+                    ):
+                        log.info("clipboard cleared after paste (restore_clipboard disabled)")
+                    else:
+                        log.warning("clipboard clear after paste failed (WriteFailure)")
+                except Exception as exc:
+                    log.warning("clipboard clear after paste failed (%s)", type(exc).__name__)

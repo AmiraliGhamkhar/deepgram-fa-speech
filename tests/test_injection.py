@@ -404,3 +404,118 @@ def test_backend_exception_logs_only_type_not_potential_phi(caplog, method, args
     assert getattr(injector, method)(*args) is False
     assert marker not in caplog.text
     assert 'RuntimeError' in caplog.text
+
+
+# -- delta bookkeeping: the baseline is committed only on success ------------
+
+
+class _FlakyBackend(DryRunBackend):
+    """DryRun backend whose type/backspace paths can be made to fail."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail_type = False
+        self.fail_backspaces = False
+
+    def send_unicode_text(self, text: str) -> bool:
+        if self.fail_type:
+            return False
+        return super().send_unicode_text(text)
+
+    def send_backspaces(self, count: int) -> bool:
+        if self.fail_backspaces:
+            return False
+        return super().send_backspaces(count)
+
+
+def test_failed_delta_keeps_the_old_baseline():
+    backend = _FlakyBackend()
+    injector = TextInjector(backend=backend, enable_smart_rewrite=True)
+    assert injector.type_delta_from_partial("hello") is True
+
+    backend.fail_type = True
+    assert injector.type_delta_from_partial("hello world") is False
+    assert injector.last_error is not None
+    assert injector._last_partial == "hello", "a failed send must not desync the baseline"
+
+    backend.fail_type = False
+    assert injector.type_delta_from_partial("hello world") is True
+    assert "".join(backend.typed) == "hello world"
+
+
+def test_failed_backspaces_keep_the_old_baseline_and_skip_typing():
+    backend = _FlakyBackend()
+    injector = TextInjector(backend=backend, enable_smart_rewrite=True)
+    assert injector.type_delta_from_partial("hello wold") is True
+
+    backend.fail_backspaces = True
+    assert injector.type_delta_from_partial("hello world") is False
+    assert injector._last_partial == "hello wold"
+    assert "".join(backend.typed) == "hello wold", "typing must not run after failed erasure"
+
+
+def test_legacy_non_prefix_revision_is_an_explicit_error():
+    backend = _FlakyBackend()
+    injector = TextInjector(backend=backend, enable_smart_rewrite=False)
+    assert injector.type_delta_from_partial("abc") is True
+
+    assert injector.type_delta_from_partial("xyz") is False
+    assert injector.last_error == "non-prefix revision unsupported in legacy mode"
+    assert injector._last_partial == "abc"
+
+    assert injector.type_delta_from_partial("abcdef") is True
+    assert "".join(backend.typed) == "abcdef"
+
+
+def test_legacy_failed_append_keeps_the_old_baseline():
+    backend = _FlakyBackend()
+    injector = TextInjector(backend=backend, enable_smart_rewrite=False)
+    assert injector.type_delta_from_partial("abc") is True
+    backend.fail_type = True
+    assert injector.type_delta_from_partial("abcdef") is False
+    assert injector._last_partial == "abc"
+
+
+def test_dry_run_parameter_is_gone():
+    """DryRunBackend covers testing; a stored-but-unread flag only lied."""
+    import inspect
+
+    assert "dry_run" not in inspect.signature(TextInjector).parameters
+    assert not hasattr(TextInjector(backend=DryRunBackend()), "dry_run")
+
+
+def test_directional_mark_is_always_on_for_paste_and_opt_in_for_type():
+    backend = DryRunBackend()
+    injector = TextInjector(backend=backend, paste_settle_seconds=0.0)
+
+    assert injector.paste_text("بیمار", add_rtl_mark=False) is True
+    assert backend.pasted[-1].startswith("‏"), "paste always applies its one mark"
+
+    assert injector.type_text("بیمار") is True
+    assert backend.typed[-1] == "بیمار", "type mode adds no mark unless asked"
+
+    assert injector.type_text("بیمار", add_directional_mark=True) is True
+    assert backend.typed[-1].startswith("‏")
+
+
+def test_fallback_backspaces_do_not_pay_pyautogui_pause_per_key(monkeypatch):
+    pauses = []
+    fake_pyautogui = types.SimpleNamespace(
+        PAUSE=0.1, press=lambda _key: pauses.append(fake_pyautogui.PAUSE)
+    )
+    monkeypatch.setitem(sys.modules, "pyautogui", fake_pyautogui)
+
+    from medical_stt.injection._fallback_backend import FallbackBackend
+
+    assert FallbackBackend().send_backspaces(3) is True
+    assert pauses == [0, 0, 0], "the per-key pause must be disabled inside the loop"
+    assert fake_pyautogui.PAUSE == 0.1, "and restored afterwards"
+
+
+def test_fallback_no_restore_replaces_dictated_text_with_placeholder(monkeypatch):
+    from medical_stt.injection.backend import CLIPBOARD_CLEARED_PLACEHOLDER
+
+    clipboard = _FakeClipboard("previous user copy")
+    backend, _hotkeys = _install_fallback_clipboard(monkeypatch, clipboard)
+    assert backend.paste_text("راز بیمار", restore_clipboard=False, settle_seconds=0) is True
+    assert clipboard.value == CLIPBOARD_CLEARED_PLACEHOLDER

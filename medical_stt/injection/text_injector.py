@@ -69,20 +69,18 @@ class TextInjector:
     def __init__(
         self,
         backend: Optional[InjectionBackend] = None,
-        dry_run: bool = False,
         enable_smart_rewrite: bool = True,
         restore_clipboard: bool = True,
         paste_settle_seconds: float = 0.12,
     ):
+        # No `dry_run` flag: it was stored but never read (the backend it
+        # selected did all the actual work), so it only pretended to make an
+        # injector safe. Tests and `--dry-run` pass a `DryRunBackend`
+        # explicitly -- one mechanism, honestly named.
         #: How long to let the target app consume the clipboard after
         #: Ctrl+V. A timed wait, not a confirmation (see backend.py).
         self.paste_settle_seconds = max(0.0, paste_settle_seconds)
-        if dry_run and backend is None:
-            from .backend import DryRunBackend
-
-            backend = DryRunBackend()
         self.backend = backend or get_default_backend(self.paste_settle_seconds)
-        self.dry_run = dry_run
         self.enable_smart_rewrite = enable_smart_rewrite
         self.restore_clipboard = restore_clipboard
         self._last_partial: str = ""
@@ -92,22 +90,34 @@ class TextInjector:
         """Reset the streaming state (call when a sentence is finalized)."""
         self._last_partial = ""
 
-    def type_delta_from_partial(self, partial: str) -> None:
+    def type_delta_from_partial(self, partial: str) -> bool:
         """Public-API-only legacy streaming support; production interims are
         overlay-only and never call this backspace machinery. If the STT revises a
         previous hypothesis, send backspaces for the changed suffix and
-        type the new text."""
+        type the new text.
+
+        Returns True only when every required send succeeded. The
+        `_last_partial` baseline is committed at that point and ONLY then:
+        it used to be updated before the sends were attempted, so one
+        backend failure desynced the baseline from the screen and every
+        later delta erased/typed the wrong span.
+        """
         partial = partial or ""
         if partial == self._last_partial:
-            return
+            return True
 
         if not self.enable_smart_rewrite:
-            if partial.startswith(self._last_partial):
-                delta = partial[len(self._last_partial):]
-                self._last_partial = partial
-                if delta:
-                    self.type_text(delta)
-            return
+            if not partial.startswith(self._last_partial):
+                # Used to drop the revision silently; a caller diffing
+                # against its own model of the screen could never tell.
+                self.last_error = "non-prefix revision unsupported in legacy mode"
+                log.warning("type_delta_from_partial: %s", self.last_error)
+                return False
+            delta = partial[len(self._last_partial):]
+            if delta and not self.type_text(delta):
+                return False  # `type_text` already recorded `last_error`
+            self._last_partial = partial
+            return True
 
         common_len = 0
         min_len = min(len(self._last_partial), len(partial))
@@ -122,14 +132,16 @@ class TextInjector:
         # Windows deletes UTF-16 code units, not Python code points.
         backspaces_needed = self._utf16_len(removed)
 
-        self._last_partial = partial
-
         if backspaces_needed > 0:
-            self.send_backspaces(backspaces_needed)
+            if not self.send_backspaces(backspaces_needed):
+                return False
             time.sleep(0.01)
 
-        if delta:
-            self.type_text(delta)
+        if delta and not self.type_text(delta):
+            return False
+
+        self._last_partial = partial
+        return True
 
     @staticmethod
     def _utf16_len(text: str) -> int:
@@ -205,11 +217,14 @@ class TextInjector:
         contract for the whole pipeline; a future "سر خط" command only has
         to emit it.
 
-        `add_rtl_mark` (kept for backward compatibility) is now equivalent
-        to always-on: the injected representation always gets exactly one
-        leading directional mark matching its base direction, computed by
-        processing.bidi.to_injected -- never a forced RLE/PDF embedding
-        around the whole string (see processing/bidi.py for why).
+        `add_rtl_mark` is accepted for backward compatibility and IGNORED:
+        the paste path always applies exactly one leading directional mark
+        matching the text's base direction via processing.bidi.to_injected
+        (never a forced RLE/PDF embedding around the whole string -- see
+        processing/bidi.py for why). Only the TYPE path treats the mark as
+        opt-in (`type_text(add_directional_mark=...)`); there is no way to
+        paste without the mark, and callers must not read meaning into the
+        value they pass here.
         """
         self.last_error = None
         separator = _trailing_separator(text)
