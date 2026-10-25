@@ -169,3 +169,15 @@ def test_uptime_is_reported():
     registry = metrics_module.new_metrics()
     assert "host_uptime_seconds" in registry.render()
     assert registry.uptime_seconds >= 0.0
+
+
+def test_uptime_uses_the_monotonic_clock(monkeypatch):
+    """B7: uptime came from time.time(), so an NTP step corrupted it."""
+    import time
+
+    registry = metrics_module.Metrics()
+    assert abs(registry._started_at - time.monotonic()) < 5.0
+    before = registry.uptime_seconds
+    # A wall-clock step to the epoch must not move uptime at all.
+    monkeypatch.setattr(metrics_module.time, "time", lambda: 0.0)
+    assert registry.uptime_seconds >= before

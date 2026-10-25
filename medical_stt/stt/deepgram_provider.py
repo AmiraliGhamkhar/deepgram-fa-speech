@@ -125,6 +125,12 @@ def classify_deepgram_exception(exc: BaseException) -> ErrorCategory:
                 return ErrorCategory.RATE_LIMIT
             if code is not None and 400 <= code < 500:
                 return ErrorCategory.CONFIG
+            if code is not None and code >= 500:
+                # Deepgram (or its edge) failing the handshake is a server
+                # problem worth retrying like any other disconnect -- not
+                # a generic NETWORK fault. Mirrors the ApiError status
+                # table at the top of this function.
+                return ErrorCategory.SERVER_DISCONNECT
         if isinstance(exc, (ws_exc.InvalidHandshake, ws_exc.WebSocketException)):
             return ErrorCategory.NETWORK
     except ImportError:  # pragma: no cover - defensive only
@@ -136,6 +142,23 @@ def classify_deepgram_exception(exc: BaseException) -> ErrorCategory:
         return ErrorCategory.NETWORK
 
     return ErrorCategory.UNKNOWN
+
+
+def connection_close_frame(connection: Any) -> tuple[Optional[int], str]:
+    """The close frame of a live SDK connection's websocket, if readable.
+
+    The SDK emits `EventType.CLOSE` with no payload, so when no ERROR
+    event preceded it (the listen loop simply ended), the close code has
+    to be read off the transport -- otherwise a `1008 DATA-*` close
+    arriving by that path would be misclassified as a retryable
+    disconnect and the reconnect loop would spin on undecodable audio.
+    """
+    transport = getattr(connection, "_websocket", None)
+    if transport is None:
+        return None, ""
+    code = getattr(transport, "close_code", None)
+    reason = str(getattr(transport, "close_reason", "") or "").strip()
+    return (code if isinstance(code, int) else None), reason
 
 
 def _optional_float(value: object) -> Optional[float]:
@@ -391,23 +414,31 @@ class DeepgramProvider(STTProvider):
             # instead of a long-lived API key, for both the websocket
             # handshake and any HTTP request.
             client = DeepgramClient(access_token=session_token, environment=environment)
-            with client.listen.v1.connect(
-                model=s.model,
-                language=s.language,
-                encoding="linear16",
-                sample_rate=s.sample_rate,
-                channels=s.channels,
-                interim_results=True,
-                endpointing=s.endpointing,
-                utterance_end_ms=s.utterance_end_ms,
-                vad_events=True,
-                smart_format=True,
-                punctuate=True,
-                replace=self._asr_replacements or None,
-                mip_opt_out=True if s.mip_opt_out else None,
-                **self._attribution_parameters(),
-                **self._recognition_hint_parameters(),
-            ) as connection:
+            connect_params: dict[str, Any] = {
+                "model": s.model,
+                "language": s.language,
+                "encoding": "linear16",
+                "sample_rate": s.sample_rate,
+                "channels": s.channels,
+                "interim_results": True,
+                "endpointing": s.endpointing,
+                "utterance_end_ms": s.utterance_end_ms,
+                "vad_events": True,
+                "smart_format": True,
+                "punctuate": True,
+            }
+            # Optional parameters are OMITTED when unset rather than passed
+            # as None: whether the SDK's query encoder drops None values is
+            # an SDK internal this client must not depend on -- an encoder
+            # change could just as well start sending `mip_opt_out=None`
+            # to Deepgram.
+            if self._asr_replacements:
+                connect_params["replace"] = self._asr_replacements
+            if s.mip_opt_out:
+                connect_params["mip_opt_out"] = True
+            connect_params.update(self._attribution_parameters())
+            connect_params.update(self._recognition_hint_parameters())
+            with client.listen.v1.connect(**connect_params) as connection:
                 with self._connection_lock:
                     if stop_event.is_set() or stop_event is not self._stop_event:
                         self._abort_connection(connection)
@@ -456,6 +487,20 @@ class DeepgramProvider(STTProvider):
                     if event is not None:
                         on_transcript(event)
 
+                #: One terminal error per connection. The SDK emits ERROR
+                #: and then CLOSE for a single disconnect, so without this
+                #: guard one closure surfaced twice -- once classified,
+                #: once as a generic SERVER_DISCONNECT -- and correctness
+                #: hung on the consumer happening to read the first one.
+                error_emitted = False
+
+                def _emit_error(error: ProviderError) -> None:
+                    nonlocal error_emitted
+                    if error_emitted:
+                        return
+                    error_emitted = True
+                    on_error(error)
+
                 def _on_provider_error(exc: object) -> None:
                     cause = exc if isinstance(exc, BaseException) else Exception(str(exc))
                     category = classify_deepgram_exception(cause)
@@ -465,21 +510,45 @@ class DeepgramProvider(STTProvider):
                         # makes a reconnect loop diagnosable from the log.
                         details = close_details(cause)
                         log.warning("deepgram_connection_closed %s (%s)", details, category.value)
-                        on_error(
+                        _emit_error(
                             ConnectionClosed(
                                 category, f"Deepgram connection closed ({details})", cause=cause
                             )
                         )
                     else:
-                        on_error(ProviderError(category, f"Deepgram error ({category.value})", cause=cause))
+                        _emit_error(ProviderError(category, f"Deepgram error ({category.value})", cause=cause))
 
-                def _on_close(_: object) -> None:
-                    if not stop_event.is_set():
-                        on_error(
-                            ConnectionClosed(
-                                ErrorCategory.SERVER_DISCONNECT, "Deepgram connection closed"
-                            )
+                def _on_close(event: object) -> None:
+                    if stop_event.is_set():
+                        return
+                    # No ERROR preceded this CLOSE (or `_emit_error` would
+                    # swallow this anyway). Classify by the close frame
+                    # wherever it can be read -- the event payload if a
+                    # future SDK passes the exception, else the transport
+                    # -- so a 1008/DATA-* close is CONFIG on this path too,
+                    # not a retryable disconnect.
+                    code, reason = (None, "")
+                    if isinstance(event, BaseException):
+                        code, reason = _close_code_and_reason(event)
+                    if code is None:
+                        code, reason = connection_close_frame(connection)
+                    category = (
+                        ErrorCategory.CONFIG
+                        if code == 1008 or reason.startswith("DATA-")
+                        else ErrorCategory.SERVER_DISCONNECT
+                    )
+                    details = f"{code} {reason}".strip() if code is not None else ""
+                    log.warning(
+                        "deepgram_connection_closed %s (%s)",
+                        details or "no close frame", category.value,
+                    )
+                    _emit_error(
+                        ConnectionClosed(
+                            category,
+                            f"Deepgram connection closed ({details})" if details
+                            else "Deepgram connection closed",
                         )
+                    )
 
                 connection.on(EventType.OPEN, lambda _: log.info("deepgram_connected"))
                 connection.on(EventType.MESSAGE, _on_message)

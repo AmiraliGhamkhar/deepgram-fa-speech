@@ -124,6 +124,29 @@ def test_close_codes_are_classified(code, reason, category):
     assert classify_deepgram_exception(_closed(code, reason)) is category
 
 
+@pytest.mark.parametrize(
+    "status, category",
+    [
+        (401, ErrorCategory.AUTH),
+        (403, ErrorCategory.AUTH),
+        (429, ErrorCategory.RATE_LIMIT),
+        (400, ErrorCategory.CONFIG),
+        (404, ErrorCategory.CONFIG),
+        # B12: a 5xx handshake used to fall through to generic NETWORK.
+        (500, ErrorCategory.SERVER_DISCONNECT),
+        (502, ErrorCategory.SERVER_DISCONNECT),
+        (503, ErrorCategory.SERVER_DISCONNECT),
+    ],
+)
+def test_handshake_status_codes_are_classified(status, category):
+    from types import SimpleNamespace
+
+    from medical_stt.stt.deepgram_provider import classify_deepgram_exception
+
+    exc = websockets_exceptions.InvalidStatus(SimpleNamespace(status_code=status))
+    assert classify_deepgram_exception(exc) is category
+
+
 def test_undecodable_audio_is_not_retried():
     """`1008 DATA-0000` means the audio cannot be decoded with the configured
     encoding/sample rate. Reconnecting with the same settings would loop
@@ -157,6 +180,57 @@ def test_a_close_frame_reaches_the_error_message_and_the_log(monkeypatch, caplog
     assert errors[0].category is ErrorCategory.SERVER_DISCONNECT
     assert "1011 NET-0001" in str(errors[0])
     assert any("1011 NET-0001" in record.getMessage() for record in caplog.records)
+
+
+def test_one_disconnect_emits_exactly_one_error(monkeypatch):
+    """B8: the SDK fires ERROR then CLOSE for a single disconnect. That
+    used to surface two errors -- the classified one and a generic
+    SERVER_DISCONNECT from the CLOSE handler -- and correctness hung on
+    the consumer reading `errors[0]`."""
+    from deepgram.core.events import EventType
+
+    _provider, connection, _captured, _events, errors = _started_provider(monkeypatch)
+    connection.handlers[EventType.ERROR](_closed(1008, "DATA-0000"))
+    connection.handlers[EventType.CLOSE](None)
+
+    assert len(errors) == 1, "one disconnect, one terminal error"
+    assert errors[0].category is ErrorCategory.CONFIG, "the classified error is the one that surfaces"
+
+    # A second ERROR on the same connection is likewise not a new failure.
+    connection.handlers[EventType.ERROR](_closed(1011, "NET-0001"))
+    assert len(errors) == 1
+
+
+def test_a_close_only_data_close_is_still_a_config_error(monkeypatch):
+    """B9: when no ERROR event precedes CLOSE, the close frame must be
+    read off the transport -- a 1008/DATA-* close by that path is a
+    configuration fault, not a retryable disconnect."""
+    from types import SimpleNamespace
+
+    from deepgram.core.events import EventType
+
+    _provider, connection, _captured, _events, errors = _started_provider(monkeypatch)
+    connection._websocket = SimpleNamespace(close_code=1008, close_reason="DATA-0000")
+    connection.handlers[EventType.CLOSE](None)
+
+    assert len(errors) == 1
+    assert errors[0].category is ErrorCategory.CONFIG
+    assert errors[0].category.is_retryable is False
+    assert "1008 DATA-0000" in str(errors[0])
+
+
+def test_a_close_only_clean_close_is_a_retryable_disconnect(monkeypatch):
+    from types import SimpleNamespace
+
+    from deepgram.core.events import EventType
+
+    _provider, connection, _captured, _events, errors = _started_provider(monkeypatch)
+    connection._websocket = SimpleNamespace(close_code=1000, close_reason="")
+    connection.handlers[EventType.CLOSE](None)
+
+    assert len(errors) == 1
+    assert errors[0].category is ErrorCategory.SERVER_DISCONNECT
+    assert errors[0].category.is_retryable is True
 
 
 def test_a_data_close_stops_the_session_as_a_config_error(monkeypatch):
@@ -280,7 +354,25 @@ def test_connection_is_tagged_with_the_device_and_host_session(monkeypatch):
     params = captured["connect"]
     assert params["tag"] == ["ward-7-pc-03"]
     assert params["extra"] == ["session_id:0123456789abcdef0123456789abcdef"]
-    assert "mip_opt_out" in params and params["mip_opt_out"] is None, "Deepgram's default unless opted out"
+    # B11: unset optional parameters are OMITTED, never sent as None --
+    # what the SDK's query encoder does with None is not ours to rely on.
+    assert "mip_opt_out" not in params, "Deepgram's default unless opted out"
+    assert "replace" not in params
+
+
+def test_replace_is_sent_only_when_replacements_are_configured(monkeypatch):
+    from medical_stt.stt.deepgram_provider import DeepgramProvider
+
+    captured: dict = {}
+    connection = _FakeConnection()
+    _install_fake_client(monkeypatch, connection, captured)
+    provider = DeepgramProvider(
+        Settings(host_url="https://stt.example.com", host_secret="secret"),
+        asr_replacements=["اینترنشنال:international"],
+        token_provider=lambda: "short-lived-token",
+    )
+    provider.start(lambda _e: None, lambda _e: None)
+    assert captured["connect"]["replace"] == ["اینترنشنال:international"]
 
 
 def test_no_device_id_means_no_tag(monkeypatch):

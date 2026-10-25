@@ -36,6 +36,63 @@ def _valid_settings(**overrides) -> Settings:
     return Settings(**base)
 
 
+def test_low_host_timeout_warns_but_stays_valid(caplog):
+    """B14: a host_timeout under ~8s starves the readiness budget (host
+    grant ~7s worst case + the SDK's unconfigurable ~10s handshake, over
+    a fixed margin in app.py). Legal, but worth one loud log line."""
+    with caplog.at_level("WARNING", logger="medical_stt.config"):
+        errors = validate_settings(_valid_settings(host_timeout_seconds=5.0))
+    assert errors == []
+    assert any("host_timeout_seconds" in record.getMessage() for record in caplog.records)
+
+    caplog.clear()
+    with caplog.at_level("WARNING", logger="medical_stt.config"):
+        assert validate_settings(_valid_settings(host_timeout_seconds=10.0)) == []
+    assert not caplog.records
+
+
+def test_first_run_template_write_is_atomic(monkeypatch, tmp_path):
+    """B17: the template was written with a bare write_text, so a crash
+    mid-write left a partial settings file for the next start."""
+    from medical_stt import config
+
+    monkeypatch.setenv("MEDICALSTT_APP_DATA_DIR", str(tmp_path))
+
+    def fail_replace(*_args):
+        raise OSError("simulated crash during the write")
+
+    monkeypatch.setattr(config.os, "replace", fail_replace)
+    with pytest.raises(OSError):
+        config.initialize_user_config()
+    assert not config.user_settings_path().exists(), "no partial file may be left behind"
+    assert not list(tmp_path.glob(".settings-*.tmp")), "the temp file must be cleaned up"
+
+
+def test_dpapi_failure_during_save_is_a_config_error(monkeypatch, tmp_path):
+    """B16: save_host_credentials caught only OSError, so a DPAPI failure
+    (SecretStoreError, a RuntimeError) escaped raw instead of surfacing
+    as the documented ConfigError partial outcome."""
+    from medical_stt import config
+    from medical_stt.security import SecretStoreError
+
+    monkeypatch.setenv("MEDICALSTT_APP_DATA_DIR", str(tmp_path))
+    config.initialize_user_config()
+    original = config.user_settings_path().read_bytes()
+
+    class _FailingStore:
+        def __init__(self, _path):
+            pass
+
+        def save(self, _secret):
+            raise SecretStoreError("DPAPI protect failed")
+
+    monkeypatch.setattr(config, "SecretStore", _FailingStore)
+    with pytest.raises(ConfigError, match="not saved"):
+        config.save_host_credentials("https://stt.example.com", "a-brand-new-secret", "doctor-01")
+    assert config.user_settings_path().read_bytes() == original
+    assert not list(tmp_path.glob(".settings-*.tmp"))
+
+
 def test_valid_settings_pass_validation():
     assert validate_settings(_valid_settings()) == []
 

@@ -27,6 +27,14 @@ def win(monkeypatch):
     backend = module.WindowsBackend()
     state = {"text": "original", "seq": 1, "pastes": 0, "writes": []}
     user.GetForegroundWindow.return_value = 123
+
+    def _foreign_pid(_hwnd, pid):
+        # A live external process by default; B20 refuses pid 0, and the
+        # bare MagicMock used to leave the DWORD at its 0 default.
+        ctypes.cast(pid, ctypes.POINTER(ctypes.wintypes.DWORD)).contents.value = 4242
+        return 1
+
+    user.GetWindowThreadProcessId.side_effect = _foreign_pid
     user.CountClipboardFormats.return_value = 1
     user.IsClipboardFormatAvailable.return_value = True
     user.GetClipboardSequenceNumber.side_effect = lambda: state["seq"]
@@ -134,6 +142,67 @@ def test_diagnostic_expected_target_cannot_be_replaced_by_another_app(win):
     backend._expected_target = 123
     user.GetForegroundWindow.return_value = 456
     assert not backend.paste_text("synthetic text", True, 0)
+    assert not state["writes"]
+    assert not state["pastes"]
+
+
+# -- B19(c): modifier re-press must not leave a logical key stuck ------------
+
+
+def _drive_paste_keystroke(module, backend, user, shift_states):
+    """Run the REAL _send_paste_keystroke with recorded inputs.
+
+    `shift_states` is what GetAsyncKeyState(Shift) returns on successive
+    calls: the sweep first, the re-check second.
+    """
+    sent = []
+
+    def record(inputs):
+        sent.extend(inputs)
+        return True
+
+    backend._send_inputs = record
+    remaining = list(shift_states)
+
+    def key_state(vk):
+        if vk == module.VK_SHIFT and remaining:
+            return remaining.pop(0)
+        return 0
+
+    user.GetAsyncKeyState.side_effect = key_state
+    user.MapVirtualKeyW.return_value = 0
+    assert module.WindowsBackend._send_paste_keystroke(backend) is True
+    return [
+        i for i in sent
+        if i.union.ki.wVk == module.VK_SHIFT and not (i.union.ki.dwFlags & module.KEYEVENTF_KEYUP)
+    ]
+
+
+def test_a_modifier_released_during_paste_is_not_repressed(win):
+    module, backend, user, _ = win
+    # Down at the sweep (so it gets released for a clean Ctrl+V), up by the
+    # re-check: re-pressing it would stick a logical Shift with no key held.
+    re_presses = _drive_paste_keystroke(module, backend, user, [0x8000, 0])
+    assert re_presses == []
+
+
+def test_a_modifier_still_held_is_repressed(win):
+    module, backend, user, _ = win
+    re_presses = _drive_paste_keystroke(module, backend, user, [0x8000, 0x8000])
+    assert len(re_presses) == 1
+
+
+def test_a_target_with_pid_zero_is_refused(win):
+    """B20: a just-destroyed foreground window yields pid 0 (the idle
+    process), which `_target_allowed` used to accept."""
+    _, backend, user, state = win
+
+    def get_pid(hwnd, pid):
+        ctypes.cast(pid, ctypes.POINTER(ctypes.wintypes.DWORD)).contents.value = 0
+        return 1  # a thread id, but no owning process
+
+    user.GetWindowThreadProcessId.side_effect = get_pid
+    assert not backend.paste_text("dictation", True, 0)
     assert not state["writes"]
     assert not state["pastes"]
 

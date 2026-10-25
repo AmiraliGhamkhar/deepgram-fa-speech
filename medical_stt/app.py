@@ -295,7 +295,10 @@ class LiveMedicalSTT:
             return
         if not event.is_final:
             self.latency.mark_first_interim(event.received_at)
-            self.overlay.set_partial(normalize(event.text))
+            # Same 8000-char bound the session callback applies (below):
+            # an interim is display-only, and an unbounded one must not
+            # reach the overlay just because it arrived by this path.
+            self.overlay.set_partial(normalize(event.text[:8000]))
             return
 
         if self._injection_failed:
@@ -369,7 +372,13 @@ class LiveMedicalSTT:
 
         self.injector.reset_partial()
         if self.settings.inject_mode == "type":
-            ok = self.injector.type_text(injected_repr + " ")
+            # The separator only separates: after a newline-terminated
+            # utterance an unconditional " " would start the new line
+            # with a stray leading space. (Paste mode does not need this
+            # check -- TextInjector.paste_text recovers the separator via
+            # _trailing_separator, which already drops it after \n.)
+            separator = "" if injected_repr[-1:].isspace() else " "
+            ok = self.injector.type_text(injected_repr + separator)
         else:
             ok = self.injector.paste_text(injected_repr + " ", add_rtl_mark=True)
         injection_end = time.monotonic()
@@ -633,7 +642,11 @@ class LiveMedicalSTT:
 
         sender: Optional[threading.Thread] = None
         try:
-            deadline = time.monotonic() + s.host_timeout_seconds + 12.0
+            # Margin over the host round trip: worst case is the host's own
+            # grant budget (~7s) plus the SDK's handshake timeout (~10s and
+            # not configurable from here), so 12s could undershoot a slow
+            # but healthy start and report a phantom timeout.
+            deadline = time.monotonic() + s.host_timeout_seconds + 15.0
             while not self._stop.is_set() and not self._shutdown.is_set():
                 if provider.wait_ready(0.05):
                     break

@@ -127,6 +127,98 @@ def test_healthz_returns_ok(host):
     assert response.status_code == 200 and response.json() == {"status": "ok"}
 
 
+def test_a_cancelled_request_still_reconciles_the_metrics(host, monkeypatch):
+    """B2: a client disconnecting mid-grant raised CancelledError (a
+    BaseException) past both counters, breaking the documented invariant
+    session_success_total + session_failures_total == session_starts_total."""
+    import asyncio
+
+    import httpx
+
+    core = importlib.import_module("core")
+    holder: dict = {}
+
+    async def hanging_grant(_self, _api_key, _ttl):
+        holder["started"].set()
+        await asyncio.sleep(60)
+
+    monkeypatch.setattr(core.AsyncGrantClient, "grant", hanging_grant)
+
+    async def drive():
+        holder["started"] = asyncio.Event()
+        transport = httpx.ASGITransport(app=host)
+        async with httpx.AsyncClient(transport=transport, base_url="https://stt.example.com") as client:
+            task = asyncio.create_task(
+                client.post("/v1/session", headers={"Authorization": f"Bearer {SECRET}"}, json={})
+            )
+            await asyncio.wait_for(holder["started"].wait(), timeout=5.0)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    asyncio.run(drive())
+
+    metrics = host.state.metrics
+    assert metrics.counter_value("session_starts_total") == 1
+    assert metrics.counter_value("session_success_total") == 0
+    assert metrics.counter_value("session_failures_total") == 1
+    assert metrics.counter_value(
+        "session_requests_by_client_total", client_id=core.LEGACY_CLIENT_ID, outcome="cancelled"
+    ) == 1
+    assert host.state.inflight.in_flight == 0, "the in-flight slot must be released"
+
+
+def test_openapi_schema_is_not_exposed(host):
+    """B1: docs/redoc were disabled but /openapi.json still enumerated the
+    whole API on a credentialed service."""
+    client = TestClient(host, base_url="https://stt.example.com")
+    assert client.get("/openapi.json").status_code == 404
+    assert client.get("/docs").status_code == 404
+    assert client.get("/redoc").status_code == 404
+
+
+def test_unhandled_500_still_carries_the_security_headers(host, monkeypatch):
+    """B6: the harden middleware re-raises before its header loop, and
+    ServerErrorMiddleware builds the 500 itself -- so error responses
+    shipped without the hardening headers every other response gets."""
+    app_module = importlib.import_module("app")
+
+    async def boom(_settings, _ttl, _client):
+        raise RuntimeError("an unanticipated internal fault")
+
+    monkeypatch.setattr(app_module, "grant_session_async", boom)
+    client = TestClient(host, base_url="https://stt.example.com", raise_server_exceptions=False)
+    response = client.post("/v1/session", headers={"Authorization": f"Bearer {SECRET}"}, json={})
+
+    assert response.status_code == 500
+    for header in ("x-content-type-options", "x-frame-options", "cache-control", "referrer-policy"):
+        assert response.headers.get(header), f"missing {header} on the 500"
+    assert "unanticipated" not in response.text, "no internal detail crosses the wire"
+
+
+def test_legacy_host_explains_why_a_client_id_cannot_authenticate(host):
+    """B5: against a legacy (shared-secret) host, a device that sends
+    X-Client-Id resolves to a registry entry that does not exist, so the
+    CORRECT secret got an opaque 401 and the operator went hunting in the
+    wrong place. The 401 now names the trap."""
+    client = TestClient(host, base_url="https://stt.example.com")
+    response = client.post(
+        "/v1/session",
+        headers={"Authorization": f"Bearer {SECRET}", "X-Client-Id": "doctor-01"},
+        json={},
+    )
+    assert response.status_code == 401
+    assert "client id" in response.json()["detail"]
+
+    # The id is the problem, not the credential: without it the same
+    # secret is accepted...
+    assert _post(client).status_code == 200
+    # ...and a plainly wrong secret still gets the opaque detail (the hint
+    # must not become an oracle for anything else).
+    wrong = client.post("/v1/session", headers={"Authorization": "Bearer nope"}, json={})
+    assert wrong.json()["detail"] == "invalid credentials"
+
+
 def test_wrong_secret_is_rejected(host):
     client = TestClient(host, base_url="https://stt.example.com")
     response = client.post("/v1/session", headers={"Authorization": "Bearer nope"}, json={})
@@ -191,6 +283,37 @@ def test_rate_limit_returns_429_with_retry_after(host, monkeypatch):
     limited = _post(client)
     assert limited.status_code == 429
     assert int(limited.headers["Retry-After"]) >= 1
+
+
+def test_global_rate_limit_does_not_debit_the_client_bucket(host, monkeypatch):
+    """B3: the limiters were checked client-first, so a global 429 still
+    burned a per-client token -- global saturation drained everyone's
+    personal budget on requests that were never going to be served."""
+    core = importlib.import_module("core")
+    app_module = importlib.import_module("app")
+
+    async def fake_grant(_self, _api_key, _ttl):
+        return dict(FAKE_GRANT)
+
+    monkeypatch.setattr(core.AsyncGrantClient, "grant", fake_grant)
+    service = app_module.create_app(
+        core.HostSettings.from_env(
+            {
+                **os.environ,
+                "HOST_GLOBAL_BURST": "1",
+                "HOST_GLOBAL_RATE_LIMIT_REQUESTS": "1",
+                "HOST_CLIENT_BURST": "10",
+                "HOST_CLIENT_RATE_LIMIT_REQUESTS": "1",
+            }
+        )
+    )
+    client = TestClient(service, base_url="https://stt.example.com")
+
+    assert _post(client).status_code == 200  # spends the one global token
+    assert _post(client).status_code == 429  # global ceiling refuses
+
+    bucket = service.state.client_limiter._buckets[f"client:{core.LEGACY_CLIENT_ID}"]
+    assert bucket[0] == 9.0, "only the served request may debit the client bucket"
 
 
 def test_allow_http_serves_plaintext_for_development(monkeypatch):

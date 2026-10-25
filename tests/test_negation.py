@@ -134,6 +134,42 @@ def test_longest_marker_still_wins_after_the_list_grew():
     assert "وجود نداشت"[spans[0][0]:spans[0][1]] == "وجود نداشت"
 
 
+# -- spaced spellings of the می‌verbs (B15) -----------------------------------
+#
+# ASR emits نمی‌شود (ZWNJ), نمیشود (joined) and نمی شود (space) for the same
+# spoken word; normalization folds none of them into another, so the marker
+# list must carry all three or the spaced form silently loses protection.
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "تجویز نمی شود",        # spaced نمی‌شود
+        "MI رد می شود",          # spaced رد می‌شود
+        "قابل انجام نمی شود",
+    ],
+)
+def test_spaced_mi_verb_markers_are_recognized(text):
+    assert contains_negation(text)
+    assert find_negation_spans(text)
+
+
+def test_spaced_marker_is_one_span():
+    text = "تجویز نمی شود"
+    spans = find_negation_spans(text)
+    assert len(spans) == 1
+    assert text[spans[0][0]:spans[0][1]] == "نمی شود"
+
+
+def test_mixed_spellings_produce_non_overlapping_spans():
+    text = "نمی‌شود و نمی شود"
+    spans = find_negation_spans(text)
+    assert len(spans) == 2
+    for a, b in zip(spans, spans[1:], strict=False):
+        assert a[1] <= b[0]
+    assert [text[s:e] for s, e in spans] == ["نمی‌شود", "نمی شود"]
+
+
 def test_negation_inside_a_persian_word_is_not_a_collision():
     """`منفی` contains `نفی`; the longest marker wins, so the span is `منفی`."""
     spans = find_negation_spans("منفی")

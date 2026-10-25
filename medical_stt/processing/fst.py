@@ -245,14 +245,6 @@ def _is_whole_word(text: str, start: int, end: int) -> bool:
     return not _is_word_char(before) and not _is_word_char(after)
 
 
-def _overlaps_any(match: Tuple[int, int, str], ranges: Sequence[Tuple[int, int]]) -> bool:
-    start, end, _ = match
-    for r_start, r_end in ranges:
-        if start < r_end and end > r_start:
-            return True
-    return False
-
-
 def load_rules_from_pairs(pairs: Sequence[Tuple[str, str]]) -> DeterministicFST:
     """Backwards-compatible helper used by older call sites/tests."""
     fst = DeterministicFST()

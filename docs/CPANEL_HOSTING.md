@@ -95,7 +95,10 @@ limits), install one package at a time.
 One identity per clinician device. From the same venv:
 
 ```bash
-cd ~/apps/medical-stt/host
+# From the PARENT directory: `python -m host.provision` needs `host/` on
+# the module path, so running it from inside host/ itself fails with
+# "No module named 'host'".
+cd ~/apps/medical-stt
 
 # Single-clinician (legacy) mode: skip this step, use HOST_SHARED_SECRET.
 # Multi-clinician (recommended for 2+ devices):

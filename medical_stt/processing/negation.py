@@ -37,6 +37,13 @@ NEGATION_MARKERS: Tuple[str, ...] = (
     "منفی است",
     "رد می‌شود",
     "رد میشود",
+    # The spaced spellings of the می‌verbs above. ASR output is inconsistent
+    # about the ZWNJ in می‌شود / نمی‌شود -- joined, ZWNJ and plain space all
+    # occur for the same spoken word, and normalization does not fold them,
+    # so each spelling needs its own marker. A space-containing marker
+    # cannot collide inside a single token, so these need no collision
+    # audit against the vocabulary.
+    "رد می شود",
     "رد شد",
     "رد گردید",
     "شواهدی از",
@@ -51,6 +58,7 @@ NEGATION_MARKERS: Tuple[str, ...] = (
     "نشود",
     "نمی‌شود",
     "نمیشود",
+    "نمی شود",
     "منفی",
     # "Denies" -- `نفی کرد`, `نفی شد`, and the noun-phrase `نفی سابقه` that
     # Persian notes use for "denies a history of". The bare stem covers all of

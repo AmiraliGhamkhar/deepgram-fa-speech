@@ -196,7 +196,12 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
             "site. One clinician is fine; a clinic is not. Provision per-device "
             "credentials (python -m host.provision --count N --out "
             "/secure/host/clients.txt) and set HOST_CLIENTS_FILE. Revoking one "
-            "device also revokes everything else while in this mode.",
+            "device also revokes everything else while in this mode. Devices "
+            "that send X-Client-Id cannot authenticate at all here -- the id "
+            "resolves to a registry entry that does not exist -- so a clinic "
+            "that provisions ids on the clients before setting "
+            "HOST_CLIENTS_FILE on the host sees only 401s; the 401 detail "
+            "names this trap.",
             resolved.client_burst, resolved.client_rate_limit_requests,
             resolved.rate_limit_window_seconds,
         )
@@ -220,6 +225,9 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
         version="2.0.0",
         docs_url=None,   # no interactive docs on a credentialed service
         redoc_url=None,
+        # Without this, /openapi.json stays public and enumerates the whole
+        # API surface even though both doc UIs are disabled.
+        openapi_url=None,
         lifespan=lifespan,
     )
     # Built here rather than in `lifespan` so the app is usable even when a
@@ -287,6 +295,20 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
                 metrics.set_gauge("active_session_requests", active.in_flight)
                 metrics.increment("session_http_outcomes_total", status=outcome)
                 metrics.observe("session_http_latency", time.monotonic() - started)
+
+    @app.exception_handler(Exception)
+    async def unhandled_exception(request: Request, _exc: Exception) -> JSONResponse:
+        """Unhandled 500s carry the security headers too.
+
+        Starlette's ServerErrorMiddleware is the outermost layer and builds
+        the 500 response itself, so the `harden` middleware's re-raise path
+        skipped its own header loop for exactly the responses an incident
+        produces. No exception detail crosses the wire.
+        """
+        log.exception("unhandled host error path=%s", request.url.path)
+        return JSONResponse(
+            {"detail": "internal error"}, status_code=500, headers=dict(_SECURITY_HEADERS)
+        )
 
     @app.get("/healthz")
     async def healthz() -> dict:
@@ -370,8 +392,23 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
                 "rejected unauthenticated session request from %s", peer or "unknown"
             )
             headers = {"Retry-After": str(retry_after)} if retry_after else None
+            detail = "invalid credentials"
+            if x_client_id and not resolved.clients_file:
+                # The un-migrated-deployment trap: this host has exactly one
+                # shared-secret identity, so a presented client id resolves
+                # to a registry entry that does not exist and the correct
+                # secret still 401s. Name the trap so the operator can fix
+                # the deployment instead of rotating a good secret. This
+                # reveals nothing about which ids exist -- in this mode the
+                # answer is "none beyond the shared one" by definition.
+                detail = (
+                    "invalid credentials: this host uses a single shared secret "
+                    "and does not accept a client id (X-Client-Id); clear the "
+                    "device id in the client, or provision per-device "
+                    "identities and set HOST_CLIENTS_FILE"
+                )
             return JSONResponse(
-                {"detail": "invalid credentials"}, status_code=401, headers=headers
+                {"detail": detail}, status_code=401, headers=headers
             )
 
         # Counted only for authenticated callers: brute-force noise must not
@@ -392,6 +429,13 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
             and `client_id` is the *authenticated* id, so the per-client series
             cannot be inflated by fabricated ids -- `Metrics` folds anything
             past `MAX_LABELLED_CLIENTS` into `other` regardless.
+
+            A client that disconnects mid-request surfaces as
+            `asyncio.CancelledError` -- a `BaseException`, so no
+            `except Exception` sees it. The two await points below catch it
+            explicitly, record outcome `cancelled`, and re-raise: the
+            request produced no token, so the invariant counts it as a
+            failure exactly like the refusals.
             """
             metrics.increment("session_failures_total")
             metrics.increment(
@@ -405,9 +449,13 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
             return JSONResponse({"detail": detail}, status_code=status_code, headers=headers)
 
         # -- layered rate limits, keyed on identity, not on the NAT IP ----
-        allowed, retry_after = client_limiter.allow(f"client:{identity.client_id}")
+        # Global first: a request the global ceiling refuses must not also
+        # burn one of the client's own tokens. With the old order, global
+        # saturation drained every client's personal budget on requests
+        # that were never going to be served anyway.
+        allowed, retry_after = global_limiter.allow("global")
         if allowed:
-            allowed, retry_after = global_limiter.allow("global")
+            allowed, retry_after = client_limiter.allow(f"client:{identity.client_id}")
         if not allowed:
             metrics.increment("rate_limited_total")
             log.warning(
@@ -459,6 +507,11 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
         except OverflowError:
             metrics.increment("request_body_rejections_total")
             return refuse(413, "request body too large", "body_too_large")
+        except asyncio.CancelledError:
+            # Client disconnected mid-body: counted, then re-raised so the
+            # cancellation still unwinds normally.
+            record_failure("cancelled")
+            raise
         except Exception:
             return refuse(400, "incomplete request body", "incomplete_body")
         try:
@@ -510,6 +563,16 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
                 exc.status, str(exc), "upstream_error",
                 headers={"Retry-After": str(exc.retry_after)} if exc.retry_after else None,
             )
+        except asyncio.CancelledError:
+            # Client disconnected mid-grant (or the server is shutting
+            # down). `CancelledError` is a BaseException: without this
+            # handler the request vanished from both counters and
+            # success + failures stopped equalling starts.
+            metrics.observe("token_request_latency", time.monotonic() - started)
+            metrics.increment("token_request_failures_total")
+            record_failure("cancelled")
+            log.info("session_cancelled session_id=%s", session_id)
+            raise
         except Exception:  # noqa: BLE001 - the grant path must reconcile
             # `core.grant_session_async` maps every known upstream failure onto
             # `GrantError`, so reaching here means an unexpected internal

@@ -13,7 +13,7 @@ import threading
 from typing import Callable, Optional
 
 from ..processing.bidi import to_display
-from . import dispatch
+from . import colors, dispatch
 
 log = logging.getLogger("medical_stt.ui.overlay")
 _SYSTEM = platform.system().lower()
@@ -27,7 +27,52 @@ except ImportError:
     _TK_AVAILABLE = False
 
 
+# Win32 extended-window-style bits that keep the cursor-following overlay
+# from stealing a click meant for the EMR underneath it. The overlay runs
+# with `-alpha`, i.e. as a layered window on Windows, which is what makes
+# WS_EX_TRANSPARENT take effect for hit-testing.
+_GWL_EXSTYLE = -20
+_WS_EX_NOACTIVATE = 0x08000000
+_WS_EX_TRANSPARENT = 0x00000020
+
+
+def _click_through_style(current: int) -> int:
+    """The extended style with the click-through bits added, none cleared."""
+    return current | _WS_EX_NOACTIVATE | _WS_EX_TRANSPARENT
+
+
+def _apply_click_through(hwnd: int) -> bool:
+    """Best-effort: make the overlay window click-through on Windows.
+
+    Any failure -- non-Windows, no user32 -- leaves the overlay exactly as
+    it was. Cosmetic window behaviour must never take the transcript
+    display down with it. Only ever applied to the overlay; the control
+    window must stay clickable.
+    """
+    if _SYSTEM != "windows" or not hwnd:
+        return False
+    try:
+        import ctypes
+
+        user32 = ctypes.windll.user32  # type: ignore[attr-defined]
+        get_style = user32.GetWindowLongPtrW
+        get_style.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        get_style.restype = ctypes.c_ssize_t
+        set_style = user32.SetWindowLongPtrW
+        set_style.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_ssize_t]
+        set_style.restype = ctypes.c_ssize_t
+        set_style(hwnd, _GWL_EXSTYLE, _click_through_style(int(get_style(hwnd, _GWL_EXSTYLE))))
+        return True
+    except Exception:  # noqa: BLE001 - best-effort only, see docstring
+        log.debug("overlay click-through style not applied")
+        return False
+
+
 def _is_rtl(text: str) -> bool:
+    if not text.strip():
+        # Empty text has no direction; falling through to True right-aligned
+        # the placeholder for no reason.
+        return False
     for ch in text.strip():
         if (
             "\u0600" <= ch <= "\u06ff"
@@ -99,26 +144,33 @@ class TranscriptOverlay:
             except tk.TclError:
                 pass
 
-            border_frame = tk.Frame(self._root, bg="#313244", padx=1, pady=1)
+            border_frame = tk.Frame(self._root, bg=colors.SURFACE, padx=1, pady=1)
             border_frame.pack(fill="both", expand=True)
 
-            inner_frame = tk.Frame(border_frame, bg="#1e1e2e", padx=12, pady=10)
+            inner_frame = tk.Frame(border_frame, bg=colors.BG, padx=12, pady=10)
             inner_frame.pack(fill="both", expand=True)
 
             self._status = tk.Label(
-                inner_frame, text="\u25cf در حال شنیدن...", fg="#a6e3a1", bg="#1e1e2e",
+                inner_frame, text="\u25cf در حال شنیدن...", fg=colors.OK, bg=colors.BG,
                 font=(self._font_family, 9, "bold"), anchor="e", justify="right",
             )
             self._status.pack(fill="x", pady=(0, 4))
 
             self._label = tk.Label(
-                inner_frame, text="...", fg="#cdd6f4", bg="#1e1e2e",
+                inner_frame, text="...", fg=colors.FG, bg=colors.BG,
                 font=(self._font_family, 11), wraplength=self.wraplength,
                 justify="right", anchor="ne",
             )
             self._label.pack(fill="both", expand=True)
 
             self._root.geometry("+100+100")
+            # The overlay follows the cursor, so it can park itself under a
+            # click meant for the EMR. Make it click-through where the OS
+            # allows (Windows); everywhere else this is a no-op.
+            try:
+                _apply_click_through(self._root.winfo_id())
+            except tk.TclError:  # pragma: no cover - window already gone
+                pass
             self._ready.set()
             self._tick_follow()
             self._pump()
@@ -138,7 +190,7 @@ class TranscriptOverlay:
         def render() -> None:
             self._warning = message
             if self._status:
-                self._status.config(text=message, fg="#f9e2af")
+                self._status.config(text=message, fg=colors.WARNING)
         self._ui(render, key="warning")
 
     def _tick_follow(self) -> None:
@@ -188,10 +240,10 @@ class TranscriptOverlay:
             self._label.config(anchor="nw", justify="left")
 
     def set_partial(self, text: str) -> None:
-        self._show(text, text_fg="#cdd6f4", status="\u25cf در حال شنیدن...", status_fg="#a6e3a1")
+        self._show(text, text_fg=colors.FG, status="\u25cf در حال شنیدن...", status_fg=colors.OK)
 
     def set_done(self, text: str) -> None:
-        self._show(text, text_fg="#89b4fa", status="\u2713 ارسال شد؛ درج را بررسی کنید", status_fg="#89b4fa")
+        self._show(text, text_fg=colors.ACCENT, status="\u2713 ارسال شد؛ درج را بررسی کنید", status_fg=colors.ACCENT)
 
     def _show(self, text: str, *, text_fg: str, status: str, status_fg: str) -> None:
         """Render `text` plus its status line from the Tk thread.
@@ -206,16 +258,16 @@ class TranscriptOverlay:
             if self._label:
                 self._label.config(text=display, fg=text_fg)
             if self._status:
-                self._status.config(text=self._warning or status, fg="#f9e2af" if self._warning else status_fg, anchor="e")
+                self._status.config(text=self._warning or status, fg=colors.WARNING if self._warning else status_fg, anchor="e")
 
         self._ui(_)
 
     def set_idle(self) -> None:
         def _() -> None:
             if self._label:
-                self._label.config(text="...", fg="#6c7086", anchor="ne")
+                self._label.config(text="...", fg=colors.IDLE, anchor="ne")
             if self._status and not self._warning:
-                self._status.config(text="\u25cf آماده", fg="#a6adc8", anchor="e")
+                self._status.config(text="\u25cf آماده", fg=colors.MUTED, anchor="e")
 
         self._ui(_)
 
