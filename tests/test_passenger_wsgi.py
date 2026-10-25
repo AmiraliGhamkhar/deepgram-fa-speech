@@ -153,6 +153,65 @@ def test_the_dedicated_loop_thread_is_the_one_serving_requests(probe):
     assert probe["loop_is_running"] is True
 
 
+# B4: a loop thread that never comes up must fail the boot, not hang it.
+# Driven in the child process like the probe above (importing the module
+# here would build the app and start its loop thread in the test runner).
+_TIMEOUT_PROBE = textwrap.dedent(
+    """
+    import json, sys, threading, time
+
+    sys.path.insert(0, %r)
+
+    import passenger_wsgi as pw
+
+
+    class _DeadThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            pass  # the loop thread never runs, so _ready is never set
+
+
+    real_thread = threading.Thread
+    threading.Thread = _DeadThread
+    started = time.monotonic()
+    try:
+        pw._EventLoopThread().start(timeout=0.3)
+        facts = {"raised": False}
+    except RuntimeError as exc:
+        facts = {"raised": True, "message": str(exc)}
+    finally:
+        threading.Thread = real_thread
+    facts["elapsed"] = round(time.monotonic() - started, 2)
+    print(json.dumps(facts))
+    """
+)
+
+
+def test_loop_thread_start_times_out_instead_of_hanging_forever():
+    env = dict(os.environ)
+    env.update(
+        {
+            "DEEPGRAM_API_KEY": "dg_test_key_not_real",
+            "HOST_SHARED_SECRET": "wsgi-probe-secret-" + "x" * 16,
+            "HOST_ALLOW_HTTP": "1",
+            "HOST_METRICS_ADMIN_TOKEN": "",
+            "PYTHONPATH": str(ROOT / "host"),
+        }
+    )
+    env.pop("HOST_CLIENTS_FILE", None)
+    completed = subprocess.run(
+        [sys.executable, "-c", _TIMEOUT_PROBE % str(ROOT / "host")],
+        capture_output=True, text=True, env=env, cwd=str(ROOT), timeout=120, check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    facts = json.loads(completed.stdout.strip().splitlines()[-1])
+    assert facts["raised"] is True
+    assert "did not start" in facts["message"]
+    assert facts["elapsed"] < 10, "must give up promptly, not hang the boot"
+
+
 def test_the_wsgi_response_carries_the_hardening_headers(probe):
     """Security headers must survive the WSGI bridge, not only uvicorn."""
     headers = {name.lower(): value for name, value in probe["healthz_headers"].items()}

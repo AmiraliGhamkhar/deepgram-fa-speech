@@ -68,6 +68,11 @@ except ImportError:  # pragma: no cover - cPanel copies only the host/ dir
     from core import HostSettings
 
 
+#: How long boot waits for the loop thread to come up before failing the
+#: deploy loudly instead of hanging Passenger's import forever.
+_LOOP_START_TIMEOUT_SECONDS = 30.0
+
+
 class _EventLoopThread:
     """One background thread owning one asyncio event loop forever."""
 
@@ -76,7 +81,7 @@ class _EventLoopThread:
         self._ready = threading.Event()
         self._lock = threading.Lock()
 
-    def start(self) -> asyncio.AbstractEventLoop:
+    def start(self, timeout: float = _LOOP_START_TIMEOUT_SECONDS) -> asyncio.AbstractEventLoop:
         with self._lock:
             if self._loop is not None:
                 return self._loop
@@ -89,7 +94,15 @@ class _EventLoopThread:
                 loop.run_forever()
 
             threading.Thread(target=_run, name="asgi-adapter-loop", daemon=True).start()
-            self._ready.wait()
+            if not self._ready.wait(timeout=timeout):
+                # Bounded on purpose: an unbounded wait here hangs the
+                # Passenger import (and with it the whole deploy) forever
+                # if the thread spawn ever fails. Failing fast puts a
+                # traceback in the boot log instead.
+                raise RuntimeError(
+                    f"ASGI event-loop thread did not start within {timeout:.0f}s; "
+                    "refusing to hang the Passenger boot"
+                )
             assert self._loop is not None  # noqa: S101 - set before the event
             return self._loop
 
