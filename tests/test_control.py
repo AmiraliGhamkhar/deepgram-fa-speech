@@ -335,6 +335,12 @@ class _FakeWidget:
     def get(self, *_args):
         return self._text
 
+    def tag_configure(self, name, **kwargs):
+        self.calls.append(("tag_configure", name, kwargs))
+
+    def tag_add(self, name, start, end):
+        self.calls.append(("tag_add", name, start, end))
+
     def clipboard_clear(self):
         self.clipboard = ""
 
@@ -956,3 +962,56 @@ def test_disabled_circle_is_muted_and_posts_a_hint_without_action(monkeypatch):
     window._set_circle_enabled(circle, True)
     circle.bindings['<Return>'](None)
     assert called == [1]
+
+
+@pytest.mark.parametrize('phase', ['starting', 'running', 'stopping', 'saving'])
+def test_settings_show_busy_state_and_reenable_on_idle(monkeypatch, phase):
+    window = _built_window(monkeypatch)
+    setattr(window, '_' + phase, True)
+    window._refresh_settings_state()
+    entries = window._root.find('Entry')
+    assert len(entries) == 3
+    assert all(entry.kwargs['state'] == 'disabled' for entry in entries)
+    for circle in (window._test_circle, window._save_circle):
+        assert circle.kwargs['cursor'] == 'arrow'
+    # Guarded disabled commands preserve the existing A3.3 explanation.
+    window._test_circle.tag_bindings[('action', '<Button-1>')](None)
+    assert window._status.kwargs['text']
+    setattr(window, '_' + phase, False)
+    window._refresh_settings_state()
+    assert all(entry.kwargs['state'] == 'normal' for entry in entries)
+    assert window._save_circle.kwargs['cursor'] == 'hand2'
+
+
+def test_settings_drag_handles_and_entry_alignment(monkeypatch):
+    window = _built_window(monkeypatch)
+    for label in window._root.find('Label'):
+        if label.kwargs.get('text') in ('میزبان (https)', 'کلید مشترک', 'شناسه دستگاه'):
+            assert '<ButtonPress-1>' in label.bindings
+    separator = next(w for w in window._root.find('Frame') if w.kwargs.get('height') == 1)
+    assert '<ButtonPress-1>' in separator.bindings
+    for entry in window._root.find('Entry'):
+        assert '<ButtonPress-1>' not in entry.bindings
+        expected = 'right' if entry.kwargs.get('textvariable') is window._client_id_var else 'left'
+        assert entry.kwargs['justify'] == expected
+        # A toplevel binding must not turn Entry clicks into window drags.
+        window._on_drag_start(SimpleNamespace(widget=entry, x_root=5, y_root=5))
+        assert window._drag_origin is None
+
+
+def test_recovery_text_has_right_justified_tag_and_shared_font(monkeypatch):
+    window = _built_window(monkeypatch)
+    window._show_recovery()
+    popup = window._root.find('Toplevel')[0]
+    text = popup.find('Text')[0]
+    assert ('tag_configure', 'rtl', {'justify': 'right'}) in text.calls
+    assert ('tag_add', 'rtl', '1.0', 'end') in text.calls
+    assert text.kwargs['state'] == 'disabled'
+    assert text.kwargs['font'] == control.fonts.font(popup, 9)
+
+
+def test_status_dot_is_centralized():
+    from pathlib import Path
+    source = Path(control.__file__).read_text()
+    assert control.STATUS_DOT == '●'
+    assert source.count('●') + source.count(r'\u25cf') == 1

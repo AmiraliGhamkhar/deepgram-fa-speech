@@ -124,3 +124,95 @@ Updated pins in this commit:
   behavior unchanged.
 - Added exact requested `test_secondary_buttons_share_the_circle_style` across
   main and popup controls. Existing RTL row and drag pins preserved.
+
+### Phase 2 R3 completion: alignment, busy affordances, drag coverage
+
+Before new regressions: control suite **7 failed, 38 passed**. After:
+**45 passed**, with all original drag/A3 guard pins still green.
+
+- Client id right-justified; URL/secret remain LTR, masked/write-only secret.
+- Settings labels and separator added to drag handles. Existing press-origin
+  math unchanged; toplevel bindtag explicitly ignores events from entries or
+  circles (otherwise Tk bubbles descendant clicks to the root drag binding).
+- Host fields and Save/Test circles visually disable on starting/running/
+  stopping/saving; restore on idle. Test-in-flight disables Test only; Save
+  remains independent (A3.4). Disabled clicks run existing refusal guards to
+  explain why. Recovery stays available for explicit review.
+- Popup uses shared font and a full-range right-justification Text tag (Tk
+  Text has no widget-level justify option), retaining read-only/modal/copy
+  behavior. Single STATUS_DOT constant; Persian status text unchanged.
+- Opaque control and overlay translucency preserved from PR #27.
+
+No existing pins weakened or deleted; new tests cover each remaining delta.
+
+### Final widget-tree acceptance description (headless, not a screenshot)
+
+```
+Tk [opaque, borderless, topmost, shared Persian font, actual-DPI scaling]
+  Frame [BG, padded]
+    Header [draggable]
+      Canvas quit [20x20, ×, hover REC, keyboard focus]
+      Title [10pt bold, right]
+    Status [10pt, right, STATUS_DOT + unchanged phase text]
+    Canvas Start/Stop [72x72, centered, green/red, ON_LIGHT 12pt bold]
+      oval [2px BORDER / REC ring; hover / press fill]
+      text [same click tag]
+      focus oval [dashed, shown only on keyboard focus]
+    Detail [8pt, right]
+    Separator [draggable]
+    Label/Entry host [draggable label; LTR entry]
+    Label/Entry secret [draggable label; masked write-only LTR entry]
+    Label/Entry client id [draggable label; right-justified entry]
+    RTL action row
+      Circle connection [52x52, ↗ + 8pt caption]
+      Circle recovery [52x52, ≡ + 8pt caption]
+      Circle save [52x52, ✓ + 8pt caption]
+Recovery Toplevel [themed, transient, grabbed, Escape closes]
+  Text [shared Persian 9pt, right-justified full-range tag, read-only]
+  Feedback [8pt, right; copy confirmation]
+  RTL row: Circle copy [52x52, ⧉ + caption], Circle clear [52x52, × + caption]
+```
+
+All secondary circles share SURFACE/BORDER hover, .8 dark press, dashed focus,
+50% palette-derived disabled ink/fill and guarded feedback. Canvas geometry is
+square, never stretched; interactive widgets are excluded from dragging.
+
+### Phase 2 full validation (observed)
+
+```
+ruff check .: All checks passed!
+mypy medical_stt host benchmarks: Success: no issues found in 44 source files
+python scripts/scan_secrets.py: clean: no credentials found in the working tree
+note: 1 baseline entry matched nothing (existing scanner advisory)
+```
+
+Full pytest console output:
+........................................................................ [  5%]
+........................................................................ [ 11%]
+........................................................................ [ 17%]
+........................................................................ [ 23%]
+........................................................................ [ 29%]
+........................................................................ [ 35%]
+........................................................................ [ 41%]
+........................................................................ [ 47%]
+........................................................................ [ 53%]
+........................................................................ [ 58%]
+........................................................................ [ 64%]
+..............ss.s...................................................... [ 70%]
+........................................................................ [ 76%]
+........................................................................ [ 82%]
+........................................................................ [ 88%]
+..........................s............................................. [ 94%]
+......................................................................   [100%]
+=============================== warnings summary ===============================
+.venv/lib/python3.11/site-packages/fastapi/testclient.py:1
+  /home/user/deepgram-fa-speech/.venv/lib/python3.11/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1218 passed, 4 skipped, 1 warning in 61.65s (0:01:01)
+
+P0 census rerun: **835 rules, 9 digit-bearing/numeric-span sources, loader OK,
+0 rejected**; **1 raw non-normalized side, 0 parsed non-normalized sides**,
+Arabic-yeh source fires on normalized Persian. Historical P0 before/after
+per-fix evidence remains in the v2 checkpoint; no duplicate P0 work needed.
