@@ -297,6 +297,19 @@ def test_cpanel_doc_does_not_call_the_forwarded_header_the_fix():
     )
 
 
+def test_cpanel_provisioning_command_runs_from_the_parent_directory():
+    """B23: the guide said `cd ~/apps/medical-stt/host` and then
+    `python -m host.provision`, which fails there with "No module named
+    'host'" -- host/ ships no __init__.py, so the package is only
+    importable from its parent. Verified against the real interpreter:
+    the module resolves from the repo root and not from inside host/."""
+    text = CPANEL_DOC.read_text(encoding="utf-8")
+    section = text[text.index("## 5. Provision client identities"):]
+    assert "cd ~/apps/medical-stt\n" in section
+    assert "cd ~/apps/medical-stt/host\n" not in section
+    assert "python -m host.provision" in section
+
+
 def test_deepgram_grant_is_https_only():
     assert "https://api.deepgram.com" in (ROOT / "host" / "core.py").read_text(
         encoding="utf-8"

@@ -74,16 +74,17 @@ class TextInjector:
         restore_clipboard: bool = True,
         paste_settle_seconds: float = 0.12,
     ):
+        #: How long to let the target app consume the clipboard after
+        #: Ctrl+V. A timed wait, not a confirmation (see backend.py).
+        self.paste_settle_seconds = max(0.0, paste_settle_seconds)
         if dry_run and backend is None:
             from .backend import DryRunBackend
 
             backend = DryRunBackend()
-        self.backend = backend or get_default_backend()
+        self.backend = backend or get_default_backend(self.paste_settle_seconds)
         self.dry_run = dry_run
         self.enable_smart_rewrite = enable_smart_rewrite
         self.restore_clipboard = restore_clipboard
-        #: How long to let the target app consume the clipboard after Ctrl+V.
-        self.paste_settle_seconds = max(0.0, paste_settle_seconds)
         self._last_partial: str = ""
         self.last_error: Optional[str] = None
 

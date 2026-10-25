@@ -31,7 +31,11 @@ Correctness notes carried over from the original single-file implementation
 5. The clipboard was overwritten by the next utterance before the target app
    had finished reading it (paste is asynchronous), which produced
    duplicated or missing sentences during fast dictation. Injection now
-   waits for the paste to be consumed before returning/restoring.
+   waits a fixed, configured settle (`paste_settle_seconds`) after the
+   paste keystroke before returning/restoring. There is no API that
+   reports the target actually consuming the paste, so this wait is
+   TIMED, not confirmed: if a slow EMR still races it, raising
+   `paste_settle_seconds` is the remedy.
 6. Backspacing counted Python code points while Windows deletes UTF-16 code
    units, so any non-BMP character erased too little.
 """
@@ -120,14 +124,20 @@ def _build_windows_backend() -> InjectionBackend:
     return WindowsBackend()
 
 
-def _build_fallback_backend() -> InjectionBackend:
+def _build_fallback_backend(paste_settle_seconds: float = 0.12) -> InjectionBackend:
     from ._fallback_backend import FallbackBackend
 
-    return FallbackBackend()
+    return FallbackBackend(paste_settle_seconds=paste_settle_seconds)
 
 
-def get_default_backend() -> InjectionBackend:
-    """Return the appropriate real backend for the current OS."""
+def get_default_backend(paste_settle_seconds: float = 0.12) -> InjectionBackend:
+    """Return the appropriate real backend for the current OS.
+
+    `paste_settle_seconds` matters only to the fallback backend, whose
+    "type" path is secretly a paste and therefore needs the configured
+    settle at construction time; the Windows backend receives it per
+    call.
+    """
     if _SYSTEM == "windows":
         return _build_windows_backend()
-    return _build_fallback_backend()
+    return _build_fallback_backend(paste_settle_seconds)

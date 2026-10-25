@@ -934,6 +934,16 @@ test suite and the Windows self-test before packaging.
   this repository** — see Verification status.
 - The host's rate limiter is per worker process; with multiple workers,
   also enforce limits in the reverse proxy.
+- The host accepts four operational trade-offs, each deliberate and
+  documented in [`host/README.md`](host/README.md): `/metrics` is
+  unauthenticated and unthrottled unless `HOST_METRICS_ADMIN_TOKEN` is
+  set; the failed-auth lockout is keyed on the direct peer, so behind a
+  loopback reverse proxy it is effectively global; revoking a device
+  means editing the registry and restarting the worker (streams already
+  authenticated to Deepgram are unaffected); and the host cannot see
+  Deepgram's per-project stream pool — a handshake 429 from a full pool
+  was counted here as a successfully issued token, so capacity refusal
+  shows up on the client, not in `session_success_total`.
 - No LLM is used in the transcription-correction path, by design; novel
   phrasing outside the explicit rule set is left unchanged rather than
   guessed.

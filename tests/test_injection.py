@@ -6,6 +6,30 @@ from medical_stt.injection.backend import DryRunBackend, FailingBackend
 from medical_stt.injection.text_injector import TextInjector
 
 
+def test_fallback_typed_path_respects_the_configured_settle():
+    """B19(b): on non-Windows the 'type' path is a clipboard paste whose
+    settle was hardcoded to 0, so paste_settle_seconds applied to paste
+    mode but not to type mode."""
+    from medical_stt.injection._fallback_backend import FallbackBackend
+
+    backend = FallbackBackend(paste_settle_seconds=0.33)
+    seen = {}
+    backend.paste_text = lambda text, restore_clipboard, settle_seconds: seen.update(
+        settle=settle_seconds
+    ) or True
+    assert backend.send_unicode_text("سلام") is True
+    assert seen["settle"] == 0.33
+
+
+def test_text_injector_threads_its_settle_into_the_default_backend():
+    import platform
+
+    if platform.system().lower() == "windows":
+        return  # the Windows backend receives the settle per call instead
+    injector = TextInjector(paste_settle_seconds=0.44)
+    assert injector.backend.paste_settle_seconds == 0.44
+
+
 def test_paste_text_uses_backend_and_records_call():
     backend = DryRunBackend()
     injector = TextInjector(backend=backend, restore_clipboard=True, paste_settle_seconds=0.0)

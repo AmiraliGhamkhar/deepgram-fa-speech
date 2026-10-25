@@ -222,6 +222,14 @@ class HostSessionClient:
                 ErrorCategory.AUTH,
                 f"host rejected the shared secret (HTTP {status}) at {host}",
             )
+        if status == 408:
+            # The host (or a proxy in front of it) gave up waiting: a
+            # timeout with a name, not an opaque UNKNOWN.
+            return ProviderError(
+                ErrorCategory.TIMEOUT,
+                f"host request timed out (HTTP 408) at {host}",
+                retry_after=retry_after,
+            )
         if status == 429:
             return ProviderError(
                 ErrorCategory.RATE_LIMIT,

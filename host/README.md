@@ -147,6 +147,15 @@ authentications from one address in a window returns 429. Legitimate
 requests never spend this budget — it is charged only when a request
 actually fails to authenticate.
 
+That budget is keyed on the **direct peer**, not on any forwarded header:
+behind a loopback reverse proxy (Apache/Passenger on the same box) the
+direct peer is the proxy itself, so all failed authentications share the
+one bucket. This is deliberate — a forwarded client address is exactly
+what an attacker forges — but it means that behind such a proxy the
+brute-force lockout is effectively global rather than per-attacker.
+Terminating TLS in the host process itself, or enforcing a per-source
+failure limit at the proxy, restores per-source attribution.
+
 `Retry-After` is returned on every 429, and the client honors it (clamped),
 so a throttled client slows down when told to instead of guessing.
 
@@ -409,6 +418,10 @@ it by giving the key to a client.
 `/metrics` is readable by anyone who can reach the port** — it carries no
 credential and no transcript, but it does disclose traffic volume and the
 registered client count, so set it on any host that is not loopback-only.
+The endpoint is also **not rate-limited**: rendering is cheap (a pass over
+the in-memory counters), so nothing needs the protection, but scrape
+frequency is bounded only by whatever sits in front of the port — one
+more reason to set the token or block the path at the gateway.
 
 Published series — every one of them is a value this process actually
 updates:
@@ -421,7 +434,7 @@ updates:
 | `session_starts_total` | counter | authenticated session requests received |
 | `session_success_total` | counter | tokens issued |
 | `session_failures_total` | counter | authenticated requests that produced no token: rate-limited, malformed body, refused at capacity, or failed upstream |
-| `session_requests_by_client_total` | counter | the same outcomes per device: `{client_id, outcome}` with `outcome` in `ok`, `rate_limited`, `body_too_large`, `body_timeout`, `incomplete_body`, `invalid_request`, `upstream_saturated`, `upstream_error`, `internal_error` |
+| `session_requests_by_client_total` | counter | the same outcomes per device: `{client_id, outcome}` with `outcome` in `ok`, `rate_limited`, `body_too_large`, `body_timeout`, `incomplete_body`, `invalid_request`, `upstream_saturated`, `upstream_error`, `internal_error`, `cancelled` (the client disconnected before a token was minted) |
 
 `session_success_total + session_failures_total == session_starts_total` is the
 invariant every terminal outcome in the route must preserve — a request that

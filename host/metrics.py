@@ -101,7 +101,9 @@ class Metrics:
         self._histograms: Dict[str, Dict[Tuple[Tuple[str, str], ...], _Histogram]] = {}
         self._max_labelled_clients = max(1, max_labelled_clients)
         self._tracked_clients: set = set()
-        self._started_at = time.time()
+        # Monotonic, not wall clock: an NTP step must not make
+        # `host_uptime_seconds` jump or run backwards.
+        self._started_at = time.monotonic()
 
     # -- recording ------------------------------------------------------
 
@@ -177,7 +179,7 @@ class Metrics:
 
     @property
     def uptime_seconds(self) -> float:
-        return max(0.0, time.time() - self._started_at)
+        return max(0.0, time.monotonic() - self._started_at)
 
     def quantiles(self, name: str, quantiles: Iterable[float] = (0.5, 0.95, 0.99)) -> Dict[str, float]:
         """Approximate quantiles from the bucket boundaries.

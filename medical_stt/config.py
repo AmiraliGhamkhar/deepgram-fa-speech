@@ -450,7 +450,19 @@ def initialize_user_config() -> Path:
             "specialty: general\n"
             "host_url: https://stt.example.com\n"
         )
-    target.write_text(header + body, encoding="utf-8")
+    # Atomic, like every other settings write in this module: a crash
+    # mid-write must not leave a truncated user settings file behind for
+    # the next start to choke on.
+    handle, temporary = tempfile.mkstemp(dir=target.parent, prefix=".settings-", suffix=".tmp")
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            stream.write(header + body)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, target)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
     log.info("created user settings template at %s", target)
     return target
 
@@ -510,7 +522,11 @@ def save_host_credentials(host_url: str, host_secret: str, client_id: str | None
             SecretStore(paths.secret_path()).save(host_secret)
             secret_saved = True
         os.replace(temporary, target)
-    except OSError as exc:
+    except (OSError, SecretStoreError) as exc:
+        # SecretStoreError is a RuntimeError (DPAPI failure), not an
+        # OSError: catching only OSError let it escape raw instead of
+        # surfacing as the documented ConfigError partial outcome. Its
+        # message never contains the secret itself.
         detail = "Secret saved, but settings were not replaced; retry saving" if secret_saved else "Settings were not saved"
         raise ConfigError(detail) from exc
     finally:
@@ -614,6 +630,19 @@ def validate_settings(settings: Settings) -> List[str]:
         )
     if not (1.0 <= settings.host_timeout_seconds <= 60.0):
         errors.append("host_timeout_seconds must be between 1 and 60")
+    elif settings.host_timeout_seconds < 8.0:
+        # Legal, but tight: session readiness allows this plus a fixed
+        # margin (app.py) against the host's worst-case grant budget
+        # (~7s: 2s body + grant deadline) and the SDK's own ~10s
+        # handshake timeout, which is not configurable from here. Small
+        # values make Start flake on slow networks with a phantom
+        # "readiness timed out".
+        log.warning(
+            "host_timeout_seconds=%.1fs leaves little room over the host's "
+            "grant budget plus the Deepgram handshake; values of 8s or more "
+            "are recommended (the default is 10s)",
+            settings.host_timeout_seconds,
+        )
     if not (5 <= settings.session_ttl_seconds <= _MAX_SESSION_TTL_SECONDS):
         errors.append(
             f"session_ttl_seconds must be between 5 and {_MAX_SESSION_TTL_SECONDS} "
