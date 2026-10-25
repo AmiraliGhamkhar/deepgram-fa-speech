@@ -96,8 +96,9 @@ Full-suite validation after P0-7: `1071 passed, 4 skipped, 1 warning`;
 ## Remaining acceptance limitations
 
 - This checkpoint is appended incrementally; the latest per-fix section is the
-  authoritative progress marker. All Phase 1 P0, P1 and P2 fixes are complete at this revision.
-  All GUI changes remain outstanding.
+  authoritative progress marker. All Phase 1 P0/P1/P2 fixes and the Phase 2
+  GUI restyle (R2 fonts/DPI, R1 circular controls, R3 RTL/persistent
+  drag/crisp) are complete at this revision.
 - The accepted Starlette test-client warning is preserved; no warning filters
   or lockfile edits were added.
 - Native Windows injection, live microphone and live Deepgram behaviors
@@ -584,3 +585,62 @@ present `("-alpha", 0.97)` call, the header pin on `side="left"` title,
 pin on a missing `ui_state.json` (`4 failed, 31 passed`). After: `54 passed`
 across the three UI test modules; full suite `1162 passed, 4 skipped,
 1 warning`; ruff, mypy and secret scan clean. Deliberately updated pins: none.
+
+## Final validation (end of Phase 2)
+
+Commands used `.venv/bin/` tools installed from the existing hash-locked dev
+and host requirements. No dependency or lockfile changed.
+
+### pytest tests/ -q
+
+```text
+1162 passed, 4 skipped, 1 warning in 53.19s
+```
+
+The single warning is the accepted locked Starlette/httpx test-client
+deprecation, preserved unfiltered.
+
+### ruff check .
+
+```text
+All checks passed!
+```
+
+### mypy medical_stt host benchmarks
+
+```text
+Success: no issues found in 44 source files
+```
+
+### python scripts/scan_secrets.py
+
+```text
+clean: no credentials found in the working tree
+note: 1 baseline entry/entries matched nothing -- the history looks scrubbed. Remove them from secret_scan_baseline.txt so the check stays meaningful.
+```
+
+## Final deliverable index
+
+- Per-bug before/after test evidence: every table row and detail section above
+  (P0-7..P0-14, the P1 batch, the P2 batch). Commits `783e7f7`, `13c8f25`,
+  `65aa762`, `69568a0`, `6179094`, `7c183dd`, `2f8b6be`, `8c56329`, `313687b`,
+  `571dfa5`.
+- Per-GUI-change evidence: widget-tree descriptions for R2 `6ea4264`, R1
+  `2c4a73f` and R3 `b85c435` in the Phase 2 sections above. This Linux
+  sandbox has no display, so screenshots could not be captured; the fake-Tk
+  harness extracts the real widget tree (kinds, sizes, pack sides, canvas
+  items, bindings, fonts) on every run instead. Windows visual verification
+  remains in the release checklist (`docs/PERFORMANCE_FIXES.md`).
+- Deliberately updated pins (complete list for this round):
+  `test_digit_in_latin_term_without_numeric_span_needs_no_opt_in` replaced by
+  `test_letter_glued_digit_requires_numeric_opt_in`;
+  `test_numeric_accuracy_requires_the_exact_clinical_expression` (1/2 -> 2/3);
+  renamed `test_base_direction_uses_persian_majority_when_latin_leads`;
+  `test_low_confidence_medical_term_is_preserved` (span-level ICU injection);
+  `test_accumulator_has_a_size_budget` (limit resets, full-text exception);
+  `test_fallback_typed_path_respects_the_configured_settle` (restore=True);
+  `test_client_id_row_matches_the_other_settings_rows` (shared font helper);
+  `test_secondary_buttons_share_the_flat_style` replaced by
+  `test_secondary_actions_are_52px_circles_in_rtl_order`. No security,
+  threading, clipboard, reconnect, drag-math, status-string or A3.x guard pin
+  was weakened.
