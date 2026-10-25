@@ -148,3 +148,32 @@ def apply_tk_scaling(root: Any, dpi_loader: Optional[Any] = None) -> None:
             root.tk.call("tk", "scaling", dpi / 72.0)
     except Exception as exc:
         log.debug("Tk DPI scaling not applied (%s)", type(exc).__name__)
+
+
+def dpi_scale_factor(root: Any, dpi_loader: Optional[Any] = None) -> float:
+    """Pixel scale for Canvas geometry: actual window DPI over the 96-DPI
+    design baseline, clamped to [1.0, 3.0].
+
+    `apply_tk_scaling` already scales *fonts* (Tk points), but Canvas
+    circles are built from raw pixels, so without this factor the text grew
+    at 125-150% display scaling while its circle stayed 72 physical pixels.
+    One factor per window, computed once at build time and shared by every
+    circle in it. Off Windows -- and on any DPI query failure -- the factor
+    is exactly 1.0 and geometry is the historical pixel values.
+    """
+    if _SYSTEM != "windows":
+        return 1.0
+    try:
+        dpi = float((dpi_loader or _window_dpi)(root))
+    except Exception as exc:  # noqa: BLE001 - geometry must never break the UI
+        log.debug("DPI scale factor unavailable (%s)", type(exc).__name__)
+        return 1.0
+    if not 48 <= dpi <= 768:
+        return 1.0
+    return min(3.0, max(1.0, dpi / 96.0))
+
+
+def scaled_pixels(value: float, factor: float) -> int:
+    """One 96-DPI design length at `factor`, rounded and never zero."""
+    clamped = min(3.0, max(1.0, float(factor)))
+    return max(1, round(value * clamped))
