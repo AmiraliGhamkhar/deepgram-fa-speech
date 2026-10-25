@@ -419,8 +419,8 @@ def test_set_button_repaints_the_circle(monkeypatch):
     window = _built_window(monkeypatch)
     canvas = window._toggle
 
-    window._set_button("توقف", control._ACCENT)
-    assert canvas.items[window._toggle_oval]["fill"] == control._ACCENT
+    window._set_button("توقف", control._REC)
+    assert canvas.items[window._toggle_oval]["fill"] == control._REC
     assert canvas.items[window._toggle_text]["text"] == "توقف"
 
     window._set_button("شروع", control._OK)
@@ -773,9 +773,10 @@ def test_recovery_popup_is_themed_modal_and_confirms_copy(monkeypatch):
     assert text.kwargs["insertbackground"] == colors.FG
     assert "متن بازیابی نمونه" in text.get()
 
-    copy_button = next(b for b in popup.find("Button") if b.kwargs.get("text") == "کپی با تأیید شما")
-    assert copy_button.kwargs["bg"] == colors.SURFACE, "popup buttons use the same flat factory"
-    copy_button.kwargs["command"]()
+    copy_button = next(b for b in popup.find("Canvas") if "کپی" in _circle_texts(b))
+    assert copy_button.kwargs["width"] == control._SECONDARY_DIAMETER
+    assert popup.clipboard == "", "opening recovery must not copy PHI"
+    copy_button.tag_bindings[("action", "<Button-1>")](None)
     assert "متن بازیابی نمونه" in popup.clipboard
     feedback = [w for w in popup.find("Label") if w.kwargs.get("text") == "کپی شد"]
     assert feedback, "copy() must say so instead of being a silent no-op"
@@ -906,3 +907,52 @@ def test_window_position_is_saved_on_close(monkeypatch, tmp_path):
     window._destroy_window()
     saved = (tmp_path / "ui_state.json").read_text(encoding="utf-8").replace(" ", "")
     assert '"x":640' in saved and '"y":480' in saved
+
+
+def test_circle_press_release_focus_and_recording_ring(monkeypatch):
+    window = _built_window(monkeypatch)
+    canvas = window._toggle
+    oval = canvas.items[window._toggle_oval]
+    assert oval['outline'] == control._BORDER and oval['width'] == 2
+    # Use a harmless secondary command to inspect the shared press machinery.
+    other = window._circle_button(window._root, 52, lambda: None, text='آزمایش', fill=control._SURFACE)
+    body = next(i for i, item in other.items.items() if item['kind'] == 'oval')
+    other.tag_bindings[('toggle', '<Button-1>')](None)
+    assert other.items[body]['fill'] == _darken(control._SURFACE, .8)
+    other.bindings['<ButtonRelease-1>'](None)
+    assert other.items[body]['fill'] == control._SURFACE
+    focus = next(i for i, item in canvas.items.items() if item.get('dash'))
+    canvas.bindings['<FocusIn>'](None)
+    assert canvas.items[focus]['state'] == 'normal'
+    canvas.bindings['<FocusOut>'](None)
+    assert canvas.items[focus]['state'] == 'hidden'
+    window._set_button('توقف', control._REC)
+    assert oval['fill'] == control._REC and oval['outline'] == control._REC
+
+
+def test_secondary_buttons_share_the_circle_style(monkeypatch):
+    window = _built_window(monkeypatch)
+    window._show_recovery()
+    popup = window._root.find('Toplevel')[0]
+    circles = window._action_row.children + popup.find('Canvas')
+    assert len(circles) == 5
+    for canvas in circles:
+        assert canvas.kwargs['width'] == canvas.kwargs['height'] == 52
+        assert len(_circle_texts(canvas)) == 2, 'glyph and caption use one uniform treatment'
+        assert '<ButtonRelease-1>' in canvas.bindings
+        assert '<FocusIn>' in canvas.bindings
+        assert '<B1-Motion>' not in canvas.bindings
+
+
+def test_disabled_circle_is_muted_and_posts_a_hint_without_action(monkeypatch):
+    window = _built_window(monkeypatch)
+    called = []
+    circle = window._circle_button(window._root, 52, lambda: called.append(1))
+    window._set_circle_enabled(circle, False)
+    assert circle.kwargs['cursor'] == 'arrow'
+    circle.tag_bindings[('toggle', '<Button-1>')](None)
+    assert not called
+    assert window._status.kwargs['text']
+    window._set_circle_enabled(circle, True)
+    circle.bindings['<Return>'](None)
+    assert called == [1]

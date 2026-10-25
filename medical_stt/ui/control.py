@@ -129,6 +129,7 @@ class ControlWindow:
         self._toggle_text: Optional[int] = None
         self._toggle_color: str = _OK
         self._toggle_hover = False
+        self._circle_states: dict[Any, dict[str, Any]] = {}
         self._action_row: Optional["tk.Frame"] = None
         self._quit: Optional["tk.Canvas"] = None
         self._url_var: Optional["tk.StringVar"] = None
@@ -316,15 +317,15 @@ class ControlWindow:
         # first action sits at the right edge, reading order follows Persian.
         self._action_row = tk.Frame(inner, bg=_BG)
         self._action_row.pack(fill="x", pady=(8, 0))
-        for label, command in (
-            ("بررسی\nاتصال", self._test_connection),
-            ("متن\nبازیابی", self._show_recovery),
-            ("ذخیره\nتنظیمات", self._on_save_settings),
+        for label, command, glyph in (
+            ("بررسی\nاتصال", self._test_connection, "↗"),
+            ("متن\nبازیابی", self._show_recovery, "≡"),
+            ("ذخیره\nتنظیمات", self._on_save_settings, "✓"),
         ):
             circle = self._circle_button(
                 self._action_row, _SECONDARY_DIAMETER, command,
                 text=label, fill=_SURFACE, hover_fill=_BORDER, text_fill=_FG,
-                font=fonts.font(root, 8, "bold"), tag="action",
+                font=fonts.font(root, 8), tag="action", glyph=glyph, on_disabled=command,
             )
             circle.pack(side="right", padx=4)
 
@@ -473,7 +474,7 @@ class ControlWindow:
         self._starting = True
         self._start_done.clear()
         self._set_status("● در حال اتصال...", _MUTED)
-        self._set_button("توقف", _ACCENT)
+        self._set_button("توقف", _REC)
 
         def prepare() -> None:
             error = ""
@@ -541,93 +542,109 @@ class ControlWindow:
         else:
             self._set_status("\u25cf آماده", _MUTED, getattr(self._controller, "health", {}).get("warning", ""))
 
-    def _flat_button(self, parent: Any, text: str, command: Callable[[], None]) -> "tk.Button":
-        """One flat dark button style (now used by the recovery dialog only).
-
-        `bd=0`/`relief="flat"` drops the raised system chrome, and the
-        hover swap (surface -> border colour) is the only motion -- no
-        animation machinery for a settings palette.
-        """
-        button = tk.Button(
-            parent, text=text, command=command, bg=_SURFACE, fg=_FG,
-            activebackground=_BORDER, activeforeground=_FG, relief="flat",
-            font=fonts.font(parent, 9), cursor="hand2", bd=0, pady=4, padx=6,
-        )
-        button.bind("<Enter>", lambda _e: button.config(bg=_BORDER))
-        button.bind("<Leave>", lambda _e: button.config(bg=_SURFACE))
-        return button
-
     def _circle_button(
-        self,
-        parent: Any,
-        diameter: int,
-        command: Callable[[], None],
-        *,
-        text: str = "شروع",
-        fill: str = _OK,
-        text_fill: str = _ON_LIGHT,
-        font: Optional[tuple] = None,
-        tag: str = "toggle",
-        hover_fill: Optional[str] = None,
-        remember: bool = False,
+        self, parent: Any, diameter: int, command: Callable[[], None], *,
+        text: str = "شروع", fill: str = _OK, text_fill: str = _ON_LIGHT,
+        font: Optional[tuple] = None, tag: str = "toggle",
+        hover_fill: Optional[str] = None, remember: bool = False,
+        glyph: str = "", on_disabled: Optional[Callable[[], None]] = None,
     ) -> "tk.Canvas":
-        """Build one circular control on a Canvas (GUI R1 sizes).
+        """One Canvas circle implementation for primary, secondary and quit.
 
-        A Canvas (not a styled tk.Button) is the only dependency-free way
-        to get a real circle out of Tkinter. The canvas background is the
-        window background so no rectangular halo shows around the oval;
-        the oval and its label share one tag, which is the click target.
-        Deliberately NOT part of the drag-binding widgets in `_build`:
-        a press here must run its command, never start a window drag.
-
-        The Start/Stop toggle passes `remember=True` so `_paint_toggle`
-        keeps owning its recolors (state changes with the session); the
-        static circles recolor inline on hover only.
+        Oval, caption and optional glyph share the click tag. A click takes
+        focus and activates; press/release and hover only recolor, with no
+        animation. The dashed focus ring is independent of the 2px state ring.
+        Disabled controls retain guarded feedback, never silently eat a click.
+        All painting is called exclusively by the Tk/mailbox thread.
         """
-        canvas = tk.Canvas(
-            parent, width=diameter, height=diameter, bg=_BG,
-            highlightthickness=0, cursor="hand2", takefocus=1,
-        )
-        pad = 2
-        oval = canvas.create_oval(
-            pad, pad, diameter - pad, diameter - pad,
-            fill=fill, outline=fill, tags=(tag,),
-        )
+        canvas = tk.Canvas(parent, width=diameter, height=diameter, bg=_BG,
+                           highlightthickness=0, cursor="hand2", takefocus=1)
+        oval = canvas.create_oval(2, 2, diameter - 2, diameter - 2,
+                                  fill=fill, outline=_BORDER, width=2, tags=(tag,))
         label = canvas.create_text(
-            diameter / 2, diameter / 2, text=text, fill=text_fill,
-            font=font or fonts.font(parent, 12, "bold"), tags=(tag,),
-            width=max(8, diameter - 10), justify="center",
+            diameter / 2, diameter * .67 if glyph else diameter / 2,
+            text=text, fill=text_fill, font=font or fonts.font(parent, 12, "bold"),
+            tags=(tag,), width=max(8, diameter - 10), justify="center",
         )
-        canvas.tag_bind(tag, "<Button-1>", lambda _e: command())
+        labels = [label]
+        if glyph:
+            labels.append(canvas.create_text(diameter / 2, diameter * .28, text=glyph,
+                          fill=text_fill, font=fonts.font(parent, 11), tags=(tag,)))
+        focus = canvas.create_oval(1, 1, diameter - 1, diameter - 1, fill="",
+                                  outline=_ACCENT, width=1, dash=(2, 2), state="hidden")
+        self._circle_states[canvas] = dict(
+            oval=oval, labels=labels, focus=focus, fill=fill, text_fill=text_fill,
+            hover_fill=hover_fill, hover=False, pressed=False, enabled=True,
+            primary=remember,
+        )
+
+        def activate(_event: object = None) -> None:
+            if self._circle_states[canvas]["enabled"]:
+                command()
+            elif on_disabled is not None:
+                on_disabled()
+            else:
+                self._set_status("● برای ادامه، ابتدا عملیات جاری را متوقف کنید", _MUTED)
+
+        def press(_event: object) -> None:
+            canvas.focus_set()
+            self._circle_states[canvas]["pressed"] = True
+            self._paint_circle(canvas)
+            activate()
+
+        def release(_event: object) -> None:
+            self._circle_states[canvas]["pressed"] = False
+            self._paint_circle(canvas)
+
+        def hover(entered: bool) -> None:
+            self._circle_states[canvas]["hover"] = entered
+            if not entered:
+                self._circle_states[canvas]["pressed"] = False
+            if remember:
+                self._toggle_hover = entered
+            self._paint_circle(canvas)
+
+        canvas.tag_bind(tag, "<Button-1>", press)
+        canvas.tag_bind(tag, "<Enter>", lambda _e: hover(True))
+        canvas.tag_bind(tag, "<Leave>", lambda _e: hover(False))
+        canvas.bind("<ButtonRelease-1>", release)
+        canvas.bind("<FocusIn>", lambda _e: canvas.itemconfig(focus, state="normal"))
+        canvas.bind("<FocusOut>", lambda _e: canvas.itemconfig(focus, state="hidden"))
+        canvas.bind("<Destroy>", lambda _e: self._circle_states.pop(canvas, None))
+        canvas.bind("<Return>", activate)
+        canvas.bind("<space>", activate)
         if remember:
-            canvas.tag_bind(tag, "<Enter>", self._on_toggle_hover)
-            canvas.tag_bind(tag, "<Leave>", self._on_toggle_leave)
-            self._toggle_oval = oval
-            self._toggle_text = label
-        else:
-            hover = hover_fill or _darken(fill)
-
-            def on_enter(_event: object, c: Any = canvas, o: int = oval, h: str = hover) -> None:
-                c.itemconfig(o, fill=h, outline=h)
-
-            def on_leave(_event: object, c: Any = canvas, o: int = oval, f: str = fill) -> None:
-                c.itemconfig(o, fill=f, outline=f)
-
-            canvas.tag_bind(tag, "<Enter>", on_enter)
-            canvas.tag_bind(tag, "<Leave>", on_leave)
-        # Clicking also takes keyboard focus, so Return/Space work after a
-        # mouse press without a separate Tab.
-        canvas.bind("<Button-1>", lambda _e: canvas.focus_set())
-        canvas.bind("<Return>", lambda _e: command())
-        canvas.bind("<space>", lambda _e: command())
+            self._toggle_oval, self._toggle_text = oval, label
         return canvas
 
+    def _paint_circle(self, canvas: Any) -> None:
+        state = self._circle_states[canvas]
+        fill = state["fill"]
+        if not state["enabled"]:
+            fill = colors.blend(fill, _BG)
+        elif state["pressed"]:
+            fill = _darken(fill, .8)
+        elif state["hover"]:
+            fill = state["hover_fill"] or _darken(fill)
+        ring = _REC if state["primary"] and state["fill"] == _REC else _BORDER
+        canvas.itemconfig(state["oval"], fill=fill, outline=ring)
+        ink = state["text_fill"] if state["enabled"] else colors.blend(state["text_fill"], _BG)
+        for label in state["labels"]:
+            canvas.itemconfig(label, fill=ink)
+
+    def _set_circle_enabled(self, canvas: Any, enabled: bool) -> None:
+        self._circle_states[canvas]["enabled"] = enabled
+        self._circle_states[canvas]["pressed"] = False
+        canvas.config(cursor="hand2" if enabled else "arrow")
+        self._paint_circle(canvas)
+
     def _paint_toggle(self) -> None:
-        """Repaint the circle for the current colour/hover state (Tk thread)."""
-        if self._toggle is None or self._toggle_oval is None:
+        if self._toggle is None:
             return
-        fill = _darken(self._toggle_color) if self._toggle_hover else self._toggle_color
-        self._toggle.itemconfig(self._toggle_oval, fill=fill, outline=fill)
+        state = self._circle_states[self._toggle]
+        state["fill"] = self._toggle_color
+        state["hover"] = self._toggle_hover
+        self._paint_circle(self._toggle)
 
     def _on_toggle_hover(self, _event: object = None) -> None:
         self._toggle_hover = True
@@ -742,8 +759,14 @@ class ControlWindow:
             popup.clipboard_clear()
             popup.clipboard_append(text.get("1.0", "end-1c"))
             feedback.config(text="کپی شد")
-        self._flat_button(popup, "کپی با تأیید شما", copy).pack(fill="x", pady=(4, 0))
+        actions = tk.Frame(popup, bg=_BG)
+        actions.pack(anchor="e", pady=4)
+        self._circle_button(actions, _SECONDARY_DIAMETER, copy, text="کپی", glyph="⧉",
+                            fill=_SURFACE, hover_fill=_BORDER, text_fill=_FG,
+                            font=fonts.font(popup, 8), tag="action").pack(side="right", padx=4)
         def clear() -> None:
             getattr(self._controller, "clear_recovery", lambda: None)()
             popup.destroy()
-        self._flat_button(popup, "پاک کردن متن بازیابی", clear).pack(fill="x", pady=(4, 0))
+        self._circle_button(actions, _SECONDARY_DIAMETER, clear, text="پاک‌کردن", glyph="×",
+                            fill=_SURFACE, hover_fill=_BORDER, text_fill=_FG,
+                            font=fonts.font(popup, 8), tag="action").pack(side="right", padx=4)

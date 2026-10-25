@@ -102,3 +102,25 @@ GetDpiForWindow with Tk's pixels-per-inch fallback, scaling = DPI/72.
 Before: two new scaling tests failed with AttributeError (missing helper).
 After: fonts/control/overlay suites 57 passed. Fake-DLL awareness pin also
 passes; existing before-Tk ordering test preserved. No existing pins changed.
+
+### Phase 2 R1 completion: uniform circle mechanics
+
+Before new regressions: control suite **3 failed, 35 passed**. After:
+**38 passed**; ruff/mypy clean.
+
+All five secondary actions (including recovery copy/clear) now use the same
+52px Canvas helper, with a glyph above an 8pt caption. Primary remains 72px,
+quit 20px. One reusable painter owns hover, .8 press-darken/release restore,
+2px outer state ring (BORDER / recording REC), independent dashed keyboard
+focus ring and 50% palette-derived disabled colors with arrow cursor.
+Destroyed circles release their Python bookkeeping. Click tags, Return/Space,
+takefocus and no-stretch geometry preserved. Start/Stop is now green/red,
+not green/blue. Disabled clicks post feedback, not commands.
+
+Updated pins in this commit:
+- `test_set_button_repaints_the_circle`: Stop color REC, not ACCENT.
+- `test_recovery_popup_is_themed_modal_and_confirms_copy`: circle copy control,
+  no automatic copy, explicit click still copies and confirms; modal/read-only
+  behavior unchanged.
+- Added exact requested `test_secondary_buttons_share_the_circle_style` across
+  main and popup controls. Existing RTL row and drag pins preserved.
