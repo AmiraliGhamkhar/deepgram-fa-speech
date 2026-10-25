@@ -189,6 +189,24 @@ def test_oversized_interim_is_truncated_before_the_overlay(build_session):
     assert partials and len(partials[0]) == 8000
 
 
+def test_type_mode_adds_no_separator_after_a_newline(build_session):
+    """B21: type mode appended " " unconditionally, so a
+    newline-terminated utterance left a stray leading space on the new
+    line. (Paste mode is covered separately: _trailing_separator drops
+    the separator after \\n already.)"""
+    stt, _ = build_session()
+    stt.settings.inject_mode = "type"
+
+    stt._finalize_utterance(TranscriptEvent("خط اول\n", True))
+    typed = "".join(stt.injector.backend.typed)
+    assert typed.endswith("\n"), f"expected a bare newline ending, got {typed!r}"
+
+    stt.injector.backend.typed.clear()
+    stt._finalize_utterance(TranscriptEvent("بدون خط جدید", True))
+    typed = "".join(stt.injector.backend.typed)
+    assert typed.endswith(" "), "the word separator is still appended mid-line"
+
+
 def test_type_mode_is_honored(build_session):
     stt, _ = build_session()
     stt.settings.inject_mode = "type"

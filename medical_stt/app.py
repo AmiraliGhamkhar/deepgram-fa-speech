@@ -372,7 +372,13 @@ class LiveMedicalSTT:
 
         self.injector.reset_partial()
         if self.settings.inject_mode == "type":
-            ok = self.injector.type_text(injected_repr + " ")
+            # The separator only separates: after a newline-terminated
+            # utterance an unconditional " " would start the new line
+            # with a stray leading space. (Paste mode does not need this
+            # check -- TextInjector.paste_text recovers the separator via
+            # _trailing_separator, which already drops it after \n.)
+            separator = "" if injected_repr[-1:].isspace() else " "
+            ok = self.injector.type_text(injected_repr + separator)
         else:
             ok = self.injector.paste_text(injected_repr + " ", add_rtl_mark=True)
         injection_end = time.monotonic()
