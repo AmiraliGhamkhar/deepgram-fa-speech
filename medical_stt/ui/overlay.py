@@ -27,6 +27,47 @@ except ImportError:
     _TK_AVAILABLE = False
 
 
+# Win32 extended-window-style bits that keep the cursor-following overlay
+# from stealing a click meant for the EMR underneath it. The overlay runs
+# with `-alpha`, i.e. as a layered window on Windows, which is what makes
+# WS_EX_TRANSPARENT take effect for hit-testing.
+_GWL_EXSTYLE = -20
+_WS_EX_NOACTIVATE = 0x08000000
+_WS_EX_TRANSPARENT = 0x00000020
+
+
+def _click_through_style(current: int) -> int:
+    """The extended style with the click-through bits added, none cleared."""
+    return current | _WS_EX_NOACTIVATE | _WS_EX_TRANSPARENT
+
+
+def _apply_click_through(hwnd: int) -> bool:
+    """Best-effort: make the overlay window click-through on Windows.
+
+    Any failure -- non-Windows, no user32 -- leaves the overlay exactly as
+    it was. Cosmetic window behaviour must never take the transcript
+    display down with it. Only ever applied to the overlay; the control
+    window must stay clickable.
+    """
+    if _SYSTEM != "windows" or not hwnd:
+        return False
+    try:
+        import ctypes
+
+        user32 = ctypes.windll.user32  # type: ignore[attr-defined]
+        get_style = user32.GetWindowLongPtrW
+        get_style.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        get_style.restype = ctypes.c_ssize_t
+        set_style = user32.SetWindowLongPtrW
+        set_style.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_ssize_t]
+        set_style.restype = ctypes.c_ssize_t
+        set_style(hwnd, _GWL_EXSTYLE, _click_through_style(int(get_style(hwnd, _GWL_EXSTYLE))))
+        return True
+    except Exception:  # noqa: BLE001 - best-effort only, see docstring
+        log.debug("overlay click-through style not applied")
+        return False
+
+
 def _is_rtl(text: str) -> bool:
     if not text.strip():
         # Empty text has no direction; falling through to True right-aligned
@@ -123,6 +164,13 @@ class TranscriptOverlay:
             self._label.pack(fill="both", expand=True)
 
             self._root.geometry("+100+100")
+            # The overlay follows the cursor, so it can park itself under a
+            # click meant for the EMR. Make it click-through where the OS
+            # allows (Windows); everywhere else this is a no-op.
+            try:
+                _apply_click_through(self._root.winfo_id())
+            except tk.TclError:  # pragma: no cover - window already gone
+                pass
             self._ready.set()
             self._tick_follow()
             self._pump()
