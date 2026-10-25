@@ -22,7 +22,7 @@ import time
 from typing import Any, Callable, Optional, Protocol
 
 from ..config import ConfigError, get_settings, initialize_user_config, save_host_credentials
-from . import dispatch
+from . import colors, dispatch
 
 log = logging.getLogger("medical_stt.ui.control")
 
@@ -35,14 +35,17 @@ try:
 except ImportError:  # pragma: no cover - depends on the Python build
     _TK_AVAILABLE = False
 
-_BG = "#1e1e2e"
-_BORDER = "#45475a"
-_FG = "#cdd6f4"
-_MUTED = "#a6adc8"
-_OK = "#a6e3a1"
-_REC = "#f38ba8"
-_ACCENT = "#89b4fa"
-_ON_LIGHT = "#11111b"
+# The palette itself lives in `colors.py`, shared with the overlay; these
+# aliases keep the widget-building code below short.
+_BG = colors.BG
+_SURFACE = colors.SURFACE
+_BORDER = colors.BORDER
+_FG = colors.FG
+_MUTED = colors.MUTED
+_OK = colors.OK
+_REC = colors.REC
+_ACCENT = colors.ACCENT
+_ON_LIGHT = colors.ON_LIGHT
 
 #: Diameter of the circular Start/Stop button, in pixels.
 _TOGGLE_DIAMETER = 64
@@ -243,26 +246,26 @@ class ControlWindow:
 
         tk.Label(inner, text="میزبان (https)", bg=_BG, fg=_MUTED, anchor="e",
                  font=("Segoe UI", 8)).pack(fill="x")
-        tk.Entry(inner, textvariable=self._url_var, bg="#313244", fg=_FG,
+        tk.Entry(inner, textvariable=self._url_var, bg=_SURFACE, fg=_FG,
                  insertbackground=_FG, relief="flat", justify="left",
                  font=("Segoe UI", 9)).pack(fill="x", pady=(2, 0), ipady=3)
 
         tk.Label(inner, text="کلید مشترک", bg=_BG, fg=_MUTED, anchor="e",
                  font=("Segoe UI", 8)).pack(fill="x", pady=(6, 0))
-        tk.Entry(inner, textvariable=self._secret_var, show="\u2022", bg="#313244",
+        tk.Entry(inner, textvariable=self._secret_var, show="\u2022", bg=_SURFACE,
                  fg=_FG, insertbackground=_FG, relief="flat", justify="left",
                  font=("Segoe UI", 9)).pack(fill="x", pady=(2, 0), ipady=3)
 
         self._client_id_var = tk.StringVar(value=get_settings().host_client_id)
-        tk.Label(inner, text="شناسه دستگاه", bg=_BG, fg=_MUTED).pack(fill="x")
-        tk.Entry(inner, textvariable=self._client_id_var, bg="#313244", fg=_FG).pack(fill="x")
-        tk.Button(inner, text="بررسی اتصال", command=self._test_connection).pack(fill="x")
-        tk.Button(inner, text="متن بازیابی", command=self._show_recovery).pack(fill="x")
+        tk.Label(inner, text="شناسه دستگاه", bg=_BG, fg=_MUTED, anchor="e",
+                 font=("Segoe UI", 8)).pack(fill="x", pady=(6, 0))
+        tk.Entry(inner, textvariable=self._client_id_var, bg=_SURFACE, fg=_FG,
+                 insertbackground=_FG, relief="flat", justify="left",
+                 font=("Segoe UI", 9)).pack(fill="x", pady=(2, 0), ipady=3)
+        self._flat_button(inner, "بررسی اتصال", self._test_connection).pack(fill="x", pady=(8, 0))
+        self._flat_button(inner, "متن بازیابی", self._show_recovery).pack(fill="x", pady=(4, 0))
 
-        save = tk.Button(inner, text="ذخیره تنظیمات", command=self._on_save_settings,
-                         bg="#313244", fg=_FG, activebackground="#45475a",
-                         activeforeground=_FG, relief="flat", font=("Segoe UI", 9),
-                         cursor="hand2", bd=0, pady=4)
+        save = self._flat_button(inner, "ذخیره تنظیمات", self._on_save_settings)
         save.pack(fill="x", pady=(8, 0))
 
         # Drag support: the window is borderless, so there is no title bar
@@ -397,6 +400,22 @@ class ControlWindow:
         else:
             self._set_status("\u25cf آماده", _MUTED, getattr(self._controller, "health", {}).get("warning", ""))
 
+    def _flat_button(self, parent: Any, text: str, command: Callable[[], None]) -> "tk.Button":
+        """One flat dark button style for every secondary control.
+
+        `bd=0`/`relief="flat"` drops the raised system chrome, and the
+        hover swap (surface -> border colour) is the only motion -- no
+        animation machinery for a settings palette.
+        """
+        button = tk.Button(
+            parent, text=text, command=command, bg=_SURFACE, fg=_FG,
+            activebackground=_BORDER, activeforeground=_FG, relief="flat",
+            font=("Segoe UI", 9), cursor="hand2", bd=0, pady=4, padx=6,
+        )
+        button.bind("<Enter>", lambda _e: button.config(bg=_BORDER))
+        button.bind("<Leave>", lambda _e: button.config(bg=_SURFACE))
+        return button
+
     def _circle_button(self, parent: Any, diameter: int, command: Callable[[], None]) -> "tk.Canvas":
         """Build the circular Start/Stop button on a Canvas.
 
@@ -509,15 +528,26 @@ class ControlWindow:
         # Explicit review only: never automatically paste into the focused EMR.
         popup = tk.Toplevel(self._root)
         popup.title("متن بازیابی — فقط در حافظه")
-        text = tk.Text(popup, wrap="word", width=70, height=16)
+        popup.configure(bg=_BG)
+        popup.transient(self._root)
+        try:
+            popup.grab_set()
+        except tk.TclError:  # pragma: no cover - no grab without a viewable window
+            pass
+        popup.bind("<Escape>", lambda _e: popup.destroy())
+        text = tk.Text(popup, wrap="word", width=70, height=16, bg=_SURFACE, fg=_FG,
+                       insertbackground=_FG, relief="flat", font=("Segoe UI", 9))
         text.pack(fill="both", expand=True)
         text.insert("1.0", getattr(self._controller, "recovery_text", lambda: "")())
         text.configure(state="disabled")
+        feedback = tk.Label(popup, text="", bg=_BG, fg=_OK, anchor="e", font=("Segoe UI", 8))
+        feedback.pack(fill="x")
         def copy() -> None:
             popup.clipboard_clear()
             popup.clipboard_append(text.get("1.0", "end-1c"))
-        tk.Button(popup, text="کپی با تأیید شما", command=copy).pack()
+            feedback.config(text="کپی شد")
+        self._flat_button(popup, "کپی با تأیید شما", copy).pack(fill="x", pady=(4, 0))
         def clear() -> None:
             getattr(self._controller, "clear_recovery", lambda: None)()
             popup.destroy()
-        tk.Button(popup, text="پاک کردن متن بازیابی", command=clear).pack()
+        self._flat_button(popup, "پاک کردن متن بازیابی", clear).pack(fill="x", pady=(4, 0))

@@ -391,6 +391,84 @@ def test_circle_click_starts_the_session(monkeypatch):
     assert started.wait(timeout=1.0)
 
 
+# -- A2: one flat theme, centralized colours ----------------------------------
+
+
+def test_no_inline_hex_colours_outside_the_palette_module():
+    """The palette is centralized so the two windows cannot drift apart."""
+    from pathlib import Path
+
+    ui_dir = Path(control.__file__).parent
+    for name in ("control.py", "overlay.py"):
+        source = (ui_dir / name).read_text(encoding="utf-8")
+        assert not re.findall(r"#[0-9a-fA-F]{6}", source), f"{name} still spells a colour inline"
+
+
+def test_secondary_buttons_share_the_flat_style(monkeypatch):
+    from medical_stt.ui import colors
+
+    window = _built_window(monkeypatch)
+    buttons = {b.kwargs.get("text"): b for b in window._root.find("Button")}
+    for label in ("بررسی اتصال", "متن بازیابی", "ذخیره تنظیمات"):
+        button = buttons[label]
+        assert button.kwargs["bg"] == colors.SURFACE
+        assert button.kwargs["relief"] == "flat"
+        assert button.kwargs["bd"] == 0
+        assert "<Enter>" in button.bindings and "<Leave>" in button.bindings
+
+    save = buttons["ذخیره تنظیمات"]
+    save.bindings["<Enter>"](_FakeEvent(0, 0))
+    assert save.kwargs["bg"] == colors.BORDER
+    save.bindings["<Leave>"](_FakeEvent(0, 0))
+    assert save.kwargs["bg"] == colors.SURFACE
+
+
+def test_client_id_row_matches_the_other_settings_rows(monkeypatch):
+    from medical_stt.ui import colors
+
+    window = _built_window(monkeypatch)
+    entry = next(
+        e for e in window._root.find("Entry") if e.kwargs.get("textvariable") is window._client_id_var
+    )
+    assert entry.kwargs["bg"] == colors.SURFACE
+    assert entry.kwargs["insertbackground"] == colors.FG
+    assert entry.pack_kwargs.get("ipady") == 3
+    label = next(w for w in window._root.find("Label") if w.kwargs.get("text") == "شناسه دستگاه")
+    assert label.kwargs["font"] == ("Segoe UI", 8)
+
+
+def test_recovery_popup_is_themed_modal_and_confirms_copy(monkeypatch):
+    from medical_stt.ui import colors
+
+    class _Controller(_StoppedController):
+        def recovery_text(self):
+            return "متن بازیابی نمونه"
+
+        def clear_recovery(self):
+            pass
+
+    window = _built_window(monkeypatch, _Controller())
+    window._show_recovery()
+
+    popup = window._root.find("Toplevel")[0]
+    assert popup.kwargs.get("bg") == colors.BG
+    assert popup.transient_of is window._root
+    assert popup.grabbed is True
+    assert "<Escape>" in popup.bindings
+
+    text = popup.find("Text")[0]
+    assert text.kwargs["bg"] == colors.SURFACE
+    assert text.kwargs["insertbackground"] == colors.FG
+    assert "متن بازیابی نمونه" in text.get()
+
+    copy_button = next(b for b in popup.find("Button") if b.kwargs.get("text") == "کپی با تأیید شما")
+    assert copy_button.kwargs["bg"] == colors.SURFACE, "popup buttons use the same flat factory"
+    copy_button.kwargs["command"]()
+    assert "متن بازیابی نمونه" in popup.clipboard
+    feedback = [w for w in popup.find("Label") if w.kwargs.get("text") == "کپی شد"]
+    assert feedback, "copy() must say so instead of being a silent no-op"
+
+
 def test_close_destroys_the_window_after_a_confirmed_stop():
     window = ControlWindow(_StoppedController())
     fake_root = _FakeRoot()
