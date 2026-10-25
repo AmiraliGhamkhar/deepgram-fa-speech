@@ -164,6 +164,26 @@ def test_drag_without_a_window_or_origin_is_ignored():
     assert window._root.geometry_calls == []
 
 
+def test_drag_keeps_pace_across_five_consecutive_motion_events():
+    """A3.2 acceptance: over five motion events the window tracks the
+    pointer exactly, one absolute move per event, with no compounding."""
+    window = ControlWindow(_StoppedController())
+    root = _FakeWidget()
+    window._root = root  # at +500+300
+
+    window._on_drag_start(_FakeEvent(1000, 800))
+    moves = [(1010, 810), (1025, 830), (1060, 845), (1100, 900), (1199, 999)]
+    for x, y in moves:
+        window._on_drag_move(_FakeEvent(x, y))
+
+    assert root.geometry_calls == [
+        f"+{500 + (x - 1000)}+{300 + (y - 800)}" for x, y in moves
+    ]
+    # Each step is exactly one pointer delta away from the previous one: the
+    # window's own position never feeds back into the calculation.
+    assert root.geometry_calls[-1] == "+699+499"
+
+
 # -- A3.1 (extension): a build fault must not hang the UI thread -----------
 
 
