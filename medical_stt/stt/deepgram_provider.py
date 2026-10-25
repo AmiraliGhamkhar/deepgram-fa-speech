@@ -125,6 +125,12 @@ def classify_deepgram_exception(exc: BaseException) -> ErrorCategory:
                 return ErrorCategory.RATE_LIMIT
             if code is not None and 400 <= code < 500:
                 return ErrorCategory.CONFIG
+            if code is not None and code >= 500:
+                # Deepgram (or its edge) failing the handshake is a server
+                # problem worth retrying like any other disconnect -- not
+                # a generic NETWORK fault. Mirrors the ApiError status
+                # table at the top of this function.
+                return ErrorCategory.SERVER_DISCONNECT
         if isinstance(exc, (ws_exc.InvalidHandshake, ws_exc.WebSocketException)):
             return ErrorCategory.NETWORK
     except ImportError:  # pragma: no cover - defensive only

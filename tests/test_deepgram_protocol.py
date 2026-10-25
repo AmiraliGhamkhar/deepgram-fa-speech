@@ -124,6 +124,29 @@ def test_close_codes_are_classified(code, reason, category):
     assert classify_deepgram_exception(_closed(code, reason)) is category
 
 
+@pytest.mark.parametrize(
+    "status, category",
+    [
+        (401, ErrorCategory.AUTH),
+        (403, ErrorCategory.AUTH),
+        (429, ErrorCategory.RATE_LIMIT),
+        (400, ErrorCategory.CONFIG),
+        (404, ErrorCategory.CONFIG),
+        # B12: a 5xx handshake used to fall through to generic NETWORK.
+        (500, ErrorCategory.SERVER_DISCONNECT),
+        (502, ErrorCategory.SERVER_DISCONNECT),
+        (503, ErrorCategory.SERVER_DISCONNECT),
+    ],
+)
+def test_handshake_status_codes_are_classified(status, category):
+    from types import SimpleNamespace
+
+    from medical_stt.stt.deepgram_provider import classify_deepgram_exception
+
+    exc = websockets_exceptions.InvalidStatus(SimpleNamespace(status_code=status))
+    assert classify_deepgram_exception(exc) is category
+
+
 def test_undecodable_audio_is_not_retried():
     """`1008 DATA-0000` means the audio cannot be decoded with the configured
     encoding/sample rate. Reconnecting with the same settings would loop
