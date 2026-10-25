@@ -26,7 +26,12 @@ def test_click_through_style_only_adds_bits():
 
 def test_apply_click_through_is_best_effort(monkeypatch):
     assert _apply_click_through(0) is False
-    assert _apply_click_through(12345) is False  # not Windows in CI
+    if overlay_module._SYSTEM == "windows":
+        # On a real Windows host the remaining branches would call user32
+        # with a bogus HWND and (correctly) report success; only the
+        # non-Windows / missing-user32 fail-soft behaviour is under test.
+        return
+    assert _apply_click_through(12345) is False  # not Windows here
     # Even claiming to be Windows must fail soft where user32 is absent.
     monkeypatch.setattr(overlay_module, "_SYSTEM", "windows")
     assert _apply_click_through(12345) is False
