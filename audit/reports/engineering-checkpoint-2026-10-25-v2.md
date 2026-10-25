@@ -26,7 +26,8 @@ production code. Failures below were observed, not inferred.
 | P0-8 normalized terminology rule storage | `13c8f25` | `5 failed, 132 passed` in `tests/test_terminology.py tests/test_config.py tests/test_data_safety.py` | `137 passed` in the same targeted suite; census: `835 raw rules, 1 raw non-normalized side, 0 parsed non-normalized sides, Arabic-yeh source fires: True` |
 | P0-9 majority-strong BiDi direction | `65aa762` | `10 failed, 69 passed` in `tests/test_bidi.py tests/test_formatting_ownership.py tests/test_injection.py` | `79 passed` in the same targeted suite |
 | P0-10 span-level low-confidence protection | `69568a0` | `2 failed, 7 passed` in `tests/test_app.py` | `97 passed` in `tests/test_app.py tests/test_confidence.py tests/test_terminology.py tests/test_performance_fixes.py` |
-| P0-11 Start/Stop controller snapshot race | (this commit) | `1 failed, 1 passed` in the two controller race tests with the fix temporarily reverted | `2 passed` in the same tests; `14 passed` in `tests/test_session_lifecycle.py` |
+| P0-11 Start/Stop controller snapshot race | `6179094` | `1 failed, 1 passed` in the two controller race tests with the fix temporarily reverted | `2 passed` in the same tests; `14 passed` in `tests/test_session_lifecycle.py` |
+| P0-12 silent provider exit | (this commit) | `2 failed, 14 passed` in `tests/test_shutdown_flow.py` | `80 passed` in shutdown/app/performance/concurrency targeted suites |
 
 ### P0-7 details
 
@@ -88,7 +89,7 @@ Full-suite validation after P0-7: `1071 passed, 4 skipped, 1 warning`;
 ## Remaining acceptance limitations
 
 - This checkpoint is appended incrementally; the latest per-fix section is the
-  authoritative progress marker. P0-12 through P0-14, all P1/P2 items and all
+  authoritative progress marker. P0-13 and P0-14, all P1/P2 items and all
   GUI changes remain outstanding at this revision.
 - The accepted Starlette test-client warning is preserved; no warning filters
   or lockfile edits were added.
@@ -236,3 +237,32 @@ FAILED tests/test_session_lifecycle.py::test_stop_snapshots_the_started_thread_u
 
 After: both race tests `2 passed`; whole lifecycle suite `14 passed`; full
 suite `1108 passed, 4 skipped, 1 warning`; ruff, mypy and secret scan clean.
+
+### P0-12 details
+
+- `_run_session()` now records whether any provider error was emitted for the
+  current generation. In `run_provider`'s `finally`, a current-generation
+  thread that returns with no error, no stop flag and no shutdown request calls
+  the generation-fenced `on_error` with
+  `ProviderError(ErrorCategory.UNKNOWN, "provider exited without error or stop")`
+  before setting `_stop`.
+- A silent provider therefore raises through `_run_session()` and makes
+  `run()` retry/classify the dead dictation instead of returning exit code 0.
+  Deliberate Stop, an already-reported error, and superseded generations are
+  explicitly excluded from the synthetic error.
+- Four regressions use a `SilentProvider`, a provider that reports an error
+  before returning, and a stoppable provider. The `run()` test pins a bounded
+  retry configuration and asserts exit code 1 and two attempts (before the
+  fix it returned 0 after one silent attempt).
+
+Before (excerpt from `/tmp/p0_12_before.txt`):
+
+```text
+FAILED tests/test_shutdown_flow.py::test_silent_provider_exit_raises_unknown_error_before_stop
+FAILED tests/test_shutdown_flow.py::test_silent_provider_exit_does_not_report_a_successful_run
+2 failed, 14 passed in 4.44s
+```
+
+After: targeted shutdown/app/performance/concurrency suites `80 passed`;
+full suite `1112 passed, 4 skipped, 1 warning`; ruff, mypy and secret scan
+clean. No existing pins were changed.

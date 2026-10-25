@@ -576,8 +576,11 @@ class LiveMedicalSTT:
         finals: queue.Queue[tuple[TranscriptEvent, LatencyTracker]] = queue.Queue(maxsize=16)
         receive_latency = LatencyTracker()
         processing_done = threading.Event()
+        error_emitted = False
 
         def on_error(error: ProviderError) -> None:
+            nonlocal error_emitted
+            error_emitted = True
             try:
                 self._on_provider_error(error, generation)
             except Exception as exc:
@@ -652,6 +655,22 @@ class LiveMedicalSTT:
                 on_error(ProviderError(ErrorCategory.UNKNOWN, "Provider worker failed"))
             finally:
                 if generation == self._session_generation:
+                    # A start() that just returns is a dead dictation, not a
+                    # clean stop. Emit the error through the generation-fenced
+                    # callback BEFORE setting _stop, so the session loop and
+                    # run() classify it instead of reporting success. A
+                    # deliberate Stop, an already-reported error, or a
+                    # superseded generation must not produce a second error.
+                    if (
+                        not error_emitted
+                        and not self._errors
+                        and not self._stop.is_set()
+                        and not self._shutdown.is_set()
+                    ):
+                        on_error(ProviderError(
+                            ErrorCategory.UNKNOWN,
+                            "provider exited without error or stop",
+                        ))
                     self._stop.set()
 
         provider_thread = threading.Thread(target=run_provider, daemon=True, name="stt-provider")
