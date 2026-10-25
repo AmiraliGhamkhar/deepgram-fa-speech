@@ -910,8 +910,13 @@ class SessionController:
         Returns True if the session thread finished within `timeout`.
         """
         self.cancel_start()
-        stt = self._stt
-        thread = self._thread
+        # start() swaps _stt and _thread together under this lock. Take a
+        # consistent snapshot there too; otherwise a rapid Start→Stop can
+        # join a stale thread (or None) while a new session spins up.
+        # The lock is released before join(): never hold it across a wait.
+        with self._lock:
+            stt = self._stt
+            thread = self._thread
         if stt is not None:
             stt.request_stop()
         if thread is None:

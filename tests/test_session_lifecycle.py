@@ -203,3 +203,154 @@ def test_session_failure_is_recorded_not_raised():
 def test_stop_before_start_is_harmless():
     controller = SessionController(stt_factory=FakeSTT)
     assert controller.stop(timeout=0.1) is True
+
+
+def test_stop_snapshots_the_started_thread_under_the_lock(monkeypatch):
+    """P0-11: 50 immediate Start→Stop races must join the new session thread.
+
+    `start()` builds the STT object and thread while holding `_lock`. A `stop()`
+    that samples `_stt`/`_thread` outside that lock can see the previous `None`
+    and return before the new thread even exists.
+    """
+    import medical_stt.app as app_module
+
+    real_thread = threading.Thread
+    created_threads: list[real_thread] = []
+    joined_threads: list[real_thread] = []
+
+    class RecordingThread(real_thread):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            if self.name == "stt-session":
+                created_threads.append(self)
+
+        def join(self, timeout: float | None = None) -> None:
+            if self.name == "stt-session":
+                joined_threads.append(self)
+            super().join(timeout)
+
+    monkeypatch.setattr(app_module.threading, "Thread", RecordingThread)
+
+    class GatedSTT:
+        """The session thread stays alive until stop()'s own request_stop().
+
+        start() calls request_stop() once because cancel_start() set the
+        latch while the factory was blocked. Only stop()'s snapshot path can
+        make the second call -- if it sampled a stale _thread, run() would
+        time out instead of being joined.
+        """
+
+        def __init__(self) -> None:
+            self.started = threading.Event()
+            self.run_release = threading.Event()
+            self.stop_calls = 0
+            self.call_lock = threading.Lock()
+
+        def request_stop(self) -> None:
+            with self.call_lock:
+                self.stop_calls += 1
+                is_second_call = self.stop_calls == 2
+            if is_second_call:
+                self.run_release.set()
+
+        def run(self) -> int:
+            self.started.set()
+            self.run_release.wait(timeout=1.0)
+            return 0
+
+    for _ in range(50):
+        created_threads.clear()
+        joined_threads.clear()
+        entered = threading.Event()
+        gate = threading.Event()
+        cancel_called = threading.Event()
+        stop_returned = threading.Event()
+        stt = GatedSTT()
+        stop_result: list[bool] = []
+
+        def factory(entered=entered, gate=gate, stt=stt):
+            entered.set()
+            assert gate.wait(timeout=2.0)
+            return stt
+
+        controller = SessionController(stt_factory=factory)
+        original_cancel = controller.cancel_start
+
+        def cancel_start(
+            cancel_called=cancel_called, original_cancel=original_cancel
+        ) -> None:
+            cancel_called.set()
+            original_cancel()
+
+        controller.cancel_start = cancel_start  # type: ignore[method-assign]
+
+        starter = real_thread(target=controller.start, daemon=True)
+        stopper = real_thread(
+            target=lambda stop_result=stop_result, controller=controller, stop_returned=stop_returned: (
+                stop_result.append(controller.stop(timeout=2.0)), stop_returned.set()
+            ),
+            daemon=True,
+        )
+        starter.start()
+        assert entered.wait(timeout=2.0), "start did not enter the factory"
+        stopper.start()
+        assert cancel_called.wait(timeout=2.0), "stop did not request cancellation"
+
+        # Give the unfixed stop() time to take its stale snapshot while start()
+        # is still blocked inside the factory holding the controller lock.
+        stop_returned.wait(timeout=0.05)
+        gate.set()
+        starter.join(timeout=2.0)
+        stopper.join(timeout=3.0)
+
+        assert not starter.is_alive() and not stopper.is_alive()
+        assert stop_result == [True]
+        assert len(created_threads) == 1
+        assert stt.started.is_set()
+        assert not created_threads[0].is_alive()
+        assert joined_threads == [created_threads[0]], (
+            "stop() joined a stale thread or returned without joining the started thread"
+        )
+
+
+def test_stop_releases_the_lock_before_joining(monkeypatch):
+    """The snapshot lock must never be held for the duration of join()."""
+    import medical_stt.app as app_module
+
+    real_thread = threading.Thread
+    join_started = threading.Event()
+    release_join = threading.Event()
+    run_started = threading.Event()
+    release_run = threading.Event()
+
+    class JoinProbeThread(real_thread):
+        def join(self, timeout: float | None = None) -> None:
+            join_started.set()
+            assert release_join.wait(timeout=2.0)
+            super().join(timeout)
+
+    monkeypatch.setattr(app_module.threading, "Thread", JoinProbeThread)
+
+    class BlockingSTT:
+        def request_stop(self) -> None:
+            return None
+
+        def run(self) -> int:
+            run_started.set()
+            assert release_run.wait(timeout=2.0)
+            return 0
+
+    controller = SessionController(stt_factory=BlockingSTT)
+    controller.start()
+    assert run_started.wait(timeout=2.0)
+
+    stopper = real_thread(target=lambda: controller.stop(timeout=2.0), daemon=True)
+    stopper.start()
+    assert join_started.wait(timeout=2.0)
+    assert controller._lock.acquire(timeout=0.1) is True  # noqa: SLF001
+    controller._lock.release()  # noqa: SLF001
+
+    release_run.set()
+    release_join.set()
+    stopper.join(timeout=3.0)
+    assert not stopper.is_alive()

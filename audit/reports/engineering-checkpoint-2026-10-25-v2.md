@@ -25,7 +25,8 @@ production code. Failures below were observed, not inferred.
 | P0-7 letter-glued numeric spans + Persian units | `783e7f7` | `17 failed, 50 passed` in `tests/test_numbers.py tests/test_terminology.py` | `67 passed` in the same targeted suite; census: `835 rules, 9 digit-bearing sources, 9 numeric-span sources, loader: OK, rejected: 0` |
 | P0-8 normalized terminology rule storage | `13c8f25` | `5 failed, 132 passed` in `tests/test_terminology.py tests/test_config.py tests/test_data_safety.py` | `137 passed` in the same targeted suite; census: `835 raw rules, 1 raw non-normalized side, 0 parsed non-normalized sides, Arabic-yeh source fires: True` |
 | P0-9 majority-strong BiDi direction | `65aa762` | `10 failed, 69 passed` in `tests/test_bidi.py tests/test_formatting_ownership.py tests/test_injection.py` | `79 passed` in the same targeted suite |
-| P0-10 span-level low-confidence protection | (this commit) | `2 failed, 7 passed` in `tests/test_app.py` | `97 passed` in `tests/test_app.py tests/test_confidence.py tests/test_terminology.py tests/test_performance_fixes.py` |
+| P0-10 span-level low-confidence protection | `69568a0` | `2 failed, 7 passed` in `tests/test_app.py` | `97 passed` in `tests/test_app.py tests/test_confidence.py tests/test_terminology.py tests/test_performance_fixes.py` |
+| P0-11 Start/Stop controller snapshot race | (this commit) | `1 failed, 1 passed` in the two controller race tests with the fix temporarily reverted | `2 passed` in the same tests; `14 passed` in `tests/test_session_lifecycle.py` |
 
 ### P0-7 details
 
@@ -87,7 +88,7 @@ Full-suite validation after P0-7: `1071 passed, 4 skipped, 1 warning`;
 ## Remaining acceptance limitations
 
 - This checkpoint is appended incrementally; the latest per-fix section is the
-  authoritative progress marker. P0-11 through P0-14, all P1/P2 items and all
+  authoritative progress marker. P0-12 through P0-14, all P1/P2 items and all
   GUI changes remain outstanding at this revision.
 - The accepted Starlette test-client warning is preserved; no warning filters
   or lockfile edits were added.
@@ -211,3 +212,27 @@ contains a second reviewed term and asserts that `ICU` is still injected while
 the low-confidence `هایپرتنشن` token remains unchanged. Two new app-level
 regressions cover a sub-threshold number and the conservative alignment
 fallback. No security, threading, numeric or GUI pins were weakened.
+
+### P0-11 details
+
+- `SessionController.stop()` now takes a consistent `(stt, thread)` snapshot
+  under `_lock`, the same lock `start()` holds while swapping those fields.
+  The lock is released before `request_stop()` and `thread.join()`.
+- A 50-iteration Start→Stop race test gates the factory while `start()` holds
+  the lock, calls `stop()` concurrently, and records every session-thread
+  `join()`. It asserts the joined thread is the thread created by that same
+  `start()`, using a fake STT that cannot finish until `stop()`'s own
+  `request_stop()` runs. A second test probes `join()` and proves `_lock` is
+  not held while waiting.
+- No existing pins were changed. `cancel_start()` remains nonblocking so a
+  cancellation during a slow factory still latches immediately.
+
+Before (the fix was temporarily reverted after writing the tests):
+
+```text
+FAILED tests/test_session_lifecycle.py::test_stop_snapshots_the_started_thread_under_the_lock
+1 failed, 1 passed in 0.07s
+```
+
+After: both race tests `2 passed`; whole lifecycle suite `14 passed`; full
+suite `1108 passed, 4 skipped, 1 warning`; ruff, mypy and secret scan clean.
