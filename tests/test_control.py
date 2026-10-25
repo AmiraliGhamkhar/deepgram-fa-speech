@@ -592,6 +592,52 @@ def test_connection_test_guards_post_a_hint():
     assert "ذخیره" in statuses[-1][0]
 
 
+def test_start_guard_while_saving_posts_a_hint():
+    """A3.3: pressing the circle during a settings save must say why it did
+    nothing. `_start` used to return silently, leaving the primary control
+    looking dead for the duration of the save."""
+    class _RecordingController(_StoppedController):
+        started = False
+
+        def start(self) -> None:
+            self.started = True
+
+    controller = _RecordingController()
+    window = ControlWindow(controller)
+    statuses, _ = _capture_status(window)
+    window._saving = True
+
+    window._on_toggle()
+
+    assert statuses, "the guard hit must post a status line"
+    assert "ذخیره" in statuses[-1][0]
+    assert window._starting is False, "the guard still refuses to start"
+    assert controller.started is False, "no session may be started while saving"
+
+
+def test_start_guard_while_already_starting_posts_a_hint():
+    window = ControlWindow(_StoppedController())
+    statuses, _ = _capture_status(window)
+    window._starting = True
+
+    window._start()
+
+    assert statuses and "اتصال" in statuses[-1][0]
+
+
+def test_connection_test_guard_while_stopping_posts_a_hint():
+    """A stop in flight means the settings under test are going away; the
+    guard must refuse AND say so instead of starting a test."""
+    window = ControlWindow(_StoppedController())
+    statuses, _ = _capture_status(window)
+    window._stopping = True
+
+    window._test_connection()
+
+    assert statuses and "توقف" in statuses[-1][0]
+    assert window._testing is False, "no connection test may start during a stop"
+
+
 # -- A3.5: an empty secret field keeps the old secret -- say so ---------------
 
 
