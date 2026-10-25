@@ -40,7 +40,11 @@ from .config import (
 )
 from .injection import TextInjector
 from .processing.bidi import to_injected
-from .processing.confidence import MedicalConfidenceWarning, find_low_confidence_medical_words
+from .processing.confidence import (
+    MedicalConfidenceWarning,
+    find_low_confidence_medical_words,
+    low_confidence_protected_ranges,
+)
 from .processing.normalize import normalize
 from .processing.terminology import TerminologyEngine
 from .stt.accumulator import UtteranceAccumulator, UtteranceLimitError
@@ -359,16 +363,25 @@ class LiveMedicalSTT:
         if self.last_confidence_warning is not None:
             categories = {item.category for item in self.last_confidence_warning.uncertain_words}
             log.warning(
-                "low-confidence medical tokens: count=%d categories=%s (original text preserved)",
+                "low-confidence medical tokens: count=%d categories=%s (uncertain spans protected)",
                 len(self.last_confidence_warning.uncertain_words),
                 ",".join(sorted(categories)),
             )
 
         normalized = normalize(utterance.text)
         terminology_start = time.monotonic()
-        # A low-confidence clinical token must not be transformed into a
-        # more authoritative-looking concept. Preserve the provider text.
-        rewritten = normalized if self.last_confidence_warning is not None else self.terminology.apply(normalized)
+        # A low-confidence clinical token must not be transformed into a more
+        # authoritative-looking concept. Protect only its word/timing-derived
+        # span so reviewed corrections elsewhere in the utterance still fire.
+        # If alignment cannot establish that span, fail safe as before.
+        uncertain_spans = low_confidence_protected_ranges(
+            normalized, utterance.words, self.last_confidence_warning
+        )
+        if uncertain_spans is None:
+            log.warning("could not map low-confidence token spans; preserving the whole utterance")
+            rewritten = normalized
+        else:
+            rewritten = self.terminology.apply(normalized, protected_ranges=uncertain_spans)
         terminology_end = time.monotonic()
 
         injected_repr = to_injected(rewritten)

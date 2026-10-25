@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
-from typing import Iterable, List
+from typing import Iterable, List, Sequence, Tuple
 
 from ..config import ConfigError
 from .fst import DeterministicFST, LoadResult, Rule
@@ -149,10 +149,19 @@ class TerminologyEngine:
     def total_rule_count(self) -> int:
         return len(self._all_rules)
 
-    def apply(self, text: str) -> str:
-        """Rewrite `text`, protecting negation and numeric expressions.
+    def apply(
+        self,
+        text: str,
+        protected_ranges: Sequence[Tuple[int, int]] = (),
+    ) -> str:
+        """Rewrite `text`, protecting negation, numeric and caller-provided spans.
 
-        Only numeric-in-source rules may consume an entire numeric span.
+        `protected_ranges` are extra character spans (e.g. low-confidence
+        medical tokens) that no rule may touch, including rules explicitly
+        flagged `numeric_in_source`. They are merged with negation spans,
+        which have the same hard-protection semantics. Only numeric-in-source
+        rules may consume an entire numeric span when it is NOT in a protected
+        range.
 
         Word boundaries are required as well, and this is the single most
         important safety property in the pipeline. Aho-Corasick matches
@@ -175,8 +184,10 @@ class TerminologyEngine:
         if not text:
             return text
         numeric = [(s.start, s.end) for s in find_numeric_spans(text)]
-        # Negation is never eligible for the numeric-in-source exception.
+        # Negation and caller-provided low-confidence spans are never eligible
+        # for the numeric-in-source exception.
+        protected = list(find_negation_spans(text)) + list(protected_ranges)
         return self._fst.apply(
-            text, protected_ranges=find_negation_spans(text),
+            text, protected_ranges=protected,
             numeric_ranges=numeric, require_word_boundaries=True,
         )

@@ -35,6 +35,13 @@
 # silently dead, and a non-normalized target cannot be injected into a
 # normalized transcript. Digit-run validation compares both normalized sides.
 #
+# Low-confidence contract: app.py derives character spans from the provider's
+# flagged word indices/timings and passes them to the FST as protected ranges.
+# Only those uncertain token spans are excluded from rewriting; all other
+# reviewed rules in the same utterance remain active. This hard protection is
+# not bypassed by numeric_in_source. If a flagged token cannot be aligned to
+# the normalized transcript, the whole utterance is preserved (fail safe).
+#
 # Regenerated from the legacy flat from/to list by
 # scripts/classify_corrections.py (see that file for the classification
 # heuristics and rationale). Manual review is still recommended before

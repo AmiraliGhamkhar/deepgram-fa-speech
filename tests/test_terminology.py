@@ -261,3 +261,23 @@ def test_flat_correction_pairs_use_normalized_rules():
     pairs = load_correction_rules()
     assert ("پایدار", "stable") in pairs
     assert not any("ي" in source or "ي" in target for source, target in pairs)
+
+
+def test_extra_protected_ranges_block_only_the_uncertain_span():
+    engine = TerminologyEngine()
+    engine.load([
+        _rule("آی سی یو", "ICU", category="abbreviation_expansion"),
+        _rule("هایپرتنشن", "hypertension", category="specialty_terminology"),
+    ])
+    text = "آی سی یو و هایپرتنشن"
+    start = text.index("هایپرتنشن")
+    result = engine.apply(text, protected_ranges=[(start, start + len("هایپرتنشن"))])
+    assert result == "ICU و هایپرتنشن"
+
+
+def test_extra_protected_ranges_are_not_bypassed_by_numeric_opt_in():
+    engine = TerminologyEngine()
+    engine.load([_rule("دکستروز 5", "D5", numeric_in_source=True)])
+    text = "دکستروز 5"
+    assert engine.apply(text) == "D5"
+    assert engine.apply(text, protected_ranges=[(0, len(text))]) == text

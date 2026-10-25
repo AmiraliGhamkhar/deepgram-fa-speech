@@ -24,7 +24,8 @@ production code. Failures below were observed, not inferred.
 |---|---|---|---|
 | P0-7 letter-glued numeric spans + Persian units | `783e7f7` | `17 failed, 50 passed` in `tests/test_numbers.py tests/test_terminology.py` | `67 passed` in the same targeted suite; census: `835 rules, 9 digit-bearing sources, 9 numeric-span sources, loader: OK, rejected: 0` |
 | P0-8 normalized terminology rule storage | `13c8f25` | `5 failed, 132 passed` in `tests/test_terminology.py tests/test_config.py tests/test_data_safety.py` | `137 passed` in the same targeted suite; census: `835 raw rules, 1 raw non-normalized side, 0 parsed non-normalized sides, Arabic-yeh source fires: True` |
-| P0-9 majority-strong BiDi direction | (this commit) | `10 failed, 69 passed` in `tests/test_bidi.py tests/test_formatting_ownership.py tests/test_injection.py` | `79 passed` in the same targeted suite |
+| P0-9 majority-strong BiDi direction | `65aa762` | `10 failed, 69 passed` in `tests/test_bidi.py tests/test_formatting_ownership.py tests/test_injection.py` | `79 passed` in the same targeted suite |
+| P0-10 span-level low-confidence protection | (this commit) | `2 failed, 7 passed` in `tests/test_app.py` | `97 passed` in `tests/test_app.py tests/test_confidence.py tests/test_terminology.py tests/test_performance_fixes.py` |
 
 ### P0-7 details
 
@@ -86,7 +87,7 @@ Full-suite validation after P0-7: `1071 passed, 4 skipped, 1 warning`;
 ## Remaining acceptance limitations
 
 - This checkpoint is appended incrementally; the latest per-fix section is the
-  authoritative progress marker. P0-10 through P0-14, all P1/P2 items and all
+  authoritative progress marker. P0-11 through P0-14, all P1/P2 items and all
   GUI changes remain outstanding at this revision.
 - The accepted Starlette test-client warning is preserved; no warning filters
   or lockfile edits were added.
@@ -173,3 +174,40 @@ Deliberately updated pin: `test_base_direction_ltr_when_latin_leads` →
 `rtl` for `"MI در ECG مشاهده شد"`. No other existing pin was weakened; the
 single-leading-mark and idempotence pins are re-asserted with the new
 majority-heuristic examples.
+
+### P0-10 details
+
+- `UncertainMedicalWord` now carries the provider word tuple index.
+  `low_confidence_protected_ranges` aligns normalized word texts to the
+  normalized utterance in both tuple order and start-timing order, chooses the
+  alignment that finds more words and every uncertain token, and returns their
+  character spans. It never logs transcript text.
+- `TerminologyEngine.apply` accepts extra `protected_ranges`, merged with
+  negation spans before the numeric opt-in pass. A low-confidence token's span
+  cannot be rewritten even by a `numeric_in_source` rule; reviewed rules
+  elsewhere in the same utterance still fire.
+- If a flagged token cannot be aligned (word/timing mismatch, empty canonical
+  text, malformed warning), the app logs only the failure type and preserves
+  the whole utterance — the old conservative behavior is the explicit fallback.
+- `data/corrections.yaml` and `config/settings.yaml` now document the new
+  low-confidence semantics.
+
+Before (excerpt from `/tmp/p0_10_before.txt`, `pytest tests/test_app.py -q`):
+
+```text
+FAILED tests/test_app.py::test_low_confidence_medical_term_is_preserved - Ass...
+FAILED tests/test_app.py::test_low_confidence_numeric_token_keeps_other_corrections
+2 failed, 7 passed in 0.55s
+```
+
+After: `97 passed` across the app, confidence, terminology and processing-
+failure targeted suites. New unit cases pin scrambled timings, reset segment
+timings, repeated words, normalized punctuation, missing alignments, and FST
+protection that is not bypassed by numeric opt-in. Full suite:
+`1106 passed, 4 skipped, 1 warning`; ruff, mypy and secret scan clean.
+
+Deliberately updated pin: `test_low_confidence_medical_term_is_preserved` now
+contains a second reviewed term and asserts that `ICU` is still injected while
+the low-confidence `هایپرتنشن` token remains unchanged. Two new app-level
+regressions cover a sub-threshold number and the conservative alignment
+fallback. No security, threading, numeric or GUI pins were weakened.
