@@ -184,6 +184,12 @@ class WindowsBackend(InjectionBackend):
         pid = wintypes.DWORD()
         if not user32.GetWindowThreadProcessId(target, ctypes.byref(pid)):
             return False
+        if pid.value == 0:
+            # A just-destroyed foreground window can still answer with a
+            # thread id but no owning process. pid 0 is the idle process,
+            # never a document: refuse rather than type into the void.
+            log.warning("foreground window has no owning process; not injecting")
+            return False
         if not target or (pid.value == os.getpid() and not self._allow_own_process):
             log.warning("focus an external document before dictating")
             return False
