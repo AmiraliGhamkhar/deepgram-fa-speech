@@ -31,7 +31,8 @@ production code. Failures below were observed, not inferred.
 | P0-13 fallback clipboard PHI leak | `2f8b6be` | `4 failed, 44 passed` in `tests/test_injection.py tests/test_edge_paths.py` | `68 passed` in injection/edge/Windows-policy targeted suites |
 | P0-14 utterance-limit recovery text | `8c56329` | `3 failed, 62 passed` in accumulator/performance/app targeted suites | `65 passed` in the same suites |
 | P1 inferred follow-up batch | `313687b` | `20 failed, 167 passed` in nine targeted suites | `187 passed` in the same suites |
-| P2 docs/metrics polish | (this commit) | `5 failed` in `tests/test_docs_polish.py` | `5 passed` in the same file |
+| P2 docs/metrics polish | `571dfa5` | `5 failed` in `tests/test_docs_polish.py` | `5 passed` in the same file |
+| GUI R2 shared fonts + Windows DPI | (this commit) | `ImportError: cannot import name 'fonts'` collecting `tests/test_ui_fonts.py`; `2 failed` in `tests/test_control.py` | `47 passed` in `tests/test_ui_fonts.py tests/test_control.py tests/test_overlay.py` |
 
 ### P0-7 details
 
@@ -435,3 +436,54 @@ module docstring. It now pins:
 
 After: `5 passed` targeted; full suite `1146 passed, 4 skipped, 1 warning in
 53.96s`; ruff, mypy and secret scan clean. Deliberately updated pins: none.
+
+## Phase 2 — GUI restyle
+
+Offline-only evidence: this Linux sandbox has no display, so per-change
+acceptance is widget-tree descriptions extracted from the fake-Tk harness
+(`tests/test_control.py` builds the real widget tree against recorded
+stand-ins), not screenshots. No GUI threading, mailbox, pump, escape-to-close,
+drag-math, secret-write or status-string behavior was changed.
+
+### GUI R2 details — shared fonts + Windows DPI (`ui/fonts.py`)
+
+Widget tree after `_build` (font annotations only; structure unchanged):
+
+```text
+Tk (Medical STT, overrideredirect, topmost, opaque)
+└── Frame (inner, bg=BG)
+    ├── Frame (header, bg=BG)
+    │   ├── Label "Medical STT"           font=(family, 10, "bold")
+    │   └── Label "✕"                     (quit)
+    ├── Label  "● آماده"                  font=(family, 10)
+    ├── Canvas toggle circle              text font=(family, 12, "bold")
+    ├── Label  (detail)                   font=(family, 8)
+    ├── Frame (separator)
+    ├── Label  "میزبان (https)"           font=(family, 8)
+    ├── Entry  (host url)                 font=(family, 9)
+    ├── Label  "کلید مشترک"               font=(family, 8)
+    ├── Entry  (secret, write-only)       font=(family, 9)
+    ├── Label  "شناسه دستگاه"             font=(family, 8)
+    ├── Entry  (client id)                font=(family, 9)
+    └── Button ×3 (flat)                  font=(family, 9)
+```
+
+`family` resolves once per process from
+`Vazirmatn/Vazir/IRANSans/B Yekan/B Nazanin/Segoe UI/Tahoma/Arial`
+with a platform default fallback; the overlay uses the same helper (its
+private `_get_best_persian_font` was removed). `fonts.enable_windows_dpi_awareness()`
+runs at the top of `ControlWindow._run` and `TranscriptOverlay._run`, before
+`tk.Tk()`: per-monitor awareness via `SetProcessDpiAwareness(2)` with the
+`SetProcessDPIAware` fallback, idempotent, no-op off Windows, failures logged
+by type only. Eight pure selection/DPI tests plus one before-Tk ordering test
+cover it.
+
+Before (excerpt): `tests/test_ui_fonts.py` could not be collected
+(`ImportError: cannot import name 'fonts'`), and `tests/test_control.py` gave
+`2 failed, 26 passed` (font pin ImportError + DPI-ordering ImportError).
+After: `47 passed` across the three UI test modules; full suite
+`1155 passed, 4 skipped, 1 warning`; mypy now covers 44 source files.
+
+Deliberately updated pin: `test_client_id_row_matches_the_other_settings_rows`
+now compares the label font with `fonts.font(window._root, 8)` instead of the
+hardcoded `("Segoe UI", 8)`.

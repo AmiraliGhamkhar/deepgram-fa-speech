@@ -13,7 +13,7 @@ import threading
 from typing import Callable, Optional
 
 from ..processing.bidi import to_display
-from . import colors, dispatch
+from . import colors, dispatch, fonts
 
 log = logging.getLogger("medical_stt.ui.overlay")
 _SYSTEM = platform.system().lower()
@@ -21,7 +21,6 @@ _SYSTEM = platform.system().lower()
 _TK_AVAILABLE = False
 try:
     import tkinter as tk
-    import tkinter.font as tkfont
     _TK_AVAILABLE = True
 except ImportError:
     _TK_AVAILABLE = False
@@ -90,16 +89,6 @@ def _is_rtl(text: str) -> bool:
     return False
 
 
-def _get_best_persian_font(root: "tk.Tk | tk.Toplevel") -> str:
-    preferred = ["Vazirmatn", "Vazir", "IRANSans", "B Yekan", "B Nazanin", "Segoe UI", "Tahoma", "Arial"]
-    try:
-        available = set(tkfont.families(root))
-        for font in preferred:
-            if font in available:
-                return font
-    except tk.TclError:
-        pass
-    return "Tahoma" if _SYSTEM == "windows" else "Arial"
 
 
 class TranscriptOverlay:
@@ -138,6 +127,9 @@ class TranscriptOverlay:
     def _run(self) -> None:
         built = False
         try:
+            # Standalone overlay mode creates its own interpreter; the shared
+            # owner path already applied this on the control window's Tk.
+            fonts.enable_windows_dpi_awareness()
             if self._closed:
                 return
             shared = dispatch.owner_root
@@ -145,7 +137,7 @@ class TranscriptOverlay:
             self._root.title("Medical STT Overlay")
             self._root.overrideredirect(True)
             self._root.attributes("-topmost", True)
-            self._font_family = _get_best_persian_font(self._root)
+            self._font_family = fonts.family(self._root)
 
             try:
                 self._root.attributes("-alpha", 0.94)

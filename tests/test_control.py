@@ -480,7 +480,7 @@ def test_secondary_buttons_share_the_flat_style(monkeypatch):
 
 
 def test_client_id_row_matches_the_other_settings_rows(monkeypatch):
-    from medical_stt.ui import colors
+    from medical_stt.ui import colors, fonts
 
     window = _built_window(monkeypatch)
     entry = next(
@@ -490,7 +490,7 @@ def test_client_id_row_matches_the_other_settings_rows(monkeypatch):
     assert entry.kwargs["insertbackground"] == colors.FG
     assert entry.pack_kwargs.get("ipady") == 3
     label = next(w for w in window._root.find("Label") if w.kwargs.get("text") == "شناسه دستگاه")
-    assert label.kwargs["font"] == ("Segoe UI", 8)
+    assert label.kwargs["font"] == fonts.font(window._root, 8)
 
 
 # -- A3.1: a poisoned settings file must not kill the window -----------------
@@ -737,3 +737,36 @@ def test_close_destroys_the_window_after_a_confirmed_stop():
     assert fake_root.destroyed is True
     assert window._root is None
     assert window._closed is True
+
+
+# -- R2 fonts/DPI: process DPI awareness must precede any Tk interpreter ----
+
+
+def test_windows_dpi_awareness_is_applied_before_tk_is_created(monkeypatch):
+    """`SetProcessDpiAwareness` only affects interpreters created afterwards.
+
+    Windows bitmap-scales the whole UI at 125%/150% when the process is DPI
+    unaware, so the helper must run before `tk.Tk()` -- not after the window
+    exists.
+    """
+    from medical_stt.ui import fonts as fonts_module
+
+    order: list[str] = []
+    fake_tk = _install_fake_tk(monkeypatch)
+    real_tk = fake_tk.Tk
+
+    class _RecordingTk(real_tk):
+        def __init__(self, *args, **kwargs):
+            order.append("tk")
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(control.tk, "Tk", _RecordingTk)
+    monkeypatch.setattr(
+        fonts_module,
+        "enable_windows_dpi_awareness",
+        lambda loader=None: order.append("dpi") or True,
+    )
+
+    window = ControlWindow(_StoppedController())
+    assert window.start() is True
+    assert order == ["dpi", "tk"]

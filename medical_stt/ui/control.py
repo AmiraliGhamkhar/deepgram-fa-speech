@@ -22,7 +22,7 @@ import time
 from typing import Any, Callable, Optional, Protocol
 
 from ..config import ConfigError, get_settings, initialize_user_config, save_host_credentials
-from . import colors, dispatch
+from . import colors, dispatch, fonts
 
 log = logging.getLogger("medical_stt.ui.control")
 
@@ -180,6 +180,9 @@ class ControlWindow:
 
     def _run(self) -> None:
         try:
+            # Before the first interpreter exists: a Tk root created while the
+            # process is DPI-unaware gets bitmap-scaled on Windows (R2).
+            fonts.enable_windows_dpi_awareness()
             self._root = tk.Tk()
             dispatch.install_owner(self._root, self._mailbox)
             self._build(self._root)
@@ -233,7 +236,7 @@ class ControlWindow:
         header.pack(fill="x")
         title = tk.Label(
             header, text="Medical STT", bg=_BG, fg=_FG, anchor="w",
-            font=("Segoe UI", 10, "bold"),
+            font=fonts.font(root, 10, "bold"),
         )
         title.pack(side="left")
         quit_btn = tk.Label(header, text="\u2715", bg=_BG, fg=_MUTED, cursor="hand2", padx=4)
@@ -242,7 +245,7 @@ class ControlWindow:
 
         self._status = tk.Label(
             inner, text="\u25cf آماده", bg=_BG, fg=_MUTED, anchor="e", justify="right",
-            font=("Segoe UI", 10),
+            font=fonts.font(root, 10),
         )
         self._status.pack(fill="x", pady=(6, 0))
 
@@ -253,7 +256,7 @@ class ControlWindow:
 
         self._detail = tk.Label(
             inner, text="", bg=_BG, fg=_MUTED, anchor="e", justify="right",
-            wraplength=320, font=("Segoe UI", 8),
+            wraplength=320, font=fonts.font(root, 8),
         )
         self._detail.pack(fill="x", pady=(6, 0))
 
@@ -265,16 +268,16 @@ class ControlWindow:
         self._secret_var = tk.StringVar(value="")
 
         tk.Label(inner, text="میزبان (https)", bg=_BG, fg=_MUTED, anchor="e",
-                 font=("Segoe UI", 8)).pack(fill="x")
+                 font=fonts.font(root, 8)).pack(fill="x")
         tk.Entry(inner, textvariable=self._url_var, bg=_SURFACE, fg=_FG,
                  insertbackground=_FG, relief="flat", justify="left",
-                 font=("Segoe UI", 9)).pack(fill="x", pady=(2, 0), ipady=3)
+                 font=fonts.font(root, 9)).pack(fill="x", pady=(2, 0), ipady=3)
 
         tk.Label(inner, text="کلید مشترک", bg=_BG, fg=_MUTED, anchor="e",
-                 font=("Segoe UI", 8)).pack(fill="x", pady=(6, 0))
+                 font=fonts.font(root, 8)).pack(fill="x", pady=(6, 0))
         tk.Entry(inner, textvariable=self._secret_var, show="\u2022", bg=_SURFACE,
                  fg=_FG, insertbackground=_FG, relief="flat", justify="left",
-                 font=("Segoe UI", 9)).pack(fill="x", pady=(2, 0), ipady=3)
+                 font=fonts.font(root, 9)).pack(fill="x", pady=(2, 0), ipady=3)
 
         try:
             client_id_value = get_settings().host_client_id
@@ -288,10 +291,10 @@ class ControlWindow:
             log.error("control window opened with unusable settings: %s", exc)
         self._client_id_var = tk.StringVar(value=client_id_value)
         tk.Label(inner, text="شناسه دستگاه", bg=_BG, fg=_MUTED, anchor="e",
-                 font=("Segoe UI", 8)).pack(fill="x", pady=(6, 0))
+                 font=fonts.font(root, 8)).pack(fill="x", pady=(6, 0))
         tk.Entry(inner, textvariable=self._client_id_var, bg=_SURFACE, fg=_FG,
                  insertbackground=_FG, relief="flat", justify="left",
-                 font=("Segoe UI", 9)).pack(fill="x", pady=(2, 0), ipady=3)
+                 font=fonts.font(root, 9)).pack(fill="x", pady=(2, 0), ipady=3)
         self._flat_button(inner, "بررسی اتصال", self._test_connection).pack(fill="x", pady=(8, 0))
         self._flat_button(inner, "متن بازیابی", self._show_recovery).pack(fill="x", pady=(4, 0))
 
@@ -466,7 +469,7 @@ class ControlWindow:
         button = tk.Button(
             parent, text=text, command=command, bg=_SURFACE, fg=_FG,
             activebackground=_BORDER, activeforeground=_FG, relief="flat",
-            font=("Segoe UI", 9), cursor="hand2", bd=0, pady=4, padx=6,
+            font=fonts.font(parent, 9), cursor="hand2", bd=0, pady=4, padx=6,
         )
         button.bind("<Enter>", lambda _e: button.config(bg=_BORDER))
         button.bind("<Leave>", lambda _e: button.config(bg=_SURFACE))
@@ -493,7 +496,7 @@ class ControlWindow:
         )
         self._toggle_text = canvas.create_text(
             diameter / 2, diameter / 2, text="شروع", fill=_ON_LIGHT,
-            font=("Segoe UI", 12, "bold"), tags=("toggle",),
+            font=fonts.font(parent, 12, "bold"), tags=("toggle",),
         )
         canvas.tag_bind("toggle", "<Button-1>", lambda _e: command())
         canvas.tag_bind("toggle", "<Enter>", self._on_toggle_hover)
@@ -615,11 +618,11 @@ class ControlWindow:
             pass
         popup.bind("<Escape>", lambda _e: popup.destroy())
         text = tk.Text(popup, wrap="word", width=70, height=16, bg=_SURFACE, fg=_FG,
-                       insertbackground=_FG, relief="flat", font=("Segoe UI", 9))
+                       insertbackground=_FG, relief="flat", font=fonts.font(popup, 9))
         text.pack(fill="both", expand=True)
         text.insert("1.0", getattr(self._controller, "recovery_text", lambda: "")())
         text.configure(state="disabled")
-        feedback = tk.Label(popup, text="", bg=_BG, fg=_OK, anchor="e", font=("Segoe UI", 8))
+        feedback = tk.Label(popup, text="", bg=_BG, fg=_OK, anchor="e", font=fonts.font(popup, 8))
         feedback.pack(fill="x")
         def copy() -> None:
             popup.clipboard_clear()
