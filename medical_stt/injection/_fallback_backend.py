@@ -20,8 +20,14 @@ _SYSTEM = platform.system().lower()
 
 
 class FallbackBackend(InjectionBackend):
+    def __init__(self, paste_settle_seconds: float = 0.12) -> None:
+        #: The configured settle for the typed path below. It used to be
+        #: hardcoded to 0 there, so on Linux/macOS "type" mode ignored
+        #: `paste_settle_seconds` entirely while "paste" mode honoured it.
+        self.paste_settle_seconds = max(0.0, paste_settle_seconds)
+
     def send_unicode_text(self, text: str) -> bool:
-        return self.paste_text(text, restore_clipboard=False, settle_seconds=0.0)
+        return self.paste_text(text, restore_clipboard=False, settle_seconds=self.paste_settle_seconds)
 
     def send_backspaces(self, count: int) -> bool:
         if count <= 0:

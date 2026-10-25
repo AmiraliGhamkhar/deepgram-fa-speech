@@ -279,9 +279,13 @@ class WindowsBackend(InjectionBackend):
         ok = self._send_inputs(sequence)
 
         for vk in stuck:
+            # Re-press only a modifier that is STILL physically down at
+            # re-check time. Re-pressing one the user released in the
+            # meantime leaves a logical Shift/Alt/Win stuck with no key
+            # physically held: every later click becomes a modified click
+            # until the user happens to tap that key again.
             if user32.GetAsyncKeyState(vk) & 0x8000:
-                continue
-            self._set_modifier(vk, pressed=True)
+                self._set_modifier(vk, pressed=True)
 
         return ok
 

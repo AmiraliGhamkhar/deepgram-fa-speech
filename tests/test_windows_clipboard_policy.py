@@ -138,6 +138,52 @@ def test_diagnostic_expected_target_cannot_be_replaced_by_another_app(win):
     assert not state["pastes"]
 
 
+# -- B19(c): modifier re-press must not leave a logical key stuck ------------
+
+
+def _drive_paste_keystroke(module, backend, user, shift_states):
+    """Run the REAL _send_paste_keystroke with recorded inputs.
+
+    `shift_states` is what GetAsyncKeyState(Shift) returns on successive
+    calls: the sweep first, the re-check second.
+    """
+    sent = []
+
+    def record(inputs):
+        sent.extend(inputs)
+        return True
+
+    backend._send_inputs = record
+    remaining = list(shift_states)
+
+    def key_state(vk):
+        if vk == module.VK_SHIFT and remaining:
+            return remaining.pop(0)
+        return 0
+
+    user.GetAsyncKeyState.side_effect = key_state
+    user.MapVirtualKeyW.return_value = 0
+    assert module.WindowsBackend._send_paste_keystroke(backend) is True
+    return [
+        i for i in sent
+        if i.union.ki.wVk == module.VK_SHIFT and not (i.union.ki.dwFlags & module.KEYEVENTF_KEYUP)
+    ]
+
+
+def test_a_modifier_released_during_paste_is_not_repressed(win):
+    module, backend, user, _ = win
+    # Down at the sweep (so it gets released for a clean Ctrl+V), up by the
+    # re-check: re-pressing it would stick a logical Shift with no key held.
+    re_presses = _drive_paste_keystroke(module, backend, user, [0x8000, 0])
+    assert re_presses == []
+
+
+def test_a_modifier_still_held_is_repressed(win):
+    module, backend, user, _ = win
+    re_presses = _drive_paste_keystroke(module, backend, user, [0x8000, 0x8000])
+    assert len(re_presses) == 1
+
+
 def test_last_written_sequence_is_initialized_before_any_paste(win):
     """Regression pin for audit N-06: the attribute backing
     clipboard-restore sequencing must exist from construction (None), not
