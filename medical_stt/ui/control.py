@@ -19,7 +19,7 @@ import logging
 import platform
 import threading
 import time
-from typing import Callable, Optional, Protocol
+from typing import Any, Callable, Optional, Protocol
 
 from ..config import ConfigError, get_settings, initialize_user_config, save_host_credentials
 from . import dispatch
@@ -42,6 +42,25 @@ _MUTED = "#a6adc8"
 _OK = "#a6e3a1"
 _REC = "#f38ba8"
 _ACCENT = "#89b4fa"
+_ON_LIGHT = "#11111b"
+
+#: Diameter of the circular Start/Stop button, in pixels.
+_TOGGLE_DIAMETER = 64
+
+
+def _darken(color: str, factor: float = 0.9) -> str:
+    """Darken a `#rrggbb` colour by `factor`, for the toggle's hover state.
+
+    Anything that is not a six-digit hex literal is returned unchanged:
+    a hover effect must never be able to break the button it decorates.
+    """
+    if len(color) != 7 or not color.startswith("#"):
+        return color
+    try:
+        channels = [int(color[i:i + 2], 16) for i in (1, 3, 5)]
+    except ValueError:
+        return color
+    return "#" + "".join(f"{max(0, min(255, round(c * factor))):02x}" for c in channels)
 
 
 class SessionControllerLike(Protocol):
@@ -87,7 +106,13 @@ class ControlWindow:
         self._close_requested = False
         self._status: Optional["tk.Label"] = None
         self._detail: Optional["tk.Label"] = None
-        self._toggle: Optional["tk.Button"] = None
+        # The Start/Stop toggle is a Canvas-drawn circle, not a tk.Button:
+        # `_toggle` is the canvas, `_toggle_oval`/`_toggle_text` its items.
+        self._toggle: Optional["tk.Canvas"] = None
+        self._toggle_oval: Optional[int] = None
+        self._toggle_text: Optional[int] = None
+        self._toggle_color: str = _OK
+        self._toggle_hover = False
         self._url_var: Optional["tk.StringVar"] = None
         self._secret_var: Optional["tk.StringVar"] = None
 
@@ -198,12 +223,10 @@ class ControlWindow:
         )
         self._status.pack(fill="x", pady=(6, 0))
 
-        self._toggle = tk.Button(
-            inner, text="شروع", command=self._on_toggle, bg=_OK, fg="#11111b",
-            activebackground=_OK, activeforeground="#11111b", relief="flat",
-            font=("Segoe UI", 12, "bold"), cursor="hand2", bd=0, pady=6,
-        )
-        self._toggle.pack(fill="x", pady=(8, 0))
+        toggle = self._circle_button(inner, _TOGGLE_DIAMETER, self._on_toggle)
+        self._toggle = toggle
+        # Centered, never fill="x": a circle must not stretch with the window.
+        toggle.pack(anchor="center", pady=(8, 0))
 
         self._detail = tk.Label(
             inner, text="", bg=_BG, fg=_MUTED, anchor="e", justify="right",
@@ -374,10 +397,60 @@ class ControlWindow:
         else:
             self._set_status("\u25cf آماده", _MUTED, getattr(self._controller, "health", {}).get("warning", ""))
 
+    def _circle_button(self, parent: Any, diameter: int, command: Callable[[], None]) -> "tk.Canvas":
+        """Build the circular Start/Stop button on a Canvas.
+
+        A Canvas (not a styled tk.Button) is the only dependency-free way
+        to get a real circle out of Tkinter. The canvas background is the
+        window background so no rectangular halo shows around the oval;
+        the oval and its label share one tag, which is the click target.
+        Deliberately NOT part of the drag-binding widgets in `_build`:
+        a press here must start/stop, never start a window drag.
+        """
+        canvas = tk.Canvas(
+            parent, width=diameter, height=diameter, bg=_BG,
+            highlightthickness=0, cursor="hand2", takefocus=1,
+        )
+        pad = 2
+        self._toggle_oval = canvas.create_oval(
+            pad, pad, diameter - pad, diameter - pad,
+            fill=self._toggle_color, outline=self._toggle_color, tags=("toggle",),
+        )
+        self._toggle_text = canvas.create_text(
+            diameter / 2, diameter / 2, text="شروع", fill=_ON_LIGHT,
+            font=("Segoe UI", 12, "bold"), tags=("toggle",),
+        )
+        canvas.tag_bind("toggle", "<Button-1>", lambda _e: command())
+        canvas.tag_bind("toggle", "<Enter>", self._on_toggle_hover)
+        canvas.tag_bind("toggle", "<Leave>", self._on_toggle_leave)
+        # Clicking also takes keyboard focus, so Return/Space work after a
+        # mouse press without a separate Tab.
+        canvas.bind("<Button-1>", lambda _e: canvas.focus_set())
+        canvas.bind("<Return>", lambda _e: command())
+        canvas.bind("<space>", lambda _e: command())
+        return canvas
+
+    def _paint_toggle(self) -> None:
+        """Repaint the circle for the current colour/hover state (Tk thread)."""
+        if self._toggle is None or self._toggle_oval is None:
+            return
+        fill = _darken(self._toggle_color) if self._toggle_hover else self._toggle_color
+        self._toggle.itemconfig(self._toggle_oval, fill=fill, outline=fill)
+
+    def _on_toggle_hover(self, _event: object = None) -> None:
+        self._toggle_hover = True
+        self._paint_toggle()
+
+    def _on_toggle_leave(self, _event: object = None) -> None:
+        self._toggle_hover = False
+        self._paint_toggle()
+
     def _set_button(self, text: str, color: str) -> None:
         def _() -> None:
-            if self._toggle is not None:
-                self._toggle.config(text=text, bg=color, activebackground=color)
+            self._toggle_color = color
+            self._paint_toggle()
+            if self._toggle is not None and self._toggle_text is not None:
+                self._toggle.itemconfig(self._toggle_text, text=text, fill=_ON_LIGHT)
 
         self._ui(_, key="button")
 
