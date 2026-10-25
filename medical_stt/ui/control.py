@@ -183,7 +183,10 @@ class ControlWindow:
             self._root = tk.Tk()
             dispatch.install_owner(self._root, self._mailbox)
             self._build(self._root)
-            self._root.protocol("WM_DELETE_WINDOW", self.close)
+            # No WM_DELETE_WINDOW protocol: `_build` sets
+            # overrideredirect(True), which removes the window-manager
+            # frame entirely, so that protocol can never fire. Escape (and
+            # the ✕ label in the header) are the close paths.
             self._root.bind("<Escape>", lambda _e: self.close())
             self._initialized = True
             self._ready.set()

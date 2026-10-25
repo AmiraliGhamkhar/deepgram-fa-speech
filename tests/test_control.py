@@ -600,6 +600,14 @@ def test_empty_secret_save_reports_that_the_old_secret_was_kept(monkeypatch):
     assert _save_and_final_status(window) == "● تنظیمات ذخیره شد"
 
 
+def test_no_dead_wm_delete_window_binding(monkeypatch):
+    """A3.6: overrideredirect removes the WM frame, so the protocol could
+    never fire; Escape is the close path and must be bound."""
+    window = _built_window(monkeypatch)
+    assert not [c for c in window._root.calls if c and c[0] == "protocol"]
+    assert "<Escape>" in window._root.bindings
+
+
 def test_recovery_popup_is_themed_modal_and_confirms_copy(monkeypatch):
     from medical_stt.ui import colors
 
