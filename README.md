@@ -948,9 +948,13 @@ test suite and the Windows self-test before packaging.
   negation-scope detector.
 - Windows-native injection is the primary, most-tested path. The
   Linux/macOS fallback (`pyautogui`/`pyperclip`) is provided for
-  development convenience. DPAPI, the single-instance mutex and
-  `SendInput` are verified on Windows (CI job + self-test); they are not
-  verified in a Linux development environment.
+  development convenience. Its "type" mode is a clipboard paste: it refuses
+  unreadable prior clipboards, verifies its write and restores the prior
+  text after the timed settle, but pyperclip cannot enumerate rich formats,
+  expose a clipboard sequence number, or confirm that the target consumed
+  the paste. DPAPI, the single-instance mutex and `SendInput` are verified
+  on Windows (CI job + self-test); they are not verified in a Linux
+  development environment.
 - The ASR is **Persian-only** (`language: fa`). English medical terms work
   through keyterm prompting plus deterministic terminology rules, not
   through language switching; a fully English dictation is out of scope.

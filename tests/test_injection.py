@@ -2,6 +2,9 @@
 6 & 9). No real Windows GUI or clipboard is touched."""
 from __future__ import annotations
 
+import sys
+import types
+
 from medical_stt.injection.backend import DryRunBackend, FailingBackend
 from medical_stt.injection.text_injector import TextInjector
 
@@ -15,10 +18,11 @@ def test_fallback_typed_path_respects_the_configured_settle():
     backend = FallbackBackend(paste_settle_seconds=0.33)
     seen = {}
     backend.paste_text = lambda text, restore_clipboard, settle_seconds: seen.update(
-        settle=settle_seconds
+        settle=settle_seconds, restore=restore_clipboard
     ) or True
     assert backend.send_unicode_text("سلام") is True
     assert seen["settle"] == 0.33
+    assert seen["restore"] is True, "fallback type mode must not leave PHI on the clipboard"
 
 
 def test_text_injector_threads_its_settle_into_the_default_backend():
@@ -298,3 +302,94 @@ def test_interim_typing_survives_a_library_exception():
     injector.type_delta_from_partial("بیمار")
     injector.type_delta_from_partial("بیمار تب")
     assert injector.last_error is not None
+
+
+# -- P0-13: non-Windows type mode is a paste, so restore the clipboard ------
+
+class _FakeClipboard:
+    def __init__(self, initial: str = "", *, unreadable: bool = False) -> None:
+        self.value = initial
+        self.unreadable = unreadable
+        self.copies: list[str] = []
+        self.paste_calls = 0
+
+    def paste(self) -> str:
+        self.paste_calls += 1
+        if self.unreadable:
+            raise RuntimeError("no clipboard helper")
+        return self.value
+
+    def copy(self, text: str) -> None:
+        self.copies.append(text)
+        self.value = text
+
+
+class _VerificationFailsClipboard(_FakeClipboard):
+    def paste(self) -> str:
+        self.paste_calls += 1
+        if self.paste_calls == 2:  # verification after our write
+            return "unexpected clipboard owner"
+        if self.unreadable:
+            raise RuntimeError("no clipboard helper")
+        return self.value
+
+
+def _install_fallback_clipboard(monkeypatch, clipboard, *, on_hotkey=None):
+    from medical_stt.injection import _fallback_backend as module
+
+    hotkeys: list[tuple[str, ...]] = []
+
+    def hotkey(*keys: str) -> None:
+        hotkeys.append(keys)
+        if on_hotkey is not None:
+            on_hotkey()
+
+    fake_pyautogui = types.SimpleNamespace(hotkey=hotkey, press=lambda *_: None)
+    monkeypatch.setitem(sys.modules, "pyperclip", clipboard)
+    monkeypatch.setitem(sys.modules, "pyautogui", fake_pyautogui)
+    monkeypatch.setattr(module, "time", types.SimpleNamespace(sleep=lambda *_: None))
+    return module.FallbackBackend(paste_settle_seconds=0), hotkeys
+
+
+def test_fallback_type_mode_restores_previous_clipboard(monkeypatch):
+    clipboard = _FakeClipboard("previous user copy")
+    backend, hotkeys = _install_fallback_clipboard(monkeypatch, clipboard)
+
+    assert backend.send_unicode_text("راز بیمار") is True
+    assert hotkeys, "the paste keystroke was not sent"
+    assert clipboard.value == "previous user copy"
+    assert "راز بیمار" not in clipboard.value
+    assert clipboard.copies == ["راز بیمار", "previous user copy"]
+
+
+def test_fallback_type_mode_refuses_an_unreadable_clipboard(monkeypatch):
+    clipboard = _FakeClipboard(unreadable=True)
+    backend, hotkeys = _install_fallback_clipboard(monkeypatch, clipboard)
+
+    assert backend.send_unicode_text("راز بیمار") is False
+    assert clipboard.copies == [], "PHI was written despite an unreadable clipboard"
+    assert hotkeys == []
+
+
+def test_fallback_type_mode_restores_after_a_failed_write_verification(monkeypatch):
+    clipboard = _VerificationFailsClipboard("previous user copy")
+    backend, hotkeys = _install_fallback_clipboard(monkeypatch, clipboard)
+
+    assert backend.send_unicode_text("راز بیمار") is False
+    assert hotkeys == [], "paste must be skipped when clipboard verification fails"
+    assert clipboard.value == "previous user copy"
+    assert clipboard.copies == ["راز بیمار", "previous user copy"]
+
+
+def test_fallback_restore_does_not_overwrite_a_newer_user_copy(monkeypatch):
+    clipboard = _FakeClipboard("previous user copy")
+
+    def newer_copy() -> None:
+        clipboard.value = "newer user copy"
+
+    backend, _hotkeys = _install_fallback_clipboard(
+        monkeypatch, clipboard, on_hotkey=newer_copy
+    )
+    assert backend.send_unicode_text("راز بیمار") is True
+    assert clipboard.value == "newer user copy"
+    assert clipboard.copies == ["راز بیمار"], "restoration overwrote a newer copy"

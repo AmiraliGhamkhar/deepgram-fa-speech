@@ -27,7 +27,8 @@ production code. Failures below were observed, not inferred.
 | P0-9 majority-strong BiDi direction | `65aa762` | `10 failed, 69 passed` in `tests/test_bidi.py tests/test_formatting_ownership.py tests/test_injection.py` | `79 passed` in the same targeted suite |
 | P0-10 span-level low-confidence protection | `69568a0` | `2 failed, 7 passed` in `tests/test_app.py` | `97 passed` in `tests/test_app.py tests/test_confidence.py tests/test_terminology.py tests/test_performance_fixes.py` |
 | P0-11 Start/Stop controller snapshot race | `6179094` | `1 failed, 1 passed` in the two controller race tests with the fix temporarily reverted | `2 passed` in the same tests; `14 passed` in `tests/test_session_lifecycle.py` |
-| P0-12 silent provider exit | (this commit) | `2 failed, 14 passed` in `tests/test_shutdown_flow.py` | `80 passed` in shutdown/app/performance/concurrency targeted suites |
+| P0-12 silent provider exit | `7c183dd` | `2 failed, 14 passed` in `tests/test_shutdown_flow.py` | `80 passed` in shutdown/app/performance/concurrency targeted suites |
+| P0-13 fallback clipboard PHI leak | (this commit) | `4 failed, 44 passed` in `tests/test_injection.py tests/test_edge_paths.py` | `68 passed` in injection/edge/Windows-policy targeted suites |
 
 ### P0-7 details
 
@@ -89,8 +90,8 @@ Full-suite validation after P0-7: `1071 passed, 4 skipped, 1 warning`;
 ## Remaining acceptance limitations
 
 - This checkpoint is appended incrementally; the latest per-fix section is the
-  authoritative progress marker. P0-13 and P0-14, all P1/P2 items and all
-  GUI changes remain outstanding at this revision.
+  authoritative progress marker. P0-14, all P1/P2 items and all GUI changes
+  remain outstanding at this revision.
 - The accepted Starlette test-client warning is preserved; no warning filters
   or lockfile edits were added.
 - Native Windows injection, live microphone and live Deepgram behaviors
@@ -266,3 +267,42 @@ FAILED tests/test_shutdown_flow.py::test_silent_provider_exit_does_not_report_a_
 After: targeted shutdown/app/performance/concurrency suites `80 passed`;
 full suite `1112 passed, 4 skipped, 1 warning`; ruff, mypy and secret scan
 clean. No existing pins were changed.
+
+### P0-13 details
+
+- `FallbackBackend.send_unicode_text` now always calls `paste_text` with
+  `restore_clipboard=True`; a dev-only "type" path must not leave dictated PHI
+  on the clipboard even when paste-mode restoration is disabled.
+- `paste_text` refuses an unreadable prior clipboard before writing, verifies
+  that `pyperclip.copy` actually took the text, sends the paste only after
+  that verification, and restores the previous text in a `finally` after the
+  configured settle. Restoration uses a content guard so a newer user copy is
+  not overwritten; if the guard read itself fails, a best-effort restore is
+  still attempted to remove our text.
+- All new failure logs use exception types only, never clipboard contents.
+  The module docstring and README explicitly document the remaining gaps:
+  pyperclip cannot enumerate non-plain formats, expose an OS sequence number
+  (an identical-text newer copy is indistinguishable), or confirm that the
+  target consumed the timed paste. Windows SendInput remains production.
+- `backend.py`'s `get_default_backend` docstring now says the fallback type
+  path restores the prior clipboard unconditionally.
+
+Before (the fixed backend was temporarily replaced with the HEAD version):
+
+```text
+FAILED tests/test_injection.py::test_fallback_typed_path_respects_the_configured_settle
+FAILED tests/test_injection.py::test_fallback_type_mode_restores_previous_clipboard
+FAILED tests/test_injection.py::test_fallback_type_mode_refuses_an_unreadable_clipboard
+FAILED tests/test_injection.py::test_fallback_type_mode_restores_after_a_failed_write_verification
+4 failed, 44 passed in 0.29s
+```
+
+After: `48 passed` in `tests/test_injection.py tests/test_edge_paths.py`;
+`68 passed` when the Windows clipboard-policy suite is included. Full suite
+`1116 passed, 4 skipped, 1 warning`; ruff, mypy and secret scan clean.
+
+Deliberately updated pin: `test_fallback_typed_path_respects_the_configured_settle`
+now also asserts that `send_unicode_text` passes `restore_clipboard=True`.
+Four new regressions cover prior-copy restoration, unreadable refusal,
+verification-failure restore, and the newer-copy content guard. No Windows
+clipboard or security pins were weakened.
