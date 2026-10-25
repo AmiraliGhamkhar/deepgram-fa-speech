@@ -417,6 +417,31 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
         # inflate the session-start metric.
         metrics.increment("session_starts_total")
 
+        # The session id (and its started line) are minted HERE, beside the
+        # start metric, not halfway down the handler after the declared-body
+        # check: refusals that happen before that point -- rate limit,
+        # declared body over cap, malformed Content-Length -- used to have
+        # no session id and therefore no terminal `session_error` line at
+        # all, so "exactly one terminal log per refused request" could not
+        # hold across all refusal outcomes.
+        session_id = new_session_id()
+        log.info("session_started session_id=%s client_id=%s", session_id, identity.client_id)
+        terminal_logged = False
+
+        def log_terminal_session_error(render: Any) -> None:
+            """Emit this request's one terminal `session_error` line.
+
+            Every failure exit -- `refuse()` responses and the two
+            cancellation handlers and the unexpected-error handler -- goes
+            through here, so a request can neither miss its terminal line
+            nor grow a second one when paths compose.
+            """
+            nonlocal terminal_logged
+            if terminal_logged:
+                return
+            terminal_logged = True
+            render()
+
         def record_failure(outcome: str) -> None:
             """Charge an authenticated request that minted no token.
 
@@ -444,14 +469,16 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
                 "session_requests_by_client_total", client_id=identity.client_id, outcome=outcome
             )
 
-        session_id: Optional[str] = None
-
         def refuse(status_code: int, detail: str, outcome: str,
                    headers: Optional[dict] = None) -> JSONResponse:
             """`record_failure` plus the JSON error response for that outcome."""
             record_failure(outcome)
-            if session_id is not None:
-                log.error("session_error session_id=%s reason=%s status=%d", session_id, outcome, status_code)
+            log_terminal_session_error(
+                lambda: log.error(
+                    "session_error session_id=%s reason=%s status=%d",
+                    session_id, outcome, status_code,
+                )
+            )
             return JSONResponse({"detail": detail}, status_code=status_code, headers=headers)
 
         # -- layered rate limits, keyed on identity, not on the NAT IP ----
@@ -494,9 +521,6 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
                 log.warning("session refused reason=declared_body_over_cap bytes=%s", declared)
                 return refuse(413, "request body too large", "body_too_large")
 
-        session_id = new_session_id()
-        log.info("session_started session_id=%s client_id=%s", session_id, identity.client_id)
-
         async def read_body() -> bytes:
             raw = bytearray()
             async for chunk in request.stream():
@@ -517,7 +541,9 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
             # Client disconnected mid-body: counted, then re-raised so the
             # cancellation still unwinds normally.
             record_failure("cancelled")
-            log.info("session_error session_id=%s reason=cancelled", session_id)
+            log_terminal_session_error(
+                lambda: log.info("session_error session_id=%s reason=cancelled", session_id)
+            )
             raise
         except Exception:
             return refuse(400, "incomplete request body", "incomplete_body")
@@ -576,7 +602,9 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
             metrics.observe("token_request_latency", time.monotonic() - started)
             metrics.increment("token_request_failures_total")
             record_failure("cancelled")
-            log.info("session_error session_id=%s reason=cancelled", session_id)
+            log_terminal_session_error(
+                lambda: log.info("session_error session_id=%s reason=cancelled", session_id)
+            )
             raise
         except Exception as exc:  # noqa: BLE001 - the grant path must reconcile
             # `core.grant_session_async` maps every known upstream failure onto
@@ -588,7 +616,13 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
             metrics.observe("token_request_latency", time.monotonic() - started)
             metrics.increment("token_request_failures_total")
             record_failure("internal_error")
-            log.error("session_error session_id=%s reason=unexpected (%s)", session_id, type(exc).__name__)
+            exc_name = type(exc).__name__
+            log_terminal_session_error(
+                lambda: log.error(
+                    "session_error session_id=%s reason=unexpected (%s)",
+                    session_id, exc_name,
+                )
+            )
             raise
         finally:
             inflight.release()

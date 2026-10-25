@@ -241,3 +241,143 @@ def test_env_host_secret_shorter_than_24_chars_is_refused(monkeypatch):
         config.load_host_secret()
     monkeypatch.setenv("MEDICALSTT_HOST_SECRET", "x" * 24)
     assert config.load_host_secret() == "x" * 24
+
+
+# -- E1: exactly one terminal session_error per refused request -----------------
+
+
+@pytest.fixture
+def host_factory(monkeypatch):
+    from dataclasses import replace
+
+    monkeypatch.setenv("DEEPGRAM_API_KEY", "fake-audit-key")
+    monkeypatch.setenv("HOST_SHARED_SECRET", "s" * 40)
+    from host.app import create_app
+    from host.core import HostSettings
+
+    def create(**kw):
+        return create_app(replace(HostSettings("fake", "s" * 40, allow_http=True), **kw))
+
+    return create
+
+
+def _session_error_count(caplog) -> int:
+    return sum("session_error " in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize(
+    "outcome,status", [
+        ("rate_limited", 429),
+        ("declared_body_over_cap", 413),
+        ("invalid_request", 422),
+        ("upstream_saturated", 503),
+        ("upstream_error", 503),
+    ]
+)
+def test_every_refusal_logs_exactly_one_terminal_session_error(
+    host_factory, monkeypatch, caplog, outcome, status
+):
+    import asyncio
+    import importlib
+
+    import httpx
+
+    async def run():
+        if outcome == "rate_limited":
+            app = host_factory(client_burst=1)
+        elif outcome == "declared_body_over_cap":
+            app = host_factory(max_request_body_bytes=64)
+        elif outcome == "upstream_saturated":
+            app = host_factory(max_inflight_grants=1)
+            assert app.state.inflight.acquire(), "pre-exhaust the one grant slot"
+        else:
+            app = host_factory()
+
+        if outcome == "upstream_error":
+            from host.core import GrantError
+
+            async def fail(*_):
+                raise GrantError("Upstream unavailable", 503)
+
+            monkeypatch.setattr(importlib.import_module("host.app"), "grant_session_async", fail)
+        else:
+            async def ok(*_):
+                return "fake-token", 30
+
+            monkeypatch.setattr(importlib.import_module("host.app"), "grant_session_async", ok)
+
+        headers = {"Authorization": "Bearer " + "s" * 40}
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                if outcome == "rate_limited":
+                    first = await client.post("/v1/session", headers=headers, json={})
+                    assert first.status_code == 200
+                    response = await client.post("/v1/session", headers=headers, json={})
+                elif outcome == "declared_body_over_cap":
+                    response = await client.post(
+                        "/v1/session", headers=headers, content=b"x" * 65
+                    )
+                elif outcome == "invalid_request":
+                    response = await client.post(
+                        "/v1/session", headers=headers, json={"ttl_seconds": "invalid"}
+                    )
+                else:
+                    response = await client.post("/v1/session", headers=headers, json={})
+                assert response.status_code == status
+
+    with caplog.at_level(logging.INFO, logger="medical_stt.host"):
+        asyncio.run(run())
+    assert _session_error_count(caplog) == 1
+
+
+def test_refusal_without_a_peer_address_still_logs_one_terminal(host_factory, caplog):
+    """WSGI/Passenger can hand the app a scope with no client address
+    (`peer is None`); the terminal-log invariant must hold there too."""
+    import asyncio
+    import json as json_module
+
+    async def run():
+        app = host_factory()
+        body = json_module.dumps({"ttl_seconds": "invalid"}).encode()
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": "/v1/session",
+            "raw_path": b"/v1/session",
+            "query_string": b"",
+            "root_path": "",
+            "headers": [
+                (b"host", b"test"),
+                (b"authorization", b"Bearer " + b"s" * 40),
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode()),
+            ],
+            "server": ("test", 80),
+            # deliberately no "client": peer is None
+        }
+        sent: list[dict] = []
+        delivered = False
+
+        async def receive():
+            nonlocal delivered
+            if not delivered:
+                delivered = True
+                return {"type": "http.request", "body": body, "more_body": False}
+            return {"type": "http.disconnect"}
+
+        async def send(message):
+            sent.append(message)
+
+        async with app.router.lifespan_context(app):
+            await app(scope, receive, send)
+        start = next(m for m in sent if m["type"] == "http.response.start")
+        assert start["status"] == 422
+
+    with caplog.at_level(logging.INFO, logger="medical_stt.host"):
+        asyncio.run(run())
+    assert _session_error_count(caplog) == 1
