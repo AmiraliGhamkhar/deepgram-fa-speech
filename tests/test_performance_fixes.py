@@ -243,11 +243,13 @@ def test_mailbox_coalesces_partials_without_tk():
     assert calls == [9999, "closed"]
 
 
-def test_mailbox_overload_is_explicit():
+def test_mailbox_overload_drops_oldest_without_raising():
+    calls = []
     mailbox = Mailbox(capacity=1)
-    mailbox.post("one", lambda: None)
-    with pytest.raises(RuntimeError, match="full"):
-        mailbox.post("two", lambda: None)
+    mailbox.post("one", lambda: calls.append("one"))
+    mailbox.post("two", lambda: calls.append("two"))
+    mailbox.drain()
+    assert calls == ["two"]
 
 
 def test_audio_age_and_loss_accounting(monkeypatch):
@@ -590,3 +592,29 @@ def test_native_check_requires_explicit_interactive_opt_in():
     result = subprocess.run([sys.executable, "scripts/windows_injection_check.py"], capture_output=True, text=True)
     assert result.returncode == 2
     assert "no native input" in result.stdout
+
+
+@pytest.mark.parametrize("callback", ["interim", "error", "warning"])
+def test_sdk_callbacks_contain_cosmetic_failures(build_session, monkeypatch, caplog, callback):
+    stt, captured = build_session()
+    thread, errors = run_session(stt)
+    try:
+        assert captured.wait(1)
+        def fail(*args):
+            raise RuntimeError("private transcript must not be logged")
+        if callback == "interim":
+            monkeypatch.setattr(stt.overlay, "set_partial", fail)
+            stt.provider.transcript(TranscriptEvent(text="hello", is_final=False))
+        elif callback == "error":
+            monkeypatch.setattr(stt, "_on_provider_error", fail)
+            stt.provider.error(ProviderError(ErrorCategory.NETWORK, "private error"))
+        else:
+            monkeypatch.setattr(stt.overlay, "set_warning", fail)
+            stt._warn("private warning")
+        assert thread.is_alive()
+        assert "RuntimeError" in caplog.text
+        assert "private" not in caplog.text
+    finally:
+        stt.request_stop()
+        thread.join(2)
+    assert not errors

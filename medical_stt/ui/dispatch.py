@@ -11,12 +11,13 @@ class Mailbox:
     def __init__(self, capacity: int = 64) -> None:
         self._pending: OrderedDict[str, Callable[[], None]] = OrderedDict()
         self._lock = threading.Lock()
-        self._capacity = capacity
+        self._capacity = max(1, capacity)
 
     def post(self, key: str, fn: Callable[[], None]) -> None:
         with self._lock:
             if key not in self._pending and len(self._pending) >= self._capacity:
-                raise RuntimeError("UI mailbox full")
+                # Cosmetic updates must never terminate a network callback.
+                self._pending.popitem(last=False)
             self._pending[key] = fn
 
     def drain(self) -> None:

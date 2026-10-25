@@ -264,7 +264,10 @@ class LiveMedicalSTT:
         if self._recovery_truncated:
             message += " — ظرفیت بازیابی پر شده؛ بخشی از متن در دسترس نیست"
         self.warning = message
-        self.overlay.set_warning(message)
+        try:
+            self.overlay.set_warning(message)
+        except Exception as exc:
+            log.error("UI warning failed (%s)", type(exc).__name__)
 
     def _clear_warning(self, message: str) -> None:
         """Withdraw `message` once its cause is gone, without clobbering a
@@ -550,9 +553,20 @@ class LiveMedicalSTT:
         processing_done = threading.Event()
 
         def on_error(error: ProviderError) -> None:
-            self._on_provider_error(error, generation)
+            try:
+                self._on_provider_error(error, generation)
+            except Exception as exc:
+                log.error("Provider error callback failed (%s)", type(exc).__name__)
 
         def on_transcript(event: TranscriptEvent) -> None:
+            # SDK emitters do not isolate handlers. Never turn a local UI
+            # failure into an upstream ERROR/reconnect cycle, or log PHI.
+            try:
+                handle_transcript(event)
+            except Exception as exc:
+                log.error("Transcript callback failed (%s)", type(exc).__name__)
+
+        def handle_transcript(event: TranscriptEvent) -> None:
             nonlocal receive_latency
             if not self._is_current_session(generation):
                 return
