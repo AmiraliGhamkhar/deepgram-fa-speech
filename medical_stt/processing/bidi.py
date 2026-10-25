@@ -125,13 +125,19 @@ def to_injected(text: str) -> str:
     itself for the target application to reorder correctly. The mark follows
     `base_direction`'s majority-strong heuristic, so a Persian-dominant note
     that starts with a Latin abbreviation still gets an RLM.
+
+    Pure-neutral text (numbers/punctuation only, e.g. a dictated "120/80")
+    gets NO mark: `base_direction` reports its LTR default for want of any
+    strong character, and stamping an invisible LRM onto numbers-only
+    dictation only carried stray marks into the EMR.
     """
     if not text:
         return text
-    direction = base_direction(text)
-    mark = RLM if direction == "rtl" else LRM
     if text.startswith((RLM, LRM)):
         return text
+    if not (has_rtl_content(text) or has_ltr_content(text)):
+        return text
+    mark = RLM if base_direction(text) == "rtl" else LRM
     return mark + text
 
 

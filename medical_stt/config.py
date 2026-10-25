@@ -31,7 +31,6 @@ import yaml
 from dotenv import load_dotenv
 
 from . import paths
-from .processing.normalize import normalize
 from .security import SecretStore, SecretStoreError
 
 log = logging.getLogger("medical_stt.config")
@@ -862,7 +861,14 @@ def load_asr_replacements() -> List[str]:
 def load_correction_rules_raw() -> List[Dict[str, Any]]:
     """Return the raw categorized rule dicts (see processing/terminology.py
     for the schema). Kept separate from the legacy pair-tuple loader so
-    callers can access category metadata."""
+    callers can access category metadata.
+
+    Structural failures (no top-level `rules` list, `rules` not a list)
+    raise here. Per-rule validation does NOT: one malformed rule in a
+    hand-edited file must not brick the client, so rule-level problems are
+    skipped with a warning by `processing.terminology.parse_rules_detailed`
+    when the engine (or the legacy pair loader below) consumes this list.
+    """
     data = _load_yaml(_DATA_DIR / "corrections.yaml")
     if not isinstance(data, dict) or "rules" not in data:
         if data:
@@ -873,23 +879,18 @@ def load_correction_rules_raw() -> List[Dict[str, Any]]:
         return []
     if not isinstance(rules, list):
         raise ConfigError("data/corrections.yaml 'rules' must be a list")
-    raw_rules = [r for r in rules if isinstance(r, dict)]
-    from .processing.terminology import parse_rules
-
-    parse_rules(raw_rules)  # fail at load time, including for legacy flat callers
-    return raw_rules
+    return [r for r in rules if isinstance(r, dict)]
 
 
 def load_correction_rules() -> List[Tuple[str, str]]:
     """Backward-compatible flat (source, target) pairs, ignoring category
     metadata. Prefer TerminologyEngine for anything safety-sensitive."""
-    pairs: List[Tuple[str, str]] = []
-    for item in load_correction_rules_raw():
-        src = item.get("from") or item.get("source") or item.get("src")
-        tgt = item.get("to") or item.get("target") or item.get("tgt")
-        if src and tgt is not None:
-            # Legacy flat callers must see the same canonical form as the
-            # terminology engine: a raw Arabic-yeh source would otherwise stay
-            # unmatchable after normalize() has run on the transcript.
-            pairs.append((normalize(str(src)), normalize(str(tgt))))
-    return pairs
+    from .processing.terminology import parse_rules
+
+    # Legacy flat callers must see exactly the rules the engine accepts, in
+    # the same canonical form: parsing here filters out invalid rules (with
+    # the engine's warnings) and normalizes both sides, so a raw Arabic-yeh
+    # source cannot stay unmatchable after normalize() has run on the
+    # transcript, and a skipped digit-changing rule cannot sneak back in
+    # through the legacy path.
+    return [(rule.source, rule.target) for rule in parse_rules(load_correction_rules_raw())]

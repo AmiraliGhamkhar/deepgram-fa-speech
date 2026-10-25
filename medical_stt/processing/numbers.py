@@ -16,7 +16,20 @@ import re
 from dataclasses import dataclass
 from typing import Iterator, List, Tuple
 
-_NUM = r"\d+(?:[.,]\d+)?"
+# One number. Thousands forms come first: digit groups of exactly three
+# joined by ONE consistent separator, with an optional decimal tail written
+# with the other separator ("1,000,000", "1,250.5", "1.250.500",
+# "1.250,5"). A group that is not three digits is legal only as the plain
+# decimal tail of the last alternative ("7.2", "12,34"), never as a
+# thousands group. The single-separator grammar this replaced admitted no
+# thousands form at all, and the `_LEFT`/`_RIGHT` guards below then refused
+# every partial match -- so "1,000,000" got NO protected span and the
+# byte-for-byte guarantee held only by accident.
+_NUM = (
+    r"(?:\d{1,3}(?:,\d{3})+(?:\.\d+)?"
+    r"|\d{1,3}(?:\.\d{3})+(?:,\d+)?"
+    r"|\d+(?:[.,]\d+)?)"
+)
 
 # `\b` is the wrong boundary for medical dictation: Persian and Latin letters
 # are `\w`, so ASR output such as "BP120/80", "CO2" or "دکستروز5 درصد" has no

@@ -6,24 +6,34 @@ metadata from data/corrections.yaml so that:
 * "unsafe"/"dangerous" rules are never applied.
 * "context_dependent" rules are opt-in (disabled by default) because their
   source is a common word that is only unambiguous with extra context this
-  system does not have.
+  system does not have. Rules carrying `confidence: low` take the same
+  opt-in in any category: the metadata is the engine's stated trust in the
+  mapping, so a low-trust mapping must not fire by default either.
 * Numeric expressions are protected except inside explicit digit-preserving rules.
 * Recognized negation phrases (processing/negation.py) are never rewritten,
   so a rule can't accidentally consume part of a negation and flip meaning.
 
 Principle (see README): if uncertain, preserve the original transcript
 rather than inventing or forcing a medical abbreviation.
+
+Loading principle: ONE malformed rule must not brick the client. Structural
+failures of the file (no top-level `rules` list) are `ConfigError`s raised
+by the config loader, but a *per-rule* validation failure -- a digit-run
+violation, an empty side, a non-boolean flag -- only skips that rule, with
+a WARNING naming its index and the reason (never the rule text, which at
+worst could be dictated vocabulary pasted into the file). A 5,000-line
+hand-edited YAML with one typo must still start the app with every other
+rule active.
 """
 from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Iterable, List, Sequence, Tuple
 
-from ..config import ConfigError
 from .fst import DeterministicFST, LoadResult, Rule
-from .negation import find_negation_spans
+from .negation import census_fully_negated_sources, find_negation_spans
 from .normalize import normalize
 from .numbers import find_numeric_spans
 
@@ -48,56 +58,99 @@ class TerminologyRule:
     numeric_in_source: bool = False
 
 
-def parse_rules(raw_items: Iterable[dict]) -> List[TerminologyRule]:
-    """Parse raw YAML rule dicts into TerminologyRule, tolerating the
-    legacy flat {from, to} shape (treated as specialty_terminology/high
-    confidence for backward compatibility, never as dangerous).
+@dataclass(frozen=True)
+class ParseResult:
+    """Outcome of parsing raw rule dicts: the usable rules, plus how many
+    were skipped (and why, by index) so the skip is auditable at startup."""
+
+    rules: List[TerminologyRule]
+    skipped_invalid: int = 0
+    skipped_reasons: Tuple[Tuple[int, str], ...] = field(default_factory=tuple)
+
+
+def parse_rules_detailed(raw_items: Iterable[dict]) -> ParseResult:
+    """Parse raw YAML rule dicts, skipping (never raising on) a bad rule.
+
+    Legacy flat {from, to} shapes are tolerated (treated as
+    specialty_terminology/high confidence for backward compatibility,
+    never as dangerous).
 
     Both sides are normalized at parse time: every transcript reaching the
     FST has already been normalized, so a raw Arabic-yeh source would never
     match, and a raw target would inject non-normalized text back into the
     pipeline. Digit-run validation uses the same canonical representation on
     both sides.
+
+    Per-rule validation failures -- empty/blank sides, a non-boolean
+    `numeric_in_source`, digit-run violations, an unflagged numeric span --
+    skip just that rule and log a WARNING with its index and the reason.
+    Unknown categories keep their established downgrade to
+    `context_dependent` rather than being skipped outright.
     """
     rules: List[TerminologyRule] = []
-    for item in raw_items:
+    skipped: List[Tuple[int, str]] = []
+
+    def skip(index: int, reason: str) -> None:
+        skipped.append((index, reason))
+        log.warning("skipping terminology rule %d: %s", index, reason)
+
+    for index, item in enumerate(raw_items):
         if not isinstance(item, dict):
+            skip(index, "rule entry is not a mapping")
             continue
         src = item.get("from") or item.get("source")
-        tgt = item.get("to") or item.get("target")
-        if not src or tgt is None:
+        tgt = item.get("to")
+        if tgt is None:
+            tgt = item.get("target")
+        if src is None or tgt is None:
+            skip(index, "rule is missing a source or a target")
             continue
         numeric_in_source = item.get("numeric_in_source", False)
         if not isinstance(numeric_in_source, bool):
-            raise ConfigError("terminology numeric_in_source must be a boolean")
+            skip(index, "numeric_in_source must be a boolean")
+            continue
         normalized_source = normalize(str(src))
         normalized_target = normalize(str(tgt))
-        if not normalized_source:
-            raise ConfigError("terminology rule source normalizes to an empty string")
+        if not normalized_source or not normalized_target:
+            skip(index, "rule source or target is empty")
+            continue
         source_digits = re.findall(r"\d+", normalized_source)
         target_digits = re.findall(r"\d+", normalized_target)
         if numeric_in_source:
             if not source_digits or source_digits != target_digits:
-                raise ConfigError("numeric_in_source requires identical digit sequences in source and target")
+                skip(index, "numeric_in_source requires identical digit sequences in source and target")
+                continue
         elif find_numeric_spans(normalized_source):
-            raise ConfigError("terminology rule with a numeric span requires numeric_in_source: true")
+            skip(index, "rule with a numeric span requires numeric_in_source: true")
+            continue
         category = str(item.get("category", "specialty_terminology"))
         if category not in VALID_CATEGORIES:
-            log.warning("unknown terminology category %r for %r; treating as context_dependent", category, normalized_source)
+            log.warning(
+                "unknown terminology category %r in rule %d; treating as context_dependent",
+                category, index,
+            )
             category = "context_dependent"
         rules.append(
             TerminologyRule(
                 source=normalized_source,
                 target=normalized_target,
                 category=category,
-                confidence=str(item.get("confidence", "high")),
+                confidence=str(item.get("confidence", "high")).strip().lower(),
                 requires_context=bool(item.get("requires_context", category in OPT_IN_CATEGORIES)),
                 dangerous=bool(item.get("dangerous", category in BLOCKED_CATEGORIES)),
                 specialty=str(item.get("specialty", "")),
                 numeric_in_source=numeric_in_source,
             )
         )
-    return rules
+    return ParseResult(
+        rules=rules, skipped_invalid=len(skipped), skipped_reasons=tuple(skipped)
+    )
+
+
+def parse_rules(raw_items: Iterable[dict]) -> List[TerminologyRule]:
+    """Parse raw YAML rule dicts into the usable rules (see
+    `parse_rules_detailed` for the skip-and-warn policy and the count)."""
+    return parse_rules_detailed(raw_items).rules
 
 
 class TerminologyEngine:
@@ -108,14 +161,29 @@ class TerminologyEngine:
         self._fst = DeterministicFST()
         self._all_rules: List[TerminologyRule] = []
         self._active_rules: List[TerminologyRule] = []
+        self._skipped_invalid = 0
         self._load_result: LoadResult = LoadResult(rules_loaded=0)
 
+    @staticmethod
+    def _needs_opt_in(rule: TerminologyRule) -> bool:
+        """Opt-in gate shared by context-dependent and low-confidence rules.
+
+        `confidence: low` is the file's own statement that the mapping is
+        not fully trusted; treating it exactly like `requires_context`
+        gives that metadata the one safe meaning it can have.
+        """
+        return rule.requires_context or rule.confidence == "low"
+
     def load(self, raw_items: Iterable[dict]) -> LoadResult:
-        self._all_rules = parse_rules(raw_items)
+        parsed = parse_rules_detailed(raw_items)
+        self._all_rules = parsed.rules
+        self._skipped_invalid = parsed.skipped_invalid
         self._active_rules = [r for r in self._all_rules if self._is_active(r)]
         skipped_dangerous = sum(1 for r in self._all_rules if r.dangerous)
         skipped_context = sum(
-            1 for r in self._all_rules if r.requires_context and not r.dangerous and not self.enable_context_dependent
+            1
+            for r in self._all_rules
+            if self._needs_opt_in(r) and not r.dangerous and not self.enable_context_dependent
         )
         # DeterministicFST.load() is documented as single-use, and this is why:
         # pyahocorasick accepts add_word() after make_automaton(), so reusing
@@ -128,16 +196,23 @@ class TerminologyEngine:
         self._load_result = self._fst.load(
             [Rule(r.source, r.target, numeric_in_source=r.numeric_in_source) for r in self._active_rules]
         )
+        self._load_result.invalid_rules_skipped = self._skipped_invalid
+        # Startup-only census: an active source that is itself a negation
+        # marker can never fire (negation spans are hard-protected in
+        # `apply`); surface the count instead of leaving it silently dead.
+        census_fully_negated_sources(r.source for r in self._active_rules)
         log.info(
-            "terminology loaded: %d active rules (%d dangerous skipped, %d context-dependent skipped)",
+            "terminology loaded: %d active rules (%d dangerous skipped, "
+            "%d context-dependent skipped, %d invalid skipped)",
             self._load_result.rules_loaded, skipped_dangerous, skipped_context,
+            self._skipped_invalid,
         )
         return self._load_result
 
     def _is_active(self, rule: TerminologyRule) -> bool:
         if rule.dangerous or rule.category in BLOCKED_CATEGORIES:
             return False
-        if rule.requires_context and not self.enable_context_dependent:
+        if self._needs_opt_in(rule) and not self.enable_context_dependent:
             return False
         return True
 
@@ -146,8 +221,16 @@ class TerminologyEngine:
         return len(self._active_rules)
 
     @property
+    def skipped_rule_count(self) -> int:
+        """Rules skipped at parse time as invalid (see `parse_rules_detailed`)."""
+        return self._skipped_invalid
+
+    @property
     def total_rule_count(self) -> int:
-        return len(self._all_rules)
+        # Every rule entry in the file, including the invalid ones that were
+        # skipped while parsing: "X / Y total" at startup must account for
+        # the whole file, not just the slice that parsed.
+        return len(self._all_rules) + self._skipped_invalid
 
     def apply(
         self,

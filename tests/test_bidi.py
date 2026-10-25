@@ -137,8 +137,6 @@ def test_base_direction_counts_strong_characters(text, expected):
         ("HbA1c برابر 7.2 درصد است", RLM),
         ("بیمار CT scan normal", LRM),
         ("patient has stable vitals", LRM),
-        ("120/80", LRM),
-        ("98%", LRM),
     ],
 )
 def test_injected_mark_follows_majority_without_embeddings(text, expected_mark):
@@ -148,3 +146,12 @@ def test_injected_mark_follows_majority_without_embeddings(text, expected_mark):
     assert "\u202b" not in injected and "\u202c" not in injected  # RLE/PDF
     assert injected.lstrip(LRM + RLM) == text
     assert to_injected(injected) == injected
+
+
+@pytest.mark.parametrize("text", ["120/80", "98%", "...", "7.2"])
+def test_pure_neutral_text_gets_no_directional_mark(text):
+    """Numbers-only dictation has no strong character, so a leading LRM
+    would be a stray invisible mark carried into the EMR. `base_direction`
+    still reports the LTR default; only the mark is withheld."""
+    assert base_direction(text) == "ltr"
+    assert to_injected(text) == text

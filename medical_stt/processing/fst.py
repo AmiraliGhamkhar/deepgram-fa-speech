@@ -47,6 +47,11 @@ class LoadResult:
     rules_loaded: int
     conflicts: List[Tuple[str, List[str], str]] = field(default_factory=list)
     empty_sources_skipped: int = 0
+    #: Rules the terminology layer refused before they ever reached the FST
+    #: (per-rule validation failures skipped with a warning, so one bad rule
+    #: in a hand-edited file cannot brick the client). Filled in by
+    #: `TerminologyEngine.load`; always 0 for a bare FST load.
+    invalid_rules_skipped: int = 0
 
 
 class DeterministicFST:

@@ -813,7 +813,11 @@ class LiveMedicalSTT:
         s = self.settings
         log.info("Medical STT starting: model=%s language=%s", s.model, s.language)
         log.info("Host: %s (short-lived sessions; no Deepgram key on this machine)", s.host_url)
-        log.info("Correction rules active: %d / %d total", self.terminology.rule_count, self.terminology.total_rule_count)
+        log.info(
+            "Correction rules active: %d / %d total, %d skipped",
+            self.terminology.rule_count, self.terminology.total_rule_count,
+            self.terminology.skipped_rule_count,
+        )
         log.info("Keyterms loaded: %d", len(self.keyterms))
 
         policy = ReconnectPolicy(

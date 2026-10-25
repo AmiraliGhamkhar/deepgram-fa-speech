@@ -4,7 +4,6 @@ from __future__ import annotations
 import pytest
 
 from medical_stt.config import (
-    ConfigError,
     load_correction_rules,
     load_correction_rules_raw,
 )
@@ -176,47 +175,87 @@ def test_numeric_opt_in_cannot_bypass_negation_protection():
     ("دکستروز 5%", "D10W"),
     ("دکستروز 10 و 20", "D1020"),
 ])
-def test_loader_rejects_numeric_opt_in_without_matching_digit_runs(source, target):
-    with pytest.raises(ConfigError, match="identical digit sequences"):
-        parse_rules([_rule(source, target, numeric_in_source=True)])
+def test_loader_skips_numeric_opt_in_without_matching_digit_runs(source, target, caplog):
+    """One malformed rule must not brick the client: per-rule validation
+    failures are skipped with a warning (rule index + reason only), while
+    structural failures of the file still raise in the config loader."""
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="medical_stt.processing.terminology"):
+        assert parse_rules([_rule(source, target, numeric_in_source=True)]) == []
+    assert "rule 0" in caplog.text and "digit" in caplog.text
 
 
-def test_loader_rejects_unflagged_digit_bearing_span():
-    with pytest.raises(ConfigError, match="numeric_in_source"):
-        parse_rules([_rule("120", "ONE_TWENTY")])
+def test_loader_skips_unflagged_digit_bearing_span():
+    assert parse_rules([_rule("120", "ONE_TWENTY")]) == []
 
 
 def test_numeric_opt_in_requires_a_boolean():
-    with pytest.raises(ConfigError, match="boolean"):
-        parse_rules([_rule("دکستروز 5%", "D5W", numeric_in_source="false")])
+    assert parse_rules([_rule("دکستروز 5%", "D5W", numeric_in_source="false")]) == []
 
 
+def test_empty_side_rules_are_skipped_like_other_malformed_rules():
+    assert parse_rules([_rule("بیوپسی", "")]) == []
+    assert parse_rules([_rule("بیوپسی", "   ")]) == []
+    assert parse_rules([_rule("", "Biopsy")]) == []
 
 
 @pytest.mark.parametrize("rule", [
     _rule("دکستروز 5%", "D5W"),
     _rule("دکستروز 5%", "D10W", numeric_in_source=True),
 ])
-def test_yaml_loader_rejects_dead_or_digit_changing_rules(tmp_path, monkeypatch, rule):
+def test_yaml_loader_skips_dead_or_digit_changing_rules(tmp_path, monkeypatch, rule):
     import yaml
     from medical_stt import config as config_module
 
     (tmp_path / "corrections.yaml").write_text(
-        yaml.safe_dump({"rules": [rule]}, allow_unicode=True), encoding="utf-8"
+        yaml.safe_dump({"rules": [rule, _rule("بیوپسی", "Biopsy")]}, allow_unicode=True),
+        encoding="utf-8",
     )
     monkeypatch.setattr(config_module, "_DATA_DIR", tmp_path)
-    with pytest.raises(ConfigError, match="numeric_in_source|identical digit sequences"):
-        config_module.load_correction_rules_raw()
+    raw = config_module.load_correction_rules_raw()
+    engine = TerminologyEngine()
+    result = engine.load(raw)
+    assert engine.apply("بیوپسی") == "Biopsy"
+    assert result.invalid_rules_skipped == 1
+    assert engine.skipped_rule_count == 1
+    assert engine.total_rule_count == 2
+
+
+def test_one_poisoned_rule_does_not_brick_the_shipped_file():
+    """A single hand-edit mistake in the 800+-rule file must leave every
+    other rule loadable and the app startable."""
+    raw = load_correction_rules_raw()
+    engine = TerminologyEngine()
+    result = engine.load(list(raw) + [_rule("120", "ONE_TWENTY")])
+    assert result.invalid_rules_skipped == 1
+    assert engine.rule_count > 0
+    assert engine.apply("120") == "120"
 
 
 def test_letter_glued_digit_requires_numeric_opt_in():
     """After P0-7, a digit in a Latin term is a protected numeric span."""
-    with pytest.raises(ConfigError, match="numeric_in_source"):
-        parse_rules([_rule("لیزر CO2", "CO2 laser")])
+    assert parse_rules([_rule("لیزر CO2", "CO2 laser")]) == []
 
     engine = TerminologyEngine()
     engine.load([_rule("لیزر CO2", "CO2 laser", numeric_in_source=True)])
     assert engine.apply("لیزر CO2") == "CO2 laser"
+
+
+def test_low_confidence_rules_require_the_context_opt_in():
+    """`confidence: low` used to be parsed and ignored. It now carries the
+    same opt-in as `context_dependent`; medium/high are unchanged."""
+    rules = [
+        _rule("بیوپسی", "Biopsy", category="specialty_terminology", confidence="low"),
+        _rule("کاتتر", "Catheter", category="specialty_terminology", confidence="medium"),
+    ]
+    engine = TerminologyEngine(enable_context_dependent=False)
+    engine.load(rules)
+    assert engine.apply("بیوپسی و کاتتر") == "بیوپسی و Catheter"
+
+    opted_in = TerminologyEngine(enable_context_dependent=True)
+    opted_in.load(rules)
+    assert opted_in.apply("بیوپسی و کاتتر") == "Biopsy و Catheter"
 
 
 def test_numeric_span_covers_persian_unit_against_terminology_rewrite():

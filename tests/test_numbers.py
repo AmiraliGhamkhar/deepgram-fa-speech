@@ -153,3 +153,33 @@ def test_range_span_does_not_end_with_a_detached_space(text):
     spans = find_numeric_spans(text)
     assert spans
     assert all(not s.text.endswith(" ") for s in spans), [s.text for s in spans]
+
+
+# -- thousands-separated numbers -------------------------------------------
+#
+# The old `_NUM` admitted a single separator, and the boundary guards then
+# refused every partial match, so a thousands-separated lab count got NO
+# protected span at all: the byte-for-byte guarantee held by accident.
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("1,000,000", "1,000,000"),
+        ("1.250.500", "1.250.500"),
+        ("1,250.5 mg", "1,250.5 mg"),
+        ("2,500,000 گلبول", "2,500,000"),
+        ("120/80", "120/80"),
+    ],
+)
+def test_thousands_separated_numbers_are_protected_as_one_span(text, expected):
+    texts = [s.text for s in find_numeric_spans(text)]
+    assert expected in texts, texts
+
+
+def test_irregular_grouping_is_still_char_protected_as_a_plain_number():
+    """`12,34` is not legal thousands grouping (groups are three digits),
+    so it must not be read as one -- but its digits/separator still make up
+    a plain (decimal-comma) number that stays char-protected as one span."""
+    spans = find_numeric_spans("12,34")
+    assert [(s.start, s.end) for s in spans] == [(0, 5)]

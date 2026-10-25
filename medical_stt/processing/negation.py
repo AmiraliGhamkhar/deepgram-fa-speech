@@ -17,8 +17,11 @@ markers is treated as "hard boundaries" that:
 """
 from __future__ import annotations
 
+import logging
 import re
-from typing import List, Tuple
+from typing import Iterable, List, Tuple
+
+log = logging.getLogger("medical_stt.processing.negation")
 
 # Order matters only for readability; matching is longest-match via regex
 # alternation sorted by length below.
@@ -107,3 +110,27 @@ def find_negation_spans(text: str) -> List[Tuple[int, int]]:
             occupied[i] = True
     spans.sort()
     return spans
+
+
+def census_fully_negated_sources(sources: Iterable[str]) -> int:
+    """Count rule sources lying ENTIRELY inside a protected negation span.
+
+    Startup/debug census only -- `TerminologyEngine.load` calls it once so
+    a rule whose whole source is itself a negation marker (and which can
+    therefore never fire, because `apply` hard-protects negation spans) is
+    at least visible in the log instead of silently dead. Only the count
+    is logged, never a source. There is no cost in the match path.
+    """
+    dead = sum(
+        1
+        for source in sources
+        if source
+        and any(start <= 0 and end >= len(source) for start, end in find_negation_spans(source))
+    )
+    if dead:
+        log.warning(
+            "terminology census: %d rule source(s) lie entirely inside a "
+            "protected negation span and can never fire",
+            dead,
+        )
+    return dead

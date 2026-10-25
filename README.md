@@ -560,7 +560,18 @@ Every rule carries metadata:
   rules are applied by default.
 - **`context_dependent`** rules (e.g. "نبض" → "HR") are **disabled by
   default**. Enable with `enable_context_dependent_terms: true` only after
-  reviewing the risk for your dictation population.
+  reviewing the risk for your dictation population. The same opt-in gates
+  any rule carrying **`confidence: low`**, in any category: it is the
+  file's own statement that the mapping is not fully trusted, so it does
+  not fire by default. `confidence: high` / `medium` follow their category
+  exactly.
+- **One malformed rule cannot brick the client.** A rule that fails
+  per-rule validation (an empty side, a digit-changing source/target, an
+  unflagged numeric span) is skipped with a warning naming its index, the
+  skipped count appears in the startup log
+  (`Correction rules active: X / Y total, Z skipped`), and every other
+  rule still loads. Structural damage to the file (no top-level `rules:`
+  list) remains a hard configuration error.
 - Rules whose **source is everyday Persian** that merely *has* a medical
   reading are always `context_dependent`, never active by default:
   `کلیه` ("all") ≠ Kidney, `نمونه` ("sample") ≠ Specimen, `جفت` ("pair")
