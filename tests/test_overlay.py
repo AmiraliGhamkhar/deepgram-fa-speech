@@ -3,7 +3,16 @@ section 6: "Add tests wherever practical without requiring a real Windows
 GUI in CI")."""
 from __future__ import annotations
 
-from medical_stt.ui.overlay import TranscriptOverlay
+from medical_stt.ui.overlay import TranscriptOverlay, _is_rtl
+
+
+def test_empty_text_is_not_rtl():
+    """A3.7: `_is_rtl("")` used to fall through to True."""
+    assert _is_rtl("") is False
+    assert _is_rtl("   \t\n") is False
+    # The real directions are unchanged.
+    assert _is_rtl("سلام") is True
+    assert _is_rtl("hello") is False
 
 
 def test_overlay_disabled_when_requested():

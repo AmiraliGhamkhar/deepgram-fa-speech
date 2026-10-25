@@ -28,6 +28,10 @@ except ImportError:
 
 
 def _is_rtl(text: str) -> bool:
+    if not text.strip():
+        # Empty text has no direction; falling through to True right-aligned
+        # the placeholder for no reason.
+        return False
     for ch in text.strip():
         if (
             "\u0600" <= ch <= "\u06ff"
