@@ -134,6 +134,7 @@ class TranscriptOverlay:
                 return
             shared = dispatch.owner_root
             self._root = tk.Toplevel(shared) if shared is not None else tk.Tk()
+            fonts.apply_tk_scaling(self._root)
             self._root.title("Medical STT Overlay")
             self._root.overrideredirect(True)
             self._root.attributes("-topmost", True)

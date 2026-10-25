@@ -195,6 +195,7 @@ class ControlWindow:
             # process is DPI-unaware gets bitmap-scaled on Windows (R2).
             fonts.enable_windows_dpi_awareness()
             self._root = tk.Tk()
+            fonts.apply_tk_scaling(self._root)
             dispatch.install_owner(self._root, self._mailbox)
             self._build(self._root)
             # No WM_DELETE_WINDOW protocol: `_build` sets

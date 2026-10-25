@@ -92,3 +92,13 @@ note: 1 baseline entry matched nothing (existing scanner advisory)
 Warning unchanged: Starlette/httpx TestClient deprecation; no filters or locks
 changed. Live/load/soak gates untouched. Native Windows/Tk visual acceptance
 is not claimed in this headless Linux environment.
+
+## Phase 2 R2 completion: actual-DPI Tk scaling
+
+Shared font preference resolution and before-Tk process awareness were already
+implemented in PR #27; preserved. Added one best-effort scaling helper called
+on each window's owning thread after creation, before widget build, querying
+GetDpiForWindow with Tk's pixels-per-inch fallback, scaling = DPI/72.
+Before: two new scaling tests failed with AttributeError (missing helper).
+After: fonts/control/overlay suites 57 passed. Fake-DLL awareness pin also
+passes; existing before-Tk ordering test preserved. No existing pins changed.
