@@ -93,7 +93,8 @@ class TextInjector:
         self._last_partial = ""
 
     def type_delta_from_partial(self, partial: str) -> None:
-        """Handles real-time speech streaming: if the STT revises a
+        """Public-API-only legacy streaming support; production interims are
+        overlay-only and never call this backspace machinery. If the STT revises a
         previous hypothesis, send backspaces for the changed suffix and
         type the new text."""
         partial = partial or ""
@@ -162,7 +163,7 @@ class TextInjector:
             break
         return index
 
-    def type_text(self, text: str) -> bool:
+    def type_text(self, text: str, add_directional_mark: bool = False) -> bool:
         """Type text via synthetic Unicode key events.
 
         Every backend call below is wrapped in a broad `except Exception`, not
@@ -181,11 +182,13 @@ class TextInjector:
         self.last_error = None
         if not text:
             return False
+        if add_directional_mark:
+            text = to_injected(text)
         try:
             ok = self.backend.send_unicode_text(text)
         except Exception as exc:  # noqa: BLE001 - see the docstring
             self.last_error = str(exc)
-            log.warning("type_text failed: %s", exc)
+            log.warning("type_text failed (%s)", type(exc).__name__)
             return False
         if not ok:
             self.last_error = "backend reported failure"
@@ -221,7 +224,7 @@ class TextInjector:
             ok = self.backend.paste_text(text, self.restore_clipboard, self.paste_settle_seconds)
         except Exception as exc:  # noqa: BLE001 - see the note on type_text
             self.last_error = str(exc)
-            log.warning("paste_text failed: %s", exc)
+            log.warning("paste_text failed (%s)", type(exc).__name__)
             return False
         if not ok:
             self.last_error = "backend reported failure"
@@ -236,7 +239,7 @@ class TextInjector:
             ok = self.backend.send_backspaces(count)
         except Exception as exc:  # noqa: BLE001 - see the note on type_text
             self.last_error = str(exc)
-            log.warning("send_backspaces failed: %s", exc)
+            log.warning("send_backspaces failed (%s)", type(exc).__name__)
             return False
         if not ok:
             self.last_error = "backend reported failure"

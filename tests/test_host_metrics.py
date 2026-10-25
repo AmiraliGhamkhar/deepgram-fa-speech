@@ -149,6 +149,9 @@ def test_new_metrics_preseeds_counters_and_gauges_but_not_histograms():
     registry = metrics_module.new_metrics()
     rendered = registry.render()
     for name in metrics_module.DECLARED_COUNTERS:
+        if name == "session_http_outcomes_total":
+            assert f"\n{name} 0" not in f"\n{rendered}"
+            continue
         assert f"\n{name} 0" in f"\n{rendered}" or rendered.startswith(f"{name} 0")
     for name in metrics_module.DECLARED_GAUGES:
         assert f"\n{name} 0" in f"\n{rendered}" or rendered.startswith(f"{name} 0")

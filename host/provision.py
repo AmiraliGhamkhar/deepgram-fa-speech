@@ -136,11 +136,13 @@ def registry_line(client_id: str, secret: str) -> str:
 
 def _write_secret_file(directory: Path, client_id: str, secret: str) -> Path:
     """Write one plaintext secret file, owner-readable only."""
-    directory.mkdir(parents=True, exist_ok=True)
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     path = directory / f"{client_id}.secret"
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         handle.write(f"{secret}\n")
+        handle.flush()
+        os.fsync(handle.fileno())
     return path
 
 
@@ -168,6 +170,13 @@ def _atomic_append_registry(registry_path: Path, lines: List[str]) -> None:
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, registry_path)
+        # Persist the directory entry as well as the temporary file on POSIX.
+        if os.name == "posix":
+            directory_fd = os.open(registry_path.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
     except BaseException:
         try:
             os.unlink(temporary)
@@ -198,12 +207,17 @@ def _existing_registry_ids(registry_path: Path) -> set:
 def _generate(
     args: argparse.Namespace, out: List[str]
 ) -> int:
-    count = max(1, args.count)
+    count = args.count
+    if count < 1:
+        print("error: --count must be positive", file=sys.stderr)
+        return 2
     if count > MAX_COUNT:
         print(f"error: --count {count} exceeds the {MAX_COUNT} limit", file=sys.stderr)
         return 2
 
     if args.client_id:
+        if count != 1:
+            print("warning: --client-id ignores --count; provisioning one device", file=sys.stderr)
         # `ClientRegistry.from_file` rejects the *whole registry* on any
         # invalid id, so one typo here would take down every deployed
         # device at the host's next restart. Refuse it now instead.

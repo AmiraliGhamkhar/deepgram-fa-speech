@@ -439,3 +439,15 @@ def test_late_send_after_stop_is_classified_as_shutdown(method):
         else:
             provider.keep_alive()
     assert excinfo.value.category is ErrorCategory.SHUTDOWN
+
+
+def test_stereo_connect_uses_documented_multichannel_parameter(monkeypatch):
+    from medical_stt.stt.deepgram_provider import DeepgramProvider
+    captured = {}
+    connection = _FakeConnection()
+    _install_fake_client(monkeypatch, connection, captured)
+    provider = DeepgramProvider(Settings(channels=2))
+    monkeypatch.setattr(provider, '_request_session_token', lambda: 'fake-token')
+    provider.start(lambda _: None, lambda _: None)
+    assert 'channels' not in captured['connect']
+    assert captured['connect']['multichannel'] is True

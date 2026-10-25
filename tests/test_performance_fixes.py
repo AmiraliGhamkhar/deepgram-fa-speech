@@ -689,3 +689,48 @@ def test_final_transcript_uses_the_event_latency_tracker(build_session):
 
     assert first._capture_start is None, "the event tracker was not finalized"
     assert second._capture_start == 0.0, "the shared tracker was mutated instead"
+
+
+@pytest.mark.parametrize('failure,status', [('timeout', 408), ('overflow', 413), ('incomplete', 400)])
+def test_body_failure_has_one_terminal_session_log(host_factory, caplog, failure, status):
+    import httpx
+    import logging
+    async def run():
+        app = host_factory(request_body_timeout_seconds=.03, max_request_body_bytes=64)
+        async def body():
+            yield b'{'
+            if failure == 'timeout':
+                await asyncio.Event().wait()
+            elif failure == 'overflow':
+                yield b'x' * 65
+            else:
+                raise OSError('unreadable body')
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
+                response = await client.post('/v1/session', headers={'Authorization': 'Bearer ' + 's' * 40},
+                                             content=body())
+                assert response.status_code == status
+    with caplog.at_level(logging.INFO, logger='medical_stt.host'):
+        asyncio.run(run())
+    messages = [r.getMessage() for r in caplog.records]
+    started = next(m for m in messages if 'session_started ' in m)
+    session_id = started.split('session_id=')[1].split()[0]
+    terminal = [m for m in messages if 'session_error ' in m and f'session_id={session_id}' in m]
+    assert len(terminal) == 1
+
+
+def test_upstream_error_has_one_terminal_session_log(host_factory, monkeypatch, caplog):
+    import importlib
+    import httpx
+    from host.core import GrantError
+    app = host_factory()
+    async def fail(*_):
+        raise GrantError('Upstream unavailable', 503)
+    monkeypatch.setattr(importlib.import_module('host.app'), 'grant_session_async', fail)
+    async def run():
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
+                response = await client.post('/v1/session', headers={'Authorization': 'Bearer ' + 's' * 40}, json={})
+                assert response.status_code == 503
+    asyncio.run(run())
+    assert sum('session_error ' in r.getMessage() for r in caplog.records) == 1

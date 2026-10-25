@@ -20,3 +20,10 @@ WARNING = "#f9e2af"
 IDLE = "#6c7086"
 #: Text drawn on a light fill (the start/stop circle).
 ON_LIGHT = "#11111b"
+
+
+def blend(foreground: str, background: str, weight: float = .5) -> str:
+    """Muted 50% visual weight, derived only from the central palette."""
+    channels = [round(int(foreground[i:i + 2], 16) * weight +
+                      int(background[i:i + 2], 16) * (1 - weight)) for i in (1, 3, 5)]
+    return "#" + "".join(f"{channel:02x}" for channel in channels)

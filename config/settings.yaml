@@ -75,3 +75,5 @@ medical_confidence_threshold: 0.65
 
 # Apply only the explicit provider-side substitutions in data/asr_replacements.yaml.
 use_asr_replacements: true
+
+# Retry-After may exceed reconnect_backoff_max; only max_retry_after_seconds=60 caps it.

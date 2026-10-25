@@ -418,3 +418,21 @@ def test_the_metrics_trade_off_names_the_default():
         text = _normalized(path)
         assert "host_metrics_admin_token" in text
         assert "unset" in text or "not set" in text or "optional" in text
+
+
+def test_host_deployment_examples_match_runtime_defaults():
+    text = HOST_README.read_text(encoding='utf-8')
+    env = HOST_ENV_EXAMPLE.read_text(encoding='utf-8')
+    assert 'docker build -f host/Dockerfile -t medical-stt-host .' in text
+    assert 'client_max_body_size 4k;' in text
+    assert '| `HOST_FORWARDED_ALLOW_IPS` | no | `127.0.0.1,::1` |' in text
+    assert 'HOST_FORWARDED_ALLOW_IPS=127.0.0.1,::1' in env
+    assert 'min(HOST_MAX_INFLIGHT_GRANTS, HOST_GRANT_MAX_CONNECTIONS)' in text
+
+
+def test_published_metrics_are_one_contiguous_markdown_table():
+    text = HOST_README.read_text(encoding='utf-8')
+    table = text[text.index('| Metric |'):text.index('Alerts worth having:')]
+    rows = table.splitlines()
+    last = max(i for i, row in enumerate(rows) if row.startswith('|'))
+    assert all(row.startswith('|') for row in rows[:last + 1])

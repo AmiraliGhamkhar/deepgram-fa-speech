@@ -40,6 +40,8 @@ import logging
 import asyncio
 import json
 import os
+import re
+import ipaddress
 import time
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Optional
@@ -265,7 +267,7 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
         is_session = request.url.path == "/v1/session" and request.method == "POST"
         admitted = False
         started = time.monotonic()
-        outcome = "cancelled"
+        outcome = "499"  # client closed request; conventional numeric status, not an HTTP response
         if is_session:
             metrics.increment("session_http_requests_total")
         try:
@@ -297,7 +299,7 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
                 metrics.observe("session_http_latency", time.monotonic() - started)
 
     @app.exception_handler(Exception)
-    async def unhandled_exception(request: Request, _exc: Exception) -> JSONResponse:
+    async def unhandled_exception(request: Request, exc: Exception) -> JSONResponse:
         """Unhandled 500s carry the security headers too.
 
         Starlette's ServerErrorMiddleware is the outermost layer and builds
@@ -305,7 +307,7 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
         skipped its own header loop for exactly the responses an incident
         produces. No exception detail crosses the wire.
         """
-        log.exception("unhandled host error path=%s", request.url.path)
+        log.error("unhandled host error (%s)", type(exc).__name__)
         return JSONResponse(
             {"detail": "internal error"}, status_code=500, headers=dict(_SECURITY_HEADERS)
         )
@@ -442,10 +444,14 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
                 "session_requests_by_client_total", client_id=identity.client_id, outcome=outcome
             )
 
+        session_id: Optional[str] = None
+
         def refuse(status_code: int, detail: str, outcome: str,
                    headers: Optional[dict] = None) -> JSONResponse:
             """`record_failure` plus the JSON error response for that outcome."""
             record_failure(outcome)
+            if session_id is not None:
+                log.error("session_error session_id=%s reason=%s status=%d", session_id, outcome, status_code)
             return JSONResponse({"detail": detail}, status_code=status_code, headers=headers)
 
         # -- layered rate limits, keyed on identity, not on the NAT IP ----
@@ -511,6 +517,7 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
             # Client disconnected mid-body: counted, then re-raised so the
             # cancellation still unwinds normally.
             record_failure("cancelled")
+            log.info("session_error session_id=%s reason=cancelled", session_id)
             raise
         except Exception:
             return refuse(400, "incomplete request body", "incomplete_body")
@@ -531,7 +538,6 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
             # Explicit controlled error, not a silent drop and not an
             # unbounded wait for a Deepgram slot.
             metrics.increment("grant_capacity_rejections_total")
-            log.error("session_error session_id=%s reason=upstream_saturated", session_id)
             return refuse(
                 503, "host is at capacity, retry shortly", "upstream_saturated",
                 headers={"Retry-After": "1"},
@@ -558,7 +564,6 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
                 # 429 we shed ourselves.
                 metrics.increment("deepgram_connection_failures_total")
             # The message never contains the Deepgram key or its body.
-            log.error("session_error session_id=%s status=%s", session_id, exc.status)
             return refuse(
                 exc.status, str(exc), "upstream_error",
                 headers={"Retry-After": str(exc.retry_after)} if exc.retry_after else None,
@@ -571,9 +576,9 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
             metrics.observe("token_request_latency", time.monotonic() - started)
             metrics.increment("token_request_failures_total")
             record_failure("cancelled")
-            log.info("session_cancelled session_id=%s", session_id)
+            log.info("session_error session_id=%s reason=cancelled", session_id)
             raise
-        except Exception:  # noqa: BLE001 - the grant path must reconcile
+        except Exception as exc:  # noqa: BLE001 - the grant path must reconcile
             # `core.grant_session_async` maps every known upstream failure onto
             # `GrantError`, so reaching here means an unexpected internal
             # fault. It is still a request that produced no token: record it
@@ -583,7 +588,7 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
             metrics.observe("token_request_latency", time.monotonic() - started)
             metrics.increment("token_request_failures_total")
             record_failure("internal_error")
-            log.exception("session_error session_id=%s reason=unexpected", session_id)
+            log.error("session_error session_id=%s reason=unexpected (%s)", session_id, type(exc).__name__)
             raise
         finally:
             inflight.release()
@@ -641,12 +646,20 @@ def main() -> int:  # pragma: no cover - operational entry point
     import uvicorn
 
     logging.basicConfig(level=logging.INFO)
+    # Import-time create_app already validated settings and emitted warnings.
+    settings = app.state.settings
+    host = os.getenv("HOST_BIND", "0.0.0.0").strip()
     try:
-        settings = HostSettings.from_env()
-    except ConfigurationError as exc:
-        log.error("host configuration error: %s", exc)
+        ipaddress.ip_address(host)
+        valid_bind = True
+    except ValueError:
+        valid_bind = bool(host) and len(host) <= 253 and all(
+            re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label)
+            for label in host.rstrip(".").split(".")
+        )
+    if not valid_bind:
+        log.error("HOST_BIND must be a non-empty IP address or hostname")
         return 2
-    host = os.getenv("HOST_BIND", "0.0.0.0")
     raw_port = os.getenv("HOST_PORT", "8443").strip()
     try:
         port = int(raw_port)

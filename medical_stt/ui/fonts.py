@@ -123,3 +123,28 @@ def enable_windows_dpi_awareness(loader: Optional[Any] = None) -> bool:
     with _lock:
         _dpi_applied = applied
     return applied
+
+
+def _window_dpi(root: Any) -> float:
+    import ctypes
+
+    try:
+        return float(ctypes.windll.user32.GetDpiForWindow(root.winfo_id()))  # type: ignore[attr-defined]
+    except Exception:
+        return float(root.winfo_fpixels("1i"))
+
+
+def apply_tk_scaling(root: Any, dpi_loader: Optional[Any] = None) -> None:
+    """Set points-to-pixels from actual window DPI, on its Tk thread only.
+
+    Process awareness must already have been attempted before Tk creation.
+    Other platforms retain their native Tk scaling.
+    """
+    if _SYSTEM != "windows":
+        return
+    try:
+        dpi = float((dpi_loader or _window_dpi)(root))
+        if 48 <= dpi <= 768:
+            root.tk.call("tk", "scaling", dpi / 72.0)
+    except Exception as exc:
+        log.debug("Tk DPI scaling not applied (%s)", type(exc).__name__)

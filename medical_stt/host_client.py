@@ -117,6 +117,9 @@ class HostSessionClient:
         self._client_id = client_id
 
     def _default_open(self, request: urllib.request.Request, timeout: float) -> bytes:
+        # urllib timeout is per socket operation, not a whole-request deadline.
+        # The app's 25 s provider-readiness deadline bounds UI/session waiting;
+        # a dribbling host can outlive it on the fenced daemon provider thread.
         with _OPENER_FACTORY.open(request, timeout=timeout) as response:
             raw = response.read(MAX_HOST_RESPONSE_BYTES + 1)
         if len(raw) > MAX_HOST_RESPONSE_BYTES:

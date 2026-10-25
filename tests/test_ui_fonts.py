@@ -76,3 +76,29 @@ def test_dpi_awareness_is_a_noop_off_windows(monkeypatch):
     calls: list[int] = []
     assert fonts.enable_windows_dpi_awareness(loader=lambda: calls.append(1)) is False
     assert calls == []
+
+
+def test_tk_scaling_uses_actual_dpi_on_windows(monkeypatch):
+    from types import SimpleNamespace
+    calls = []
+    monkeypatch.setattr(fonts, '_SYSTEM', 'windows')
+    root = SimpleNamespace(tk=SimpleNamespace(call=lambda *args: calls.append(args)))
+    fonts.apply_tk_scaling(root, dpi_loader=lambda _: 144)
+    assert calls == [('tk', 'scaling', 2.0)]
+
+
+def test_tk_scaling_is_best_effort(monkeypatch):
+    monkeypatch.setattr(fonts, '_SYSTEM', 'windows')
+    def fail(_):
+        raise OSError('no DPI')
+    fonts.apply_tk_scaling(object(), dpi_loader=fail)
+
+
+def test_dpi_awareness_uses_fake_windows_dll(monkeypatch):
+    import ctypes
+    from types import SimpleNamespace
+    calls = []
+    monkeypatch.setattr(ctypes, 'windll', SimpleNamespace(
+        shcore=SimpleNamespace(SetProcessDpiAwareness=lambda level: calls.append(level))), raising=False)
+    fonts._win32_enable_dpi_awareness()
+    assert calls == [2]

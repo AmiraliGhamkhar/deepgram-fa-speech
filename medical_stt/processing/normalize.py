@@ -3,8 +3,9 @@
 Design goals (see README "Terminology philosophy"):
 
 * Deterministic: same input always yields the same output.
-* Safe: never touches clinically meaningful numbers, decimals, percentages,
-  units, doses, dates or ranges.
+* Safe: no semantic unit/dose conversions. Unicode NFKC does fold
+  superscripts/compatibility units (cm² -> cm2, ㎡ -> m2) and fractions
+  (½ -> 1/2); this is glyph canonicalization, not dimensional conversion.
 * Unicode-correct: uses NFKC normalization plus a small, explicit table for
   Arabic-vs-Persian letterforms that NFKC does not unify (ي/ی, ك/ک, ...).
 * ZWNJ-aware: normalizes ZWNJ *usage* (collapses accidental doubles/spacing
@@ -58,6 +59,7 @@ _SEPARATOR_TRANSLATION = str.maketrans(
         _ARABIC_DECIMAL_SEP: ".",
         _ARABIC_THOUSANDS_SEP: ",",
         _ARABIC_PERCENT: "%",
+        "\u2044": "/",  # fraction slash emitted by NFKC (e.g. ½)
     }
 )
 

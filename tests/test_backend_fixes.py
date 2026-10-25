@@ -788,3 +788,17 @@ def test_hash_helper_is_the_one_the_registry_compares() -> None:
     registry = core.ClientRegistry({"only": digest})
     assert registry.verify("only", SECRET) is not None
     assert registry.verify("only", SECRET + "x") is None
+
+
+def test_unexpected_host_fault_does_not_log_exception_payload(service_factory, monkeypatch, caplog):
+    from fastapi.testclient import TestClient
+    marker = 'SENSITIVE_TEST_CREDENTIAL_DO_NOT_LOG'
+    service = service_factory.create_app(_settings(allow_http=True))
+    async def boom(*_):
+        raise RuntimeError(marker)
+    monkeypatch.setattr(service_factory, 'grant_session_async', boom)
+    with TestClient(service, raise_server_exceptions=False) as client:
+        response = client.post('/v1/session', headers={'Authorization': f'Bearer {SECRET}'}, json={})
+    assert response.status_code == 500
+    assert marker not in caplog.text
+    assert 'RuntimeError' in caplog.text
