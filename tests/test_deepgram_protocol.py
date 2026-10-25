@@ -331,7 +331,25 @@ def test_connection_is_tagged_with_the_device_and_host_session(monkeypatch):
     params = captured["connect"]
     assert params["tag"] == ["ward-7-pc-03"]
     assert params["extra"] == ["session_id:0123456789abcdef0123456789abcdef"]
-    assert "mip_opt_out" in params and params["mip_opt_out"] is None, "Deepgram's default unless opted out"
+    # B11: unset optional parameters are OMITTED, never sent as None --
+    # what the SDK's query encoder does with None is not ours to rely on.
+    assert "mip_opt_out" not in params, "Deepgram's default unless opted out"
+    assert "replace" not in params
+
+
+def test_replace_is_sent_only_when_replacements_are_configured(monkeypatch):
+    from medical_stt.stt.deepgram_provider import DeepgramProvider
+
+    captured: dict = {}
+    connection = _FakeConnection()
+    _install_fake_client(monkeypatch, connection, captured)
+    provider = DeepgramProvider(
+        Settings(host_url="https://stt.example.com", host_secret="secret"),
+        asr_replacements=["اینترنشنال:international"],
+        token_provider=lambda: "short-lived-token",
+    )
+    provider.start(lambda _e: None, lambda _e: None)
+    assert captured["connect"]["replace"] == ["اینترنشنال:international"]
 
 
 def test_no_device_id_means_no_tag(monkeypatch):

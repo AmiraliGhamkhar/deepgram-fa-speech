@@ -408,23 +408,31 @@ class DeepgramProvider(STTProvider):
             # instead of a long-lived API key, for both the websocket
             # handshake and any HTTP request.
             client = DeepgramClient(access_token=session_token, environment=environment)
-            with client.listen.v1.connect(
-                model=s.model,
-                language=s.language,
-                encoding="linear16",
-                sample_rate=s.sample_rate,
-                channels=s.channels,
-                interim_results=True,
-                endpointing=s.endpointing,
-                utterance_end_ms=s.utterance_end_ms,
-                vad_events=True,
-                smart_format=True,
-                punctuate=True,
-                replace=self._asr_replacements or None,
-                mip_opt_out=True if s.mip_opt_out else None,
-                **self._attribution_parameters(),
-                **self._recognition_hint_parameters(),
-            ) as connection:
+            connect_params: dict[str, Any] = {
+                "model": s.model,
+                "language": s.language,
+                "encoding": "linear16",
+                "sample_rate": s.sample_rate,
+                "channels": s.channels,
+                "interim_results": True,
+                "endpointing": s.endpointing,
+                "utterance_end_ms": s.utterance_end_ms,
+                "vad_events": True,
+                "smart_format": True,
+                "punctuate": True,
+            }
+            # Optional parameters are OMITTED when unset rather than passed
+            # as None: whether the SDK's query encoder drops None values is
+            # an SDK internal this client must not depend on -- an encoder
+            # change could just as well start sending `mip_opt_out=None`
+            # to Deepgram.
+            if self._asr_replacements:
+                connect_params["replace"] = self._asr_replacements
+            if s.mip_opt_out:
+                connect_params["mip_opt_out"] = True
+            connect_params.update(self._attribution_parameters())
+            connect_params.update(self._recognition_hint_parameters())
+            with client.listen.v1.connect(**connect_params) as connection:
                 with self._connection_lock:
                     if stop_event.is_set() or stop_event is not self._stop_event:
                         self._abort_connection(connection)
