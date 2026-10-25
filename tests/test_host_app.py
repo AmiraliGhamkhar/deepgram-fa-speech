@@ -177,6 +177,25 @@ def test_openapi_schema_is_not_exposed(host):
     assert client.get("/redoc").status_code == 404
 
 
+def test_unhandled_500_still_carries_the_security_headers(host, monkeypatch):
+    """B6: the harden middleware re-raises before its header loop, and
+    ServerErrorMiddleware builds the 500 itself -- so error responses
+    shipped without the hardening headers every other response gets."""
+    app_module = importlib.import_module("app")
+
+    async def boom(_settings, _ttl, _client):
+        raise RuntimeError("an unanticipated internal fault")
+
+    monkeypatch.setattr(app_module, "grant_session_async", boom)
+    client = TestClient(host, base_url="https://stt.example.com", raise_server_exceptions=False)
+    response = client.post("/v1/session", headers={"Authorization": f"Bearer {SECRET}"}, json={})
+
+    assert response.status_code == 500
+    for header in ("x-content-type-options", "x-frame-options", "cache-control", "referrer-policy"):
+        assert response.headers.get(header), f"missing {header} on the 500"
+    assert "unanticipated" not in response.text, "no internal detail crosses the wire"
+
+
 def test_legacy_host_explains_why_a_client_id_cannot_authenticate(host):
     """B5: against a legacy (shared-secret) host, a device that sends
     X-Client-Id resolves to a registry entry that does not exist, so the

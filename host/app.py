@@ -296,6 +296,20 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
                 metrics.increment("session_http_outcomes_total", status=outcome)
                 metrics.observe("session_http_latency", time.monotonic() - started)
 
+    @app.exception_handler(Exception)
+    async def unhandled_exception(request: Request, _exc: Exception) -> JSONResponse:
+        """Unhandled 500s carry the security headers too.
+
+        Starlette's ServerErrorMiddleware is the outermost layer and builds
+        the 500 response itself, so the `harden` middleware's re-raise path
+        skipped its own header loop for exactly the responses an incident
+        produces. No exception detail crosses the wire.
+        """
+        log.exception("unhandled host error path=%s", request.url.path)
+        return JSONResponse(
+            {"detail": "internal error"}, status_code=500, headers=dict(_SECURITY_HEADERS)
+        )
+
     @app.get("/healthz")
     async def healthz() -> dict:
         return {"status": "ok"}
