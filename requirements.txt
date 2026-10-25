@@ -1,4 +1,9 @@
 deepgram-sdk==7.9.0
+# deepgram_provider imports websockets.exceptions directly (close-frame
+# classification), so the transport is declared here rather than left as
+# an unpinned transitive detail of the SDK. Range matches what
+# deepgram-sdk 7.9.0 currently resolves (17.x).
+websockets>=17.0,<18.0
 python-dotenv>=1.0.1,<2.0
 PyYAML>=6.0.1,<7.0
 sounddevice>=0.4.6,<0.6
