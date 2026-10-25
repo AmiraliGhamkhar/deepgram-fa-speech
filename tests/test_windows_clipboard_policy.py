@@ -198,3 +198,58 @@ def test_last_written_sequence_is_initialized_before_any_paste(win):
     appear as a side effect of the first successful write."""
     _, backend, _, _ = win
     assert backend._last_written_sequence is None
+
+
+@pytest.mark.parametrize("failure", ["allocate", "lock", "set"])
+def test_failed_native_clipboard_write_preserves_original(win, failure):
+    module, backend, user, state = win
+    kernel = module.kernel32
+    buffer = ctypes.create_string_buffer(1024)
+    attempts = {"allocate": 0, "lock": 0, "set": 0}
+
+    def allocate(*args):
+        attempts["allocate"] += 1
+        return 0 if failure == "allocate" and attempts["allocate"] == 1 else 123
+
+    def lock(*args):
+        attempts["lock"] += 1
+        return 0 if failure == "lock" and attempts["lock"] == 1 else ctypes.addressof(buffer)
+
+    def empty():
+        state["text"] = ""
+        state["seq"] += 1
+        return True
+
+    def set_data(*args):
+        attempts["set"] += 1
+        if failure == "set" and attempts["set"] == 1:
+            return 0
+        state["text"] = buffer.raw.decode("utf-16-le").split("\0", 1)[0]
+        state["seq"] += 1
+        return 123
+
+    kernel.GlobalAlloc.side_effect = allocate
+    kernel.GlobalLock.side_effect = lock
+    user.EmptyClipboard.side_effect = empty
+    user.SetClipboardData.side_effect = set_data
+    backend._set_clipboard_text = module.WindowsBackend._set_clipboard_text.__get__(backend)
+    backend._last_written_sequence = 0  # stale prior ownership must not block recovery
+    assert not backend.paste_text("clinical text", True, 0)
+    assert state["text"] == "original"
+    assert not state["pastes"]
+    if failure in ("allocate", "lock"):
+        user.EmptyClipboard.assert_not_called()
+
+
+def test_clipboard_restore_failure_is_logged_without_content(win, caplog):
+    _, backend, _, _ = win
+    write = backend._set_clipboard_text
+    def fail_restore(text, expected_sequence=None):
+        if text == "original":
+            return False
+        return write(text, expected_sequence)
+    backend._set_clipboard_text = fail_restore
+    assert backend.paste_text("clinical text", True, 0)
+    assert "restore" in caplog.text
+    assert "clinical text" not in caplog.text
+    assert "original" not in caplog.text

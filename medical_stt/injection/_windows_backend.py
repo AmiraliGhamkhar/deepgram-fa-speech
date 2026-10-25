@@ -330,6 +330,9 @@ class WindowsBackend(InjectionBackend):
             user32.CloseClipboard()
 
     def _set_clipboard_text(self, text: str, expected_sequence: Optional[int] = None) -> bool:
+        # None means this attempt has not mutated the clipboard. Never reuse
+        # ownership from a prior write if allocation/open/sequence checks fail.
+        self._last_written_sequence = None
         text_bytes = (text + "\0").encode("utf-16-le")
         size = len(text_bytes)
 
@@ -340,9 +343,6 @@ class WindowsBackend(InjectionBackend):
         try:
             if expected_sequence is not None and user32.GetClipboardSequenceNumber() != expected_sequence:
                 return False
-            if not user32.EmptyClipboard():
-                return False
-
             h_mem = kernel32.GlobalAlloc(GMEM_MOVEABLE, size)
             if not h_mem:
                 return False
@@ -353,6 +353,12 @@ class WindowsBackend(InjectionBackend):
 
             ctypes.memmove(p_mem, text_bytes, size)
             kernel32.GlobalUnlock(h_mem)
+
+            # Prepare memory before the destructive operation. Even a failed
+            # SetClipboardData owns the sequence created by EmptyClipboard.
+            if not user32.EmptyClipboard():
+                return False
+            self._last_written_sequence = user32.GetClipboardSequenceNumber()
 
             # On success the system takes ownership of h_mem; we must not
             # free it. On failure we still own it and must release it
@@ -399,10 +405,12 @@ class WindowsBackend(InjectionBackend):
             previous = self.get_clipboard_text() if count else None
             if count and previous is None:
                 return False
-        if not self._set_clipboard_text(text, expected_sequence=before):
-            return False
-        owned_sequence = self._last_written_sequence
+        owned_sequence = None
         try:
+            written = self._set_clipboard_text(text, expected_sequence=before)
+            owned_sequence = self._last_written_sequence
+            if not written:
+                return False
             if self.get_clipboard_text() != text:
                 log.warning("clipboard verification failed; aborting paste")
                 return False
@@ -414,12 +422,19 @@ class WindowsBackend(InjectionBackend):
                 time.sleep(settle_seconds)
             return ok
         finally:
-            if restore_clipboard:
-                if previous is not None:
-                    self._set_clipboard_text(previous, expected_sequence=owned_sequence)
-                elif self._open_clipboard():
-                    try:
-                        if user32.GetClipboardSequenceNumber() == owned_sequence:
-                            user32.EmptyClipboard()
-                    finally:
-                        user32.CloseClipboard()
+            if restore_clipboard and owned_sequence is not None:
+                try:
+                    if previous is not None:
+                        if not self._set_clipboard_text(previous, expected_sequence=owned_sequence):
+                            log.warning("clipboard restore failed (WriteFailure)")
+                    elif self._open_clipboard():
+                        try:
+                            if user32.GetClipboardSequenceNumber() == owned_sequence:
+                                if not user32.EmptyClipboard():
+                                    log.warning("clipboard restore failed (EmptyFailure)")
+                        finally:
+                            user32.CloseClipboard()
+                    else:
+                        log.warning("clipboard restore failed (OpenFailure)")
+                except Exception as exc:
+                    log.warning("clipboard restore failed (%s)", type(exc).__name__)
