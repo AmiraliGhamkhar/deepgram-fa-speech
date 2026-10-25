@@ -1,9 +1,11 @@
 deepgram-sdk==7.9.0
 # deepgram_provider imports websockets.exceptions directly (close-frame
 # classification), so the transport is declared here rather than left as
-# an unpinned transitive detail of the SDK. Range matches what
-# deepgram-sdk 7.9.0 currently resolves (17.x).
-websockets>=17.0,<18.0
+# an unpinned transitive detail of the SDK. The SDK allows >=12.0; on
+# Python 3.11+ this resolves to the 17.x line the SDK currently pulls,
+# on 3.10 (which 17.x no longer supports) to the last 3.10-compatible
+# line. The APIs used are stable across that range.
+websockets>=15.0,<18.0
 python-dotenv>=1.0.1,<2.0
 PyYAML>=6.0.1,<7.0
 sounddevice>=0.4.6,<0.6
