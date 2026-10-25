@@ -134,6 +134,8 @@ def _valid_client_id(value: str) -> bool:
 
 
 _ASR_BLOCKED_TOKENS = frozenset({
+    "گرم", "میلیگرم", "میلی‌گرم", "کیلوگرم", "میلیلیتر", "میلی‌لیتر",
+    "سانتیمتر", "سانتی‌متر", "میلیمول", "میلی‌مول", "درجه", "درصد",
     "mg", "mcg", "µg", "g", "kg", "ml", "l", "cc", "iu", "meq", "mmol", "mmhg",
     "iv", "im", "po", "sc", "hr", "bid", "tid", "qid", "prn", "npo",
     # These extra Latin clinical terms occur in data/corrections.yaml.
@@ -163,7 +165,14 @@ _ASR_LATIN_TOKEN_RE = re.compile(r"(?<!\w)[A-Za-zµμ]+(?!\w)")
 
 
 def _has_blocked_asr_token(text: str) -> bool:
-    return any(match.group().casefold() in _ASR_BLOCKED_TOKENS for match in _ASR_LATIN_TOKEN_RE.finditer(text))
+    # Fold joiners/spaces for Persian compound-unit spellings, without
+    # weakening the existing whole-token Latin guard.
+    persian = text.replace("\u200c", "")
+    return (
+        any(match.group().casefold() in _ASR_BLOCKED_TOKENS for match in _ASR_LATIN_TOKEN_RE.finditer(text))
+        or any(re.search(r"(?<!\w)" + re.escape(unit.replace("\u200c", "")).replace("میلی", r"میلی[ \t]*").replace("سانتی", r"سانتی[ \t]*") + r"(?!\w)", persian)
+               for unit in _ASR_BLOCKED_TOKENS if not unit.isascii())
+    )
 
 
 def _contains_non_ascii_letter(text: str) -> bool:

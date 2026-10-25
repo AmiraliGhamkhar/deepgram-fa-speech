@@ -554,7 +554,8 @@ class DeepgramProvider(STTProvider):
                 connection.on(EventType.MESSAGE, _on_message)
                 connection.on(EventType.ERROR, _on_provider_error)
                 connection.on(EventType.CLOSE, _on_close)
-                self._connections_opened += 1
+                with self._connection_lock:
+                    self._connections_opened += 1
                 connection.start_listening()
         except BaseException as exc:  # noqa: BLE001 - single classification boundary
             if isinstance(exc, ProviderError):
@@ -581,7 +582,8 @@ class DeepgramProvider(STTProvider):
         Lets a test prove each reconnect mints a *new* connection rather than
         reusing a dead one, and that no state is shared between clients.
         """
-        return self._connections_opened
+        with self._connection_lock:
+            return self._connections_opened
 
     def send_audio(self, chunk: bytes) -> None:
         # Deepgram treats an empty binary frame as a close request; a

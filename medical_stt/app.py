@@ -298,6 +298,10 @@ class LiveMedicalSTT:
         """
         return generation is None or generation == self._session_generation
 
+    def _display_interim(self, event: TranscriptEvent) -> None:
+        """One bounded normalization path for display-only hypotheses."""
+        self.overlay.set_partial(normalize(event.text[:8000]))
+
     def _on_transcript(
         self,
         event: TranscriptEvent,
@@ -324,7 +328,7 @@ class LiveMedicalSTT:
             # Same 8000-char bound the session callback applies (below):
             # an interim is display-only, and an unbounded one must not
             # reach the overlay just because it arrived by this path.
-            self.overlay.set_partial(normalize(event.text[:8000]))
+            self._display_interim(event)
             return
 
         if self._injection_failed:
@@ -480,7 +484,12 @@ class LiveMedicalSTT:
             self._audio_drop_pending.set()
 
     def _report_audio_health(self) -> None:
-        """Log capture problems from a worker thread (never the callback)."""
+        """Log capture problems from a worker thread (never the callback).
+
+        The lost-audio warning is deliberately sticky: queue recovery cannot
+        recover the missing words. The clinician must still review the note.
+        Silence/capacity warnings, unlike data loss, are withdrawn on recovery.
+        """
         if self._input_status_pending.is_set():
             self._input_status_pending.clear()
             status, self._pending_input_status = self._pending_input_status, ""
@@ -631,17 +640,18 @@ class LiveMedicalSTT:
             # Interims are latest-value display data, not an unbounded backlog.
             if not event.is_final:
                 receive_latency.mark_first_interim(event.received_at)
-                self.overlay.set_partial(normalize(event.text[:8000]))
+                self._display_interim(event)
                 return
             if len(event.text) > 8000 or len(event.words) > 4000:
                 self._retain_failed(event.text)
                 self._warn("گفتار بیش از حد طولانی است؛ متن بازیابی را بررسی کنید")
                 on_error(ProviderError(ErrorCategory.CONFIG, "Oversized transcript; review recovery text"))
                 return
+            tracker = receive_latency
+            if event.speech_final:
+                receive_latency = LatencyTracker()
             try:
-                finals.put_nowait((event, receive_latency))
-                if event.speech_final:
-                    receive_latency = LatencyTracker()
+                finals.put_nowait((event, tracker))
             except queue.Full:
                 self._retain_failed(event.text)
                 self._warn("پردازش عقب افتاده است؛ متن بازیابی را بررسی کنید")

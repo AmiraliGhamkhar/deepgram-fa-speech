@@ -18,7 +18,7 @@ from dataclasses import dataclass
 #: cause of sustained overflow -- trips it almost immediately.
 DEGRADED_AFTER_DROPS = 3
 
-#: Consecutive successful sends required to end a degraded streak. A single
+#: Consecutive successful enqueues required to end a degraded streak. A single
 #: good frame between drops does not mean the sender caught up: flapping
 #: audio would otherwise read as healthy while chunks are still being lost.
 RECOVERED_AFTER_SENDS = 3
@@ -33,7 +33,7 @@ class QueueStats:
     put_total: int
     get_total: int
     last_drop_at: float
-    #: Consecutive drops with no successful send in between. This is the
+    #: Consecutive drops with no successful enqueue in between. This is the
     #: signal that distinguishes a one-off hiccup from a sustained network
     #: problem: a permanently non-zero value means the sender cannot keep up
     #: and audio is being lost continuously, not sporadically.

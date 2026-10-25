@@ -31,12 +31,8 @@ def _same_word_span(first: Tuple[WordInfo, ...], second: Tuple[WordInfo, ...]) -
             and abs(left.end - right.end) <= _SPAN_TOLERANCE_SECONDS
             for left, right in zip(first, second, strict=True)
         )
-    # Different word counts (e.g. punctuation-only differences): compare
-    # the acoustic boundaries only.
-    return (
-        abs(first[0].start - second[0].start) <= _SPAN_TOLERANCE_SECONDS
-        and abs(first[-1].end - second[-1].end) <= _SPAN_TOLERANCE_SECONDS
-    )
+    # Equal outer boundaries alone cannot prove identical word-level audio.
+    return False
 
 
 class UtteranceLimitError(ValueError):
