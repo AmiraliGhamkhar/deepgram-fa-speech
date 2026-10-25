@@ -51,6 +51,31 @@ def test_low_host_timeout_warns_but_stays_valid(caplog):
     assert not caplog.records
 
 
+def test_dpapi_failure_during_save_is_a_config_error(monkeypatch, tmp_path):
+    """B16: save_host_credentials caught only OSError, so a DPAPI failure
+    (SecretStoreError, a RuntimeError) escaped raw instead of surfacing
+    as the documented ConfigError partial outcome."""
+    from medical_stt import config
+    from medical_stt.security import SecretStoreError
+
+    monkeypatch.setenv("MEDICALSTT_APP_DATA_DIR", str(tmp_path))
+    config.initialize_user_config()
+    original = config.user_settings_path().read_bytes()
+
+    class _FailingStore:
+        def __init__(self, _path):
+            pass
+
+        def save(self, _secret):
+            raise SecretStoreError("DPAPI protect failed")
+
+    monkeypatch.setattr(config, "SecretStore", _FailingStore)
+    with pytest.raises(ConfigError, match="not saved"):
+        config.save_host_credentials("https://stt.example.com", "a-brand-new-secret", "doctor-01")
+    assert config.user_settings_path().read_bytes() == original
+    assert not list(tmp_path.glob(".settings-*.tmp"))
+
+
 def test_valid_settings_pass_validation():
     assert validate_settings(_valid_settings()) == []
 

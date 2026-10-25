@@ -510,7 +510,11 @@ def save_host_credentials(host_url: str, host_secret: str, client_id: str | None
             SecretStore(paths.secret_path()).save(host_secret)
             secret_saved = True
         os.replace(temporary, target)
-    except OSError as exc:
+    except (OSError, SecretStoreError) as exc:
+        # SecretStoreError is a RuntimeError (DPAPI failure), not an
+        # OSError: catching only OSError let it escape raw instead of
+        # surfacing as the documented ConfigError partial outcome. Its
+        # message never contains the secret itself.
         detail = "Secret saved, but settings were not replaced; retry saving" if secret_saved else "Settings were not saved"
         raise ConfigError(detail) from exc
     finally:
