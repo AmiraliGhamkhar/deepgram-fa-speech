@@ -295,7 +295,10 @@ class LiveMedicalSTT:
             return
         if not event.is_final:
             self.latency.mark_first_interim(event.received_at)
-            self.overlay.set_partial(normalize(event.text))
+            # Same 8000-char bound the session callback applies (below):
+            # an interim is display-only, and an unbounded one must not
+            # reach the overlay just because it arrived by this path.
+            self.overlay.set_partial(normalize(event.text[:8000]))
             return
 
         if self._injection_failed:

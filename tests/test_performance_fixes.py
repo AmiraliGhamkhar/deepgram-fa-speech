@@ -177,6 +177,18 @@ def test_failed_injection_is_retained_without_success(build_session):
     assert stt.recovery_text() == ""
 
 
+def test_oversized_interim_is_truncated_before_the_overlay(build_session):
+    """B18: the direct _on_transcript interim path passed the full text to
+    the overlay while the session callback truncated to 8000 chars."""
+    stt, _ = build_session()
+    partials = []
+    stt.overlay.set_partial = partials.append
+
+    stt._on_transcript(TranscriptEvent("س" * 9000, False))
+
+    assert partials and len(partials[0]) == 8000
+
+
 def test_type_mode_is_honored(build_session):
     stt, _ = build_session()
     stt.settings.inject_mode = "type"
