@@ -30,7 +30,8 @@ production code. Failures below were observed, not inferred.
 | P0-12 silent provider exit | `7c183dd` | `2 failed, 14 passed` in `tests/test_shutdown_flow.py` | `80 passed` in shutdown/app/performance/concurrency targeted suites |
 | P0-13 fallback clipboard PHI leak | `2f8b6be` | `4 failed, 44 passed` in `tests/test_injection.py tests/test_edge_paths.py` | `68 passed` in injection/edge/Windows-policy targeted suites |
 | P0-14 utterance-limit recovery text | `8c56329` | `3 failed, 62 passed` in accumulator/performance/app targeted suites | `65 passed` in the same suites |
-| P1 inferred follow-up batch | (this commit) | `20 failed, 167 passed` in nine targeted suites | `187 passed` in the same suites |
+| P1 inferred follow-up batch | `313687b` | `20 failed, 167 passed` in nine targeted suites | `187 passed` in the same suites |
+| P2 docs/metrics polish | (this commit) | `5 failed` in `tests/test_docs_polish.py` | `5 passed` in the same file |
 
 ### P0-7 details
 
@@ -92,8 +93,8 @@ Full-suite validation after P0-7: `1071 passed, 4 skipped, 1 warning`;
 ## Remaining acceptance limitations
 
 - This checkpoint is appended incrementally; the latest per-fix section is the
-  authoritative progress marker. All Phase 1 P0 and P1 fixes are complete at this revision. P2
-  documentation/metrics polish and all GUI changes remain outstanding.
+  authoritative progress marker. All Phase 1 P0, P1 and P2 fixes are complete at this revision.
+  All GUI changes remain outstanding.
 - The accepted Starlette test-client warning is preserved; no warning filters
   or lockfile edits were added.
 - Native Windows injection, live microphone and live Deepgram behaviors
@@ -410,3 +411,27 @@ FAILED tests/test_audit_fixes.py::test_registry_update_is_atomic_when_the_final_
 After: targeted nine-suite run `187 passed, 1 warning`; full suite
 `1141 passed, 4 skipped, 1 warning in 54.35s`; ruff, mypy and secret scan
 clean. Deliberately updated pins: none.
+
+### P2 batch details (inferred list, docs/metrics polish)
+
+The remaining inferred P2 category was documentation and metrics polish; it
+does not change runtime behavior. `tests/test_docs_polish.py` was added first
+and failed `5 failed` against the pre-update documents and `host/metrics.py`
+module docstring. It now pins:
+
+- `README.md`'s new "Priority follow-ups — 2026-10-25" section, which covers
+  two consecutive `MICROPHONE` failures, per-utterance latency trackers,
+  neutral overlay text not forced RTL, atomic registry updates, and drained
+  audio accounting.
+- `host/README.md` provisioning documentation for the temporary file +
+  `os.replace()` atomic registry replacement.
+- Every declared host counter/gauge/histogram plus `host_uptime_seconds`
+  appears in the host README metrics table and in `host/metrics.py`'s module
+  docstring. Missing series were `session_http_requests_total`,
+  `session_http_outcomes_total`, `grant_capacity_rejections_total`,
+  `active_session_requests`, `session_http_latency`, and `host_uptime_seconds`.
+- `docs/PERFORMANCE_FIXES.md` links this checkpoint under "2026-10-25
+  follow-ups" while preserving the historical 2026-10-14 audit narrative.
+
+After: `5 passed` targeted; full suite `1146 passed, 4 skipped, 1 warning in
+53.96s`; ruff, mypy and secret scan clean. Deliberately updated pins: none.

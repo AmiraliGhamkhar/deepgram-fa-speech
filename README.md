@@ -1016,3 +1016,29 @@ python scripts/windows_injection_check.py --interactive
 No Windows performance, real-provider concurrency or clinical-accuracy claim
 is made from Linux/fake-DLL tests. Follow the remediation document's release
 checklist before deploying into a clinical workflow.
+
+## Priority follow-ups — 2026-10-25
+
+The correction-rule, shutdown, clipboard, utterance-limit and P1 hardening
+changes are recorded with before/after test evidence in
+[`audit/reports/engineering-checkpoint-2026-10-25-v2.md`](audit/reports/engineering-checkpoint-2026-10-25-v2.md).
+Operational behavior changed in the following ways:
+
+- Two consecutive `MICROPHONE` failures stop dictation instead of retrying
+  forever, with a distinct warning/status. A connection that stays up for 30 s
+  resets the counter; other retryable categories remain unchanged.
+- Each final now uses its own per-utterance latency tracker; the transcript
+  worker no longer swaps a shared tracker. The shared-owner overlay waits for
+  its create callback with a bounded readiness timeout, disables itself on any
+  build failure, and no longer forces neutral text to RTL.
+- Fallback typed injection always restores the previous clipboard and refuses
+  an unreadable one. An invalid UTF-8 secret blob produces a byte-free error
+  and logs only the exception type.
+- Accumulator deduplication covers all retained segments; ASR replacements
+  cannot introduce any of the 131 standalone uppercase Latin clinical tokens
+  swept from `data/corrections.yaml`. Drained audio chunks now count toward
+  loss metrics without degrading the next session's health.
+- Host settings errors are logged by setting name only, and provisioning an
+  existing registry is atomic via a temporary file and `os.replace()`.
+  Reconnect jitter documentation now matches the implemented full negative
+  jitter.

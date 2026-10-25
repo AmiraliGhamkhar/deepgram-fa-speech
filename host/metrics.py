@@ -6,13 +6,16 @@ be more moving parts than the service itself. What it does need is a way to
 answer operational questions during an incident about *token issuance*,
 which is the only thing this service does:
 
-    session_starts_total, session_success_total, session_failures_total,
+    session_http_requests_total, session_http_outcomes_total,
+    session_http_latency, active_session_requests,
+    grant_capacity_rejections_total, session_starts_total,
+    session_success_total, session_failures_total,
     session_requests_by_client_total, token_requests_total,
     token_request_failures_total, token_request_latency,
     deepgram_connection_failures_total, auth_failures_total,
     metrics_auth_failures_total, rate_limited_total,
     request_body_rejections_total, inflight_grants, inflight_grants_capacity,
-    registry_clients
+    registry_clients, host_uptime_seconds
 
 so this module implements counters, gauges and latency histograms and
 renders them in the Prometheus text exposition format (a plain string, so an

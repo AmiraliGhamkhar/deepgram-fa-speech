@@ -64,6 +64,12 @@ python -m host.provision --count 50 --prefix doctor \
 python -m host.provision --client-id doctor-01
 ```
 
+Updating an existing registry is atomic: `host.provision` builds all of the
+new hash lines, writes a temporary file in the registry directory, then calls
+`os.replace()` to swap it in. A failed replace leaves the original registry
+untouched and removes the temporary file, so a partially written client list
+cannot lock clinicians out.
+
 Then point the service at the registry:
 
 ```bash
@@ -453,7 +459,13 @@ cannot inflate the cardinality bound or attribute someone else's traffic.
 | `metrics_auth_failures_total` | counter | rejected `/metrics` admin tokens (counted separately, so a stale scraper does not look like credential stuffing) |
 | `rate_limited_total` | counter | 429s issued (client, global, or brute-force budget) |
 | `request_body_rejections_total` | counter | bodies refused over `HOST_MAX_REQUEST_BODY_BYTES` |
+| `session_http_requests_total` | counter | every request reaching the session route, before auth/outcome accounting |
+| `session_http_outcomes_total` | counter | session-route responses by status label |
+| `grant_capacity_rejections_total` | counter | authenticated requests refused before an upstream grant because the in-flight grant cap was reached |
+| `active_session_requests` | gauge | session-route requests currently in flight |
+| `host_uptime_seconds` | gauge | seconds since this metrics registry was created |
 | `token_request_latency` | histogram | seconds per upstream grant, cumulative buckets |
+| `session_http_latency` | histogram | seconds for the whole session route, cumulative buckets |
 
 Per-session audio and transcript timings are **not** published here, by
 design: the host mints a token and never sees the stream, so `active_sessions`,
