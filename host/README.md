@@ -421,7 +421,7 @@ updates:
 | `session_starts_total` | counter | authenticated session requests received |
 | `session_success_total` | counter | tokens issued |
 | `session_failures_total` | counter | authenticated requests that produced no token: rate-limited, malformed body, refused at capacity, or failed upstream |
-| `session_requests_by_client_total` | counter | the same outcomes per device: `{client_id, outcome}` with `outcome` in `ok`, `rate_limited`, `body_too_large`, `body_timeout`, `incomplete_body`, `invalid_request`, `upstream_saturated`, `upstream_error`, `internal_error` |
+| `session_requests_by_client_total` | counter | the same outcomes per device: `{client_id, outcome}` with `outcome` in `ok`, `rate_limited`, `body_too_large`, `body_timeout`, `incomplete_body`, `invalid_request`, `upstream_saturated`, `upstream_error`, `internal_error`, `cancelled` (the client disconnected before a token was minted) |
 
 `session_success_total + session_failures_total == session_starts_total` is the
 invariant every terminal outcome in the route must preserve — a request that

@@ -395,6 +395,13 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
             and `client_id` is the *authenticated* id, so the per-client series
             cannot be inflated by fabricated ids -- `Metrics` folds anything
             past `MAX_LABELLED_CLIENTS` into `other` regardless.
+
+            A client that disconnects mid-request surfaces as
+            `asyncio.CancelledError` -- a `BaseException`, so no
+            `except Exception` sees it. The two await points below catch it
+            explicitly, record outcome `cancelled`, and re-raise: the
+            request produced no token, so the invariant counts it as a
+            failure exactly like the refusals.
             """
             metrics.increment("session_failures_total")
             metrics.increment(
@@ -462,6 +469,11 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
         except OverflowError:
             metrics.increment("request_body_rejections_total")
             return refuse(413, "request body too large", "body_too_large")
+        except asyncio.CancelledError:
+            # Client disconnected mid-body: counted, then re-raised so the
+            # cancellation still unwinds normally.
+            record_failure("cancelled")
+            raise
         except Exception:
             return refuse(400, "incomplete request body", "incomplete_body")
         try:
@@ -513,6 +525,16 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
                 exc.status, str(exc), "upstream_error",
                 headers={"Retry-After": str(exc.retry_after)} if exc.retry_after else None,
             )
+        except asyncio.CancelledError:
+            # Client disconnected mid-grant (or the server is shutting
+            # down). `CancelledError` is a BaseException: without this
+            # handler the request vanished from both counters and
+            # success + failures stopped equalling starts.
+            metrics.observe("token_request_latency", time.monotonic() - started)
+            metrics.increment("token_request_failures_total")
+            record_failure("cancelled")
+            log.info("session_cancelled session_id=%s", session_id)
+            raise
         except Exception:  # noqa: BLE001 - the grant path must reconcile
             # `core.grant_session_async` maps every known upstream failure onto
             # `GrantError`, so reaching here means an unexpected internal

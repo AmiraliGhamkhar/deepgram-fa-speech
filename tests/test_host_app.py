@@ -127,6 +127,47 @@ def test_healthz_returns_ok(host):
     assert response.status_code == 200 and response.json() == {"status": "ok"}
 
 
+def test_a_cancelled_request_still_reconciles_the_metrics(host, monkeypatch):
+    """B2: a client disconnecting mid-grant raised CancelledError (a
+    BaseException) past both counters, breaking the documented invariant
+    session_success_total + session_failures_total == session_starts_total."""
+    import asyncio
+
+    import httpx
+
+    core = importlib.import_module("core")
+    holder: dict = {}
+
+    async def hanging_grant(_self, _api_key, _ttl):
+        holder["started"].set()
+        await asyncio.sleep(60)
+
+    monkeypatch.setattr(core.AsyncGrantClient, "grant", hanging_grant)
+
+    async def drive():
+        holder["started"] = asyncio.Event()
+        transport = httpx.ASGITransport(app=host)
+        async with httpx.AsyncClient(transport=transport, base_url="https://stt.example.com") as client:
+            task = asyncio.create_task(
+                client.post("/v1/session", headers={"Authorization": f"Bearer {SECRET}"}, json={})
+            )
+            await asyncio.wait_for(holder["started"].wait(), timeout=5.0)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    asyncio.run(drive())
+
+    metrics = host.state.metrics
+    assert metrics.counter_value("session_starts_total") == 1
+    assert metrics.counter_value("session_success_total") == 0
+    assert metrics.counter_value("session_failures_total") == 1
+    assert metrics.counter_value(
+        "session_requests_by_client_total", client_id=core.LEGACY_CLIENT_ID, outcome="cancelled"
+    ) == 1
+    assert host.state.inflight.in_flight == 0, "the in-flight slot must be released"
+
+
 def test_openapi_schema_is_not_exposed(host):
     """B1: docs/redoc were disabled but /openapi.json still enumerated the
     whole API on a credentialed service."""
