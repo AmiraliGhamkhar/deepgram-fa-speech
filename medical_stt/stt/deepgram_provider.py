@@ -456,6 +456,20 @@ class DeepgramProvider(STTProvider):
                     if event is not None:
                         on_transcript(event)
 
+                #: One terminal error per connection. The SDK emits ERROR
+                #: and then CLOSE for a single disconnect, so without this
+                #: guard one closure surfaced twice -- once classified,
+                #: once as a generic SERVER_DISCONNECT -- and correctness
+                #: hung on the consumer happening to read the first one.
+                error_emitted = False
+
+                def _emit_error(error: ProviderError) -> None:
+                    nonlocal error_emitted
+                    if error_emitted:
+                        return
+                    error_emitted = True
+                    on_error(error)
+
                 def _on_provider_error(exc: object) -> None:
                     cause = exc if isinstance(exc, BaseException) else Exception(str(exc))
                     category = classify_deepgram_exception(cause)
@@ -465,17 +479,17 @@ class DeepgramProvider(STTProvider):
                         # makes a reconnect loop diagnosable from the log.
                         details = close_details(cause)
                         log.warning("deepgram_connection_closed %s (%s)", details, category.value)
-                        on_error(
+                        _emit_error(
                             ConnectionClosed(
                                 category, f"Deepgram connection closed ({details})", cause=cause
                             )
                         )
                     else:
-                        on_error(ProviderError(category, f"Deepgram error ({category.value})", cause=cause))
+                        _emit_error(ProviderError(category, f"Deepgram error ({category.value})", cause=cause))
 
                 def _on_close(_: object) -> None:
                     if not stop_event.is_set():
-                        on_error(
+                        _emit_error(
                             ConnectionClosed(
                                 ErrorCategory.SERVER_DISCONNECT, "Deepgram connection closed"
                             )

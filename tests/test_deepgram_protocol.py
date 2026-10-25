@@ -159,6 +159,25 @@ def test_a_close_frame_reaches_the_error_message_and_the_log(monkeypatch, caplog
     assert any("1011 NET-0001" in record.getMessage() for record in caplog.records)
 
 
+def test_one_disconnect_emits_exactly_one_error(monkeypatch):
+    """B8: the SDK fires ERROR then CLOSE for a single disconnect. That
+    used to surface two errors -- the classified one and a generic
+    SERVER_DISCONNECT from the CLOSE handler -- and correctness hung on
+    the consumer reading `errors[0]`."""
+    from deepgram.core.events import EventType
+
+    _provider, connection, _captured, _events, errors = _started_provider(monkeypatch)
+    connection.handlers[EventType.ERROR](_closed(1008, "DATA-0000"))
+    connection.handlers[EventType.CLOSE](None)
+
+    assert len(errors) == 1, "one disconnect, one terminal error"
+    assert errors[0].category is ErrorCategory.CONFIG, "the classified error is the one that surfaces"
+
+    # A second ERROR on the same connection is likewise not a new failure.
+    connection.handlers[EventType.ERROR](_closed(1011, "NET-0001"))
+    assert len(errors) == 1
+
+
 def test_a_data_close_stops_the_session_as_a_config_error(monkeypatch):
     from deepgram.core.events import EventType
 
