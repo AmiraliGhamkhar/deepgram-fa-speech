@@ -560,7 +560,18 @@ Every rule carries metadata:
   rules are applied by default.
 - **`context_dependent`** rules (e.g. "نبض" → "HR") are **disabled by
   default**. Enable with `enable_context_dependent_terms: true` only after
-  reviewing the risk for your dictation population.
+  reviewing the risk for your dictation population. The same opt-in gates
+  any rule carrying **`confidence: low`**, in any category: it is the
+  file's own statement that the mapping is not fully trusted, so it does
+  not fire by default. `confidence: high` / `medium` follow their category
+  exactly.
+- **One malformed rule cannot brick the client.** A rule that fails
+  per-rule validation (an empty side, a digit-changing source/target, an
+  unflagged numeric span) is skipped with a warning naming its index, the
+  skipped count appears in the startup log
+  (`Correction rules active: X / Y total, Z skipped`), and every other
+  rule still loads. Structural damage to the file (no top-level `rules:`
+  list) remains a hard configuration error.
 - Rules whose **source is everyday Persian** that merely *has* a medical
   reading are always `context_dependent`, never active by default:
   `کلیه` ("all") ≠ Kidney, `نمونه` ("sample") ≠ Specimen, `جفت` ("pair")
@@ -995,7 +1006,10 @@ Key operational changes:
 - **Clipboard preservation is conservative.** With `restore_clipboard: true`,
   rich/image/file clipboards are refused instead of destroyed. Use `inject_mode:
   type` or deliberately clear/replace that clipboard first. Newer user copies
-  are never intentionally overwritten by restoration.
+  are never intentionally overwritten by restoration. With
+  `restore_clipboard: false`, a successful paste replaces the clipboard with
+  a fixed non-PHI placeholder ("Medical STT — متن قبلی پاک شد") instead of
+  leaving dictated text on a shared clipboard indefinitely.
 - The GUI now includes a client-ID field and a connection check for **saved**
   configuration (one temporary token request, no audio). Start/settings work
   runs off Tk; the overlay shares its interpreter and uses coalesced updates.

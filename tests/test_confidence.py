@@ -91,3 +91,24 @@ def test_reset_segment_timings_use_tuple_alignment() -> None:
     warning = find_low_confidence_medical_words(words, 0.65)
     assert warning is not None
     assert low_confidence_protected_ranges(text, words, warning) == [(0, 3)]
+
+
+def test_trimmed_fallback_respects_word_boundaries_for_repeated_tokens() -> None:
+    """The punctuation-trimmed fallback used a bare `find`, so it claimed
+    the `HbA1c` inside the longer `HbA1cX` token and left the actually
+    uncertain second occurrence unprotected."""
+    text = "HbA1cX HbA1c"
+    words = (WordInfo("HbA1c،", 0.0, 0.5, 0.3),)
+    warning = find_low_confidence_medical_words(words, 0.65)
+    assert warning is not None
+    start = text.rindex("HbA1c")
+    assert low_confidence_protected_ranges(text, words, warning) == [(start, start + len("HbA1c"))]
+
+
+def test_trimmed_fallback_without_a_boundary_valid_hit_fails_safe() -> None:
+    """No boundary-valid occurrence -> None (preserve the whole utterance),
+    never a mis-mapped span inside a longer token."""
+    words = (WordInfo("HbA1c،", 0.0, 0.5, 0.3),)
+    warning = find_low_confidence_medical_words(words, 0.65)
+    assert warning is not None
+    assert low_confidence_protected_ranges("HbA1cX", words, warning) is None

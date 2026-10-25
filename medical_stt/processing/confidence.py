@@ -91,20 +91,13 @@ def _is_word_char(ch: str) -> bool:
     return bool(ch) and (ch.isalnum() or ch in _WORD_JOINERS)
 
 
-def _find_normalized_word(text: str, needle: str, start: int) -> Optional[Tuple[int, int]]:
-    """Find `needle` in `text` at/after `start`, preferring a whole-word hit.
-
-    Boundary-valid hits come first so a short token cannot claim a substring
-    of a longer one. ASR also glues digits to letters/units, so an exact
-    boundary-invalid hit is still better than losing the span entirely.
-    """
-    if not needle or start >= len(text):
-        return None
+def _find_boundary_valid(text: str, needle: str, start: int) -> Optional[Tuple[int, int]]:
+    """First whole-word occurrence of `needle` in `text` at/after `start`."""
     position = start
     while True:
         index = text.find(needle, position)
         if index < 0:
-            break
+            return None
         end = index + len(needle)
         before = text[index - 1] if index > 0 else ""
         after = text[end] if end < len(text) else ""
@@ -112,11 +105,32 @@ def _find_normalized_word(text: str, needle: str, start: int) -> Optional[Tuple[
             return (index, end)
         position = index + 1
 
+
+def _find_normalized_word(text: str, needle: str, start: int) -> Optional[Tuple[int, int]]:
+    """Find `needle` in `text` at/after `start`, preferring a whole-word hit.
+
+    Boundary-valid hits come first so a short token cannot claim a substring
+    of a longer one. ASR also glues digits to letters/units, so for a plain
+    needle an exact boundary-invalid hit is still better than losing the
+    span entirely.
+
+    The punctuation-trimmed fallback obeys the SAME boundary rule: it used
+    to take the first bare `find` hit, so a repeated medical token mapped
+    the flagged word onto an earlier/longer token that merely contains it
+    ("HbA1c" inside "HbA1cX") and left the actually-uncertain occurrence
+    unprotected. With no boundary-valid trimmed hit it returns None -- the
+    caller's fail-safe preserves the whole utterance instead of protecting
+    the wrong span.
+    """
+    if not needle or start >= len(text):
+        return None
+    found = _find_boundary_valid(text, needle, start)
+    if found is not None:
+        return found
+
     trimmed = needle.strip(_PUNCTUATION_STRIP)
     if trimmed and trimmed != needle:
-        index = text.find(trimmed, start)
-        if index >= 0:
-            return (index, index + len(trimmed))
+        return _find_boundary_valid(text, trimmed, start)
 
     index = text.find(needle, start)
     return (index, index + len(needle)) if index >= 0 else None

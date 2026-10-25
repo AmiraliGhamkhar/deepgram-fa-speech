@@ -53,6 +53,12 @@ _SYSTEM = platform.system().lower()
 # Tag our own synthetic events so we can tell them apart from real typing.
 _INJECT_SIGNATURE = 0x53545449  # "STTI"
 
+#: Fixed, non-PHI text a backend leaves on the clipboard after a successful
+#: paste when `restore_clipboard` is disabled. The alternative -- leaving
+#: dictated clinical text on a shared clipboard indefinitely -- is a
+#: privacy failure the setting's documentation now calls out explicitly.
+CLIPBOARD_CLEARED_PLACEHOLDER = "Medical STT — متن قبلی پاک شد"
+
 
 class InjectionBackend(ABC):
     """Everything that touches the OS input/clipboard APIs."""

@@ -27,6 +27,10 @@ log = logging.getLogger("medical_stt.instance")
 _WINDOWS_MUTEX_NAME = r"MedicalSTT-SingleInstance"
 
 _ERROR_ALREADY_EXISTS = 183
+#: Returned when the mutex NAME exists as a different kernel object (squatted
+#: by another process/object type): the API answered and refused, which is
+#: a "do not start a second copy" signal, not an availability problem.
+_ERROR_ACCESS_DENIED = 5
 
 
 def _last_error() -> int:
@@ -63,17 +67,32 @@ class SingleInstance:
             kernel32.CloseHandle.restype = wintypes.BOOL
 
             handle = kernel32.CreateMutexW(None, True, self._name)
+            error = _last_error()
             if not handle:
-                raise OSError(f"CreateMutexW failed (Win32 error {_last_error()})")
-            if _last_error() == _ERROR_ALREADY_EXISTS:
+                if error == _ERROR_ACCESS_DENIED:
+                    # The API answered and refused: the name is held by a
+                    # different kind of kernel object. Failing open here
+                    # was how two instances could both run; refuse instead.
+                    log.error(
+                        "single-instance mutex name is held by another "
+                        "object (Win32 error %d); refusing to start a "
+                        "second copy",
+                        error,
+                    )
+                    return False
+                raise OSError(f"CreateMutexW failed (Win32 error {error})")
+            if error == _ERROR_ALREADY_EXISTS:
                 kernel32.CloseHandle(handle)
                 return False
         except (OSError, AttributeError) as exc:
             # The mutex prevents a second copy from fighting over the
-            # microphone; it is not a security boundary. If it cannot be
-            # created (unexpected Win32 error, API unavailable), the
-            # application must still start rather than refuse to run.
-            log.warning("single-instance mutex unavailable (%s); continuing", exc)
+            # microphone; it is not a security boundary. If the API is
+            # unavailable or fails in an unclassified way, the application
+            # must still start rather than refuse to run. (Only exception
+            # TYPES are logged, as everywhere in this app.)
+            log.warning(
+                "single-instance mutex unavailable (%s); continuing", type(exc).__name__
+            )
             self.acquired = True
             return True
         self._handle = int(handle)
@@ -89,8 +108,20 @@ class SingleInstance:
         from . import paths
 
         path = self._lock_path or paths.lock_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        handle = open(path, "a+")  # noqa: SIM115 - handle is kept until release
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            handle = open(path, "a+")  # noqa: SIM115 - handle is kept until release
+        except OSError as exc:
+            # An unwritable lock directory must degrade like an unavailable
+            # mutex (fail open, loudly), not crash startup before any UI
+            # exists to explain itself. Only a lock that flock REFUSES --
+            # another instance really holding it -- returns False below.
+            log.warning(
+                "single-instance file lock unavailable (%s); continuing",
+                type(exc).__name__,
+            )
+            self.acquired = True
+            return True
         try:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:

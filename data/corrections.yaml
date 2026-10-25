@@ -22,7 +22,11 @@
 #                                  a generic word into a directive
 #                                  abbreviation without context); disabled
 #                                  by default, kept only for documentation
-#   confidence:        high | medium | low - engine's trust in the mapping
+#   confidence:        high | medium | low - engine's trust in the mapping.
+#                       `low` is not decoration: in ANY category it takes
+#                       the same opt-in as context_dependent and stays off
+#                       unless enable_context_dependent_terms is true.
+#                       high/medium behave exactly as their category says.
 #   requires_context:  true if this rule should only fire when the caller
 #                       opts in (see TerminologyEngine(enable_context_dependent=...))
 #   dangerous:         true if the rule must never be applied automatically

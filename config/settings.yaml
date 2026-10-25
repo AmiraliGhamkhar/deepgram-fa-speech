@@ -47,6 +47,12 @@ session_ttl_seconds: 30
 # type  = Unicode key events character-by-character
 inject_mode: paste
 paste_settle_seconds: 0.12
+# Restore the clipboard contents that were there before each paste.
+# false does NOT leave the dictated text behind: after a successful paste
+# the clipboard is replaced with a fixed non-PHI placeholder
+# ("Medical STT — متن قبلی پاک شد"), so dictated clinical text never sits
+# on a shared clipboard indefinitely. A copy made by anyone else during the
+# paste always wins and is never overwritten.
 restore_clipboard: true
 
 overlay_enabled: true

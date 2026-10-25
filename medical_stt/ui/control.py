@@ -51,8 +51,9 @@ _REC = colors.REC
 _ACCENT = colors.ACCENT
 _ON_LIGHT = colors.ON_LIGHT
 
-#: Diameters of the Canvas-drawn circular controls (GUI R1):
+#: 96-DPI design diameters of the Canvas-drawn circular controls (GUI R1):
 #: the Start/Stop toggle, the three settings actions, and the quit mark.
+#: `_circle_button` scales them by the window's actual DPI at build time.
 _TOGGLE_DIAMETER = 72
 _SECONDARY_DIAMETER = 52
 _QUIT_DIAMETER = 20
@@ -133,6 +134,14 @@ class ControlWindow:
         self._settings_entries: list[Any] = []
         self._test_circle: Optional[Any] = None
         self._save_circle: Optional[Any] = None
+        #: All three settings-action circles (test / recovery / save), so
+        #: shared state reflections (the recording ring tint) reach the
+        #: recovery circle too, not just the two `_refresh_settings_state`
+        #: enables or disables.
+        self._secondary_circles: list[Any] = []
+        #: Pixel scale of THIS window (actual DPI / 96, `fonts` owns the
+        #: query). Set once in `_run` before `_build`; 1.0 off Windows.
+        self._dpi_scale: float = 1.0
         self._drag_widgets: tuple[Any, ...] = ()
         self._circle_states: dict[Any, dict[str, Any]] = {}
         self._action_row: Optional["tk.Frame"] = None
@@ -202,6 +211,9 @@ class ControlWindow:
             fonts.enable_windows_dpi_awareness()
             self._root = tk.Tk()
             fonts.apply_tk_scaling(self._root)
+            # Once per window, before any circle is built: fonts scale via
+            # tk scaling above, Canvas geometry scales via this factor.
+            self._dpi_scale = fonts.dpi_scale_factor(self._root)
             dispatch.install_owner(self._root, self._mailbox)
             self._build(self._root)
             # No WM_DELETE_WINDOW protocol: `_build` sets
@@ -341,6 +353,7 @@ class ControlWindow:
                 font=fonts.font(root, 8), tag="action", glyph=glyph, on_disabled=command,
             )
             circle.pack(side="right", padx=4)
+            self._secondary_circles.append(circle)
             if command == self._test_connection:
                 self._test_circle = circle
             elif command == self._on_save_settings:
@@ -466,6 +479,13 @@ class ControlWindow:
     def _refresh_settings_state(self) -> None:
         """Tk-thread-only visual reflection of the existing action guards."""
         busy = self._starting or self._running or self._stopping or self._saving
+        # While recording, the three secondary circles carry a WARNING-tinted
+        # ring (`_paint_circle`): one quiet visual link between the red
+        # toggle and the settings actions that are locked until Stop.
+        for circle in self._secondary_circles:
+            state = self._circle_states.get(circle)
+            if state is not None:
+                state["recording_ring"] = bool(self._running)
         for entry in self._settings_entries:
             entry.config(state="disabled" if busy else "normal",
                          disabledbackground=_SURFACE, disabledforeground=_MUTED,
@@ -475,6 +495,11 @@ class ControlWindow:
         if self._save_circle is not None:
             # Connection tests deliberately do not block saving (A3.4).
             self._set_circle_enabled(self._save_circle, not busy)
+        for circle in self._secondary_circles:
+            # Test/save were just repainted by `_set_circle_enabled`; the
+            # recovery circle's enablement never changes, but its ring does.
+            if circle not in (self._test_circle, self._save_circle) and circle in self._circle_states:
+                self._paint_circle(circle)
 
     def _set_status(self, text: str, color: str, detail: str = "") -> None:
         def _() -> None:
@@ -567,7 +592,7 @@ class ControlWindow:
             state = (health.get("phase", "connecting"), health.get("warning", ""))
             if state != last_health and not self._stopping:
                 phase, warning = state
-                labels = {"recording": f"{STATUS_DOT} در حال ضبط...", "reconnecting": f"{STATUS_DOT} اتصال مجدد...", "stopping": f"{STATUS_DOT} در حال توقف..."}
+                labels = {"recording": f"{STATUS_DOT} در حال ضبط...", "reconnecting": f"{STATUS_DOT} اتصال مجدد...", "stopping": f"{STATUS_DOT} در حال توقف...", "idle": f"{STATUS_DOT} آماده"}
                 self._set_status(labels.get(phase, f"{STATUS_DOT} در حال اتصال..."), _REC if phase == "recording" else _MUTED, warning)
                 last_health = state
             time.sleep(0.2)
@@ -595,26 +620,46 @@ class ControlWindow:
         animation. The dashed focus ring is independent of the 2px state ring.
         Disabled controls retain guarded feedback, never silently eat a click.
         All painting is called exclusively by the Tk/mailbox thread.
+
+        `diameter` is the 96-DPI design size. Everything pixel-based in the
+        box -- the canvas, the oval inset, the ring widths, the caption's
+        wrap width and the glyph/caption offsets -- is derived from the
+        SCALED diameter (`self._dpi_scale`, see `fonts.dpi_scale_factor`),
+        computed once here at build time. At 96 DPI (and off Windows) the
+        numbers are exactly the historical 72/52/20 px geometry.
         """
-        canvas = tk.Canvas(parent, width=diameter, height=diameter, bg=_BG,
+        scale = self._dpi_scale
+        size = fonts.scaled_pixels(diameter, scale)
+        inset = fonts.scaled_pixels(2, scale)
+        ring_width = fonts.scaled_pixels(2, scale)
+        focus_inset = fonts.scaled_pixels(1, scale)
+        # A caption that wraps to two lines ("بررسی\nاتصال") grows toward
+        # the glyph above it; 1pt smaller keeps the flat two-item layout
+        # collision-free at every scale instead of moving anything.
+        caption_font = font or fonts.font(parent, 12, "bold")
+        if "\n" in text and len(caption_font) >= 2 and isinstance(caption_font[1], int):
+            caption_font = (caption_font[0], max(1, caption_font[1] - 1)) + tuple(caption_font[2:])
+        canvas = tk.Canvas(parent, width=size, height=size, bg=_BG,
                            highlightthickness=0, cursor="hand2", takefocus=1)
-        oval = canvas.create_oval(2, 2, diameter - 2, diameter - 2,
-                                  fill=fill, outline=_BORDER, width=2, tags=(tag,))
+        oval = canvas.create_oval(inset, inset, size - inset, size - inset,
+                                  fill=fill, outline=_BORDER, width=ring_width, tags=(tag,))
         label = canvas.create_text(
-            diameter / 2, diameter * .67 if glyph else diameter / 2,
-            text=text, fill=text_fill, font=font or fonts.font(parent, 12, "bold"),
-            tags=(tag,), width=max(8, diameter - 10), justify="center",
+            size / 2, size * .67 if glyph else size / 2,
+            text=text, fill=text_fill, font=caption_font,
+            tags=(tag,), width=max(fonts.scaled_pixels(8, scale), size - fonts.scaled_pixels(10, scale)),
+            justify="center",
         )
         labels = [label]
         if glyph:
-            labels.append(canvas.create_text(diameter / 2, diameter * .28, text=glyph,
+            labels.append(canvas.create_text(size / 2, size * .28, text=glyph,
                           fill=text_fill, font=fonts.font(parent, 11), tags=(tag,)))
-        focus = canvas.create_oval(1, 1, diameter - 1, diameter - 1, fill="",
-                                  outline=_ACCENT, width=1, dash=(2, 2), state="hidden")
+        focus = canvas.create_oval(focus_inset, focus_inset, size - focus_inset, size - focus_inset,
+                                  fill="", outline=_ACCENT, width=focus_inset, dash=(2, 2),
+                                  state="hidden")
         self._circle_states[canvas] = dict(
             oval=oval, labels=labels, focus=focus, fill=fill, text_fill=text_fill,
             hover_fill=hover_fill, hover=False, pressed=False, enabled=True,
-            primary=remember,
+            primary=remember, recording_ring=False,
         )
 
         def activate(_event: object = None) -> None:
@@ -665,7 +710,15 @@ class ControlWindow:
             fill = _darken(fill, .8)
         elif state["hover"]:
             fill = state["hover_fill"] or _darken(fill)
-        ring = _REC if state["primary"] and state["fill"] == _REC else _BORDER
+        if state["primary"] and state["fill"] == _REC:
+            ring = _REC
+        elif state.get("recording_ring"):
+            # Secondary circles while a session is recording (driven by
+            # `_refresh_settings_state`): WARNING at blended 50% weight
+            # over the normal ring -- palette-derived, like every colour.
+            ring = colors.blend(colors.WARNING, _BORDER)
+        else:
+            ring = _BORDER
         canvas.itemconfig(state["oval"], fill=fill, outline=ring)
         ink = state["text_fill"] if state["enabled"] else colors.blend(state["text_fill"], _BG)
         for label in state["labels"]:
@@ -684,14 +737,6 @@ class ControlWindow:
         state["fill"] = self._toggle_color
         state["hover"] = self._toggle_hover
         self._paint_circle(self._toggle)
-
-    def _on_toggle_hover(self, _event: object = None) -> None:
-        self._toggle_hover = True
-        self._paint_toggle()
-
-    def _on_toggle_leave(self, _event: object = None) -> None:
-        self._toggle_hover = False
-        self._paint_toggle()
 
     def _set_button(self, text: str, color: str) -> None:
         def _() -> None:

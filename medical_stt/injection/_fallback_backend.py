@@ -28,7 +28,7 @@ import platform
 import time
 from typing import Optional
 
-from .backend import InjectionBackend
+from .backend import CLIPBOARD_CLEARED_PLACEHOLDER, InjectionBackend
 
 log = logging.getLogger("medical_stt.injection.fallback")
 
@@ -55,8 +55,19 @@ class FallbackBackend(InjectionBackend):
         except ImportError as exc:
             log.warning("pyautogui unavailable, cannot send backspaces: %s", type(exc).__name__)
             return False
-        for _ in range(count):
-            pyautogui.press("backspace")
+        # pyautogui sleeps its global PAUSE (0.1 s by default) after EVERY
+        # call, so erasing a 50-character revision stalled the provider
+        # callback thread for ~5 s. Suspend it for the loop, restore after.
+        had_pause = hasattr(pyautogui, "PAUSE")
+        previous_pause = getattr(pyautogui, "PAUSE", None)
+        try:
+            if had_pause:
+                pyautogui.PAUSE = 0
+            for _ in range(count):
+                pyautogui.press("backspace")
+        finally:
+            if had_pause:
+                pyautogui.PAUSE = previous_pause
         return True
 
     def get_clipboard_text(self) -> Optional[str]:
@@ -94,6 +105,30 @@ class FallbackBackend(InjectionBackend):
         except Exception as exc:  # pragma: no cover - best effort by design
             log.warning("clipboard restore failed (%s)", type(exc).__name__)
 
+    def _clear_written_text(self, written_text: str) -> None:
+        """Replace our pasted text with the non-PHI placeholder.
+
+        Used when `restore_clipboard` is disabled: the dictated text must
+        not sit on the clipboard indefinitely. Same newer-copy guard as a
+        restore: content that is no longer exactly what we wrote belongs
+        to somebody else now.
+        """
+        try:
+            import pyperclip
+
+            try:
+                current = pyperclip.paste()
+            except Exception as exc:
+                log.warning("clipboard state unknown while clearing (%s)", type(exc).__name__)
+            else:
+                if current != written_text:
+                    log.warning("clipboard changed during paste; not overwriting a newer copy")
+                    return
+            pyperclip.copy(CLIPBOARD_CLEARED_PLACEHOLDER)
+            log.info("clipboard cleared after paste (restore_clipboard disabled)")
+        except Exception as exc:  # pragma: no cover - best effort by design
+            log.warning("clipboard clear failed (%s)", type(exc).__name__)
+
     def paste_text(self, text: str, restore_clipboard: bool, settle_seconds: float) -> bool:
         try:
             import pyautogui
@@ -112,6 +147,7 @@ class FallbackBackend(InjectionBackend):
                 return False
 
         wrote = False
+        pasted = False
         try:
             pyperclip.copy(text)
             wrote = True
@@ -131,6 +167,7 @@ class FallbackBackend(InjectionBackend):
 
             if settle_seconds:
                 time.sleep(settle_seconds)
+            pasted = True
             return True
         except Exception as exc:
             log.warning("fallback paste failed (%s)", type(exc).__name__)
@@ -138,3 +175,5 @@ class FallbackBackend(InjectionBackend):
         finally:
             if restore_clipboard and wrote and previous is not None:
                 self._restore_clipboard(previous, text)
+            elif not restore_clipboard and pasted:
+                self._clear_written_text(text)

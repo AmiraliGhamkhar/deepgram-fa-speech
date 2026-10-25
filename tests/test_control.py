@@ -435,13 +435,21 @@ def test_set_button_repaints_the_circle(monkeypatch):
 
 
 def test_hover_darkens_the_circle_and_leave_restores_it(monkeypatch):
+    """Hover is driven through the real `<Enter>`/`<Leave>` tag bindings
+    installed by `_circle_button` -- the old `_on_toggle_hover` /
+    `_on_toggle_leave` methods were unreachable from the widget tree and
+    only ever called by this test."""
     window = _built_window(monkeypatch)
     canvas = window._toggle
 
-    window._on_toggle_hover()
+    canvas.tag_bindings[("toggle", "<Enter>")](_FakeEvent(0, 0))
+    assert window._toggle_hover is True
     assert canvas.items[window._toggle_oval]["fill"] == _darken(control._OK)
-    window._on_toggle_leave()
+    canvas.tag_bindings[("toggle", "<Leave>")](_FakeEvent(0, 0))
+    assert window._toggle_hover is False
     assert canvas.items[window._toggle_oval]["fill"] == control._OK
+    assert not hasattr(ControlWindow, "_on_toggle_hover")
+    assert not hasattr(ControlWindow, "_on_toggle_leave")
 
 
 def test_circle_click_starts_the_session(monkeypatch):
@@ -1015,3 +1023,97 @@ def test_status_dot_is_centralized():
     source = Path(control.__file__).read_text()
     assert control.STATUS_DOT == '●'
     assert source.count('●') + source.count(r'\u25cf') == 1
+
+
+# -- DPI-true circle geometry ---------------------------------------------------
+
+
+def test_circle_geometry_at_96_dpi_is_todays_exact_pixels(monkeypatch):
+    from medical_stt.ui import fonts as fonts_module
+
+    monkeypatch.setattr(fonts_module, "dpi_scale_factor", lambda root, dpi_loader=None: 1.0)
+    window = _built_window(monkeypatch)
+    canvas = window._toggle
+    assert (canvas.kwargs["width"], canvas.kwargs["height"]) == (72, 72)
+    assert canvas.items[window._toggle_oval]["args"] == (2, 2, 70, 70)
+    assert canvas.items[window._toggle_text]["width"] == 62
+
+
+def test_circle_geometry_scales_with_window_dpi(monkeypatch):
+    """Fonts already scale to the real DPI; the circles used fixed pixels,
+    so at 150% the text grew inside a 72px circle that did not."""
+    from medical_stt.ui import fonts as fonts_module
+
+    monkeypatch.setattr(fonts_module, "dpi_scale_factor", lambda root, dpi_loader=None: 1.5)
+    window = _built_window(monkeypatch)
+
+    canvas = window._toggle
+    assert (canvas.kwargs["width"], canvas.kwargs["height"]) == (108, 108)
+    assert canvas.items[window._toggle_oval]["args"] == (3, 3, 105, 105)
+    assert canvas.items[window._toggle_oval]["width"] == 3, "ring width scales with the box"
+    assert canvas.items[window._toggle_text]["width"] == 93
+
+    for circle in window._action_row.children:
+        assert (circle.kwargs["width"], circle.kwargs["height"]) == (78, 78)
+    assert (window._quit.kwargs["width"], window._quit.kwargs["height"]) == (30, 30)
+
+
+def test_two_line_captions_get_a_smaller_font_and_scaled_offsets(monkeypatch):
+    from medical_stt.ui import fonts as fonts_module
+
+    monkeypatch.setattr(fonts_module, "dpi_scale_factor", lambda root, dpi_loader=None: 1.0)
+    window = _built_window(monkeypatch)
+    circle = window._action_row.children[0]
+    texts = [item for item in circle.items.values() if item["kind"] == "text"]
+    caption, glyph = texts[0], texts[1]
+    assert caption["text"] == "بررسی\nاتصال"
+    assert caption["font"][1] == 7, "a two-line caption drops 1pt so it cannot meet the glyph"
+    assert caption["args"] == (26.0, 52 * 0.67)
+    assert glyph["args"] == (26.0, 52 * 0.28)
+
+    toggle_caption = window._toggle.items[window._toggle_text]
+    assert toggle_caption["font"][1] == 12, "single-line captions keep their size"
+    assert toggle_caption["args"] == (36.0, 36.0)
+
+
+def test_secondary_rings_tint_while_recording(monkeypatch):
+    from medical_stt.ui import colors
+
+    window = _built_window(monkeypatch)
+    circles = list(window._action_row.children)
+    ovals = [
+        next(i for i, item in c.items.items() if item["kind"] == "oval") for c in circles
+    ]
+
+    window._running = True
+    window._refresh_settings_state()
+    expected = colors.blend(colors.WARNING, colors.BORDER)
+    for circle, oval in zip(circles, ovals, strict=True):
+        assert circle.items[oval]["outline"] == expected
+
+    window._running = False
+    window._refresh_settings_state()
+    for circle, oval in zip(circles, ovals, strict=True):
+        assert circle.items[oval]["outline"] == colors.BORDER
+
+
+def test_watch_labels_an_idle_phase_as_ready_not_connecting():
+    """A session that ended on its own reports phase `idle`; the watch loop
+    used to fall through to the connecting label for it."""
+
+    class _IdleController(_StoppedController):
+        health = {"phase": "idle", "warning": ""}
+
+        def __init__(self):
+            self._checks = 0
+
+        @property
+        def is_running(self):  # type: ignore[override]
+            self._checks += 1
+            return self._checks == 1
+
+    window = ControlWindow(_IdleController())
+    statuses, _ = _capture_status(window)
+    window._running = False
+    window._watch()
+    assert statuses[0][0] == f"{control.STATUS_DOT} آماده"

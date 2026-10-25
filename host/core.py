@@ -936,7 +936,9 @@ class TokenBucketRateLimiter:
         now = self._clock()
         with self._lock:
             self._calls += 1
-            if self._calls % self._purge_interval_calls == 0:
+            # A tiny table cannot be hiding meaningful memory; walking it on
+            # every purge interval only burns the lock for nothing.
+            if self._calls % self._purge_interval_calls == 0 and len(self._buckets) > 64:
                 self._purge(now)
 
             bucket = self._buckets.get(key)

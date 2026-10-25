@@ -146,33 +146,54 @@ def test_diagnostic_expected_target_cannot_be_replaced_by_another_app(win):
     assert not state["pastes"]
 
 
-# -- B19(c): modifier re-press must not leave a logical key stuck ------------
+# -- modifier re-press must not leave a logical key stuck --------------------
 
 
 @pytest.mark.parametrize("modifier", ["VK_SHIFT", "VK_MENU", "VK_LWIN", "VK_RWIN", "VK_CONTROL"])
-def test_snapshot_modifiers_are_restored_after_synthetic_keyup(win, modifier):
+def test_modifier_released_during_paste_is_not_repressed(win, modifier):
+    """The pre-paste snapshot must not be re-pressed verbatim: a modifier
+    the user physically released during the paste was left logically stuck,
+    turning the user's next keystrokes into shortcuts."""
     module, backend, user, _ = win
     vk = getattr(module, modifier)
-    # Async state includes synthetic input: our keyup clears its high bit,
-    # even though the user has not physically released the key.
-    logical_down = {vk}
+    physical_down = {vk}
     sent = []
 
     def record(inputs):
         for inp in inputs:
             key = inp.union.ki.wVk
-            sent.append((key, bool(inp.union.ki.dwFlags & module.KEYEVENTF_KEYUP)))
-            if inp.union.ki.dwFlags & module.KEYEVENTF_KEYUP:
-                logical_down.discard(key)
-            else:
-                logical_down.add(key)
+            key_up = bool(inp.union.ki.dwFlags & module.KEYEVENTF_KEYUP)
+            sent.append((key, key_up))
+            if key == module.VK_V and not key_up:
+                physical_down.discard(vk)  # the user lets go mid-paste
         return True
 
     backend._send_inputs = record
-    user.GetAsyncKeyState.side_effect = lambda key: 0x8000 if key in logical_down else 0
+    user.GetAsyncKeyState.side_effect = lambda key: 0x8000 if key in physical_down else 0
     user.MapVirtualKeyW.return_value = 0
     assert module.WindowsBackend._send_paste_keystroke(backend)
-    assert vk in logical_down
+    assert sent[0] == (vk, True), "the modifier is still released before the paste"
+    assert sent[-1] != (vk, False), "a released modifier must not be re-pressed"
+
+
+@pytest.mark.parametrize("modifier", ["VK_SHIFT", "VK_MENU", "VK_LWIN", "VK_RWIN", "VK_CONTROL"])
+def test_modifier_still_held_after_paste_is_repressed(win, modifier):
+    """A modifier still reported down by a FRESH async-state read after the
+    paste (both in the snapshot and still held) is re-pressed as before."""
+    module, backend, user, _ = win
+    vk = getattr(module, modifier)
+    physical_down = {vk}
+    sent = []
+
+    def record(inputs):
+        for inp in inputs:
+            sent.append((inp.union.ki.wVk, bool(inp.union.ki.dwFlags & module.KEYEVENTF_KEYUP)))
+        return True
+
+    backend._send_inputs = record
+    user.GetAsyncKeyState.side_effect = lambda key: 0x8000 if key in physical_down else 0
+    user.MapVirtualKeyW.return_value = 0
+    assert module.WindowsBackend._send_paste_keystroke(backend)
     assert sent[0] == (vk, True)
     assert sent[-1] == (vk, False)
 
@@ -253,3 +274,165 @@ def test_clipboard_restore_failure_is_logged_without_content(win, caplog):
     assert "restore" in caplog.text
     assert "clinical text" not in caplog.text
     assert "original" not in caplog.text
+
+
+# -- clipboard ownership: our own hidden window, never the foreground app ---
+
+
+def test_write_path_opens_clipboard_with_our_own_window(win):
+    module, backend, user, _ = win
+    user.CreateWindowExW.return_value = 777
+    opened = []
+    user.OpenClipboard.side_effect = lambda hwnd: opened.append(hwnd) or True
+    assert module.WindowsBackend._open_clipboard(backend, for_write=True)
+    assert opened == [777], "writes must own the clipboard via our window, not the foreground app (123) or NULL"
+
+
+def test_write_never_falls_back_to_null_or_foreground_owner(win):
+    module, backend, user, _ = win
+    user.CreateWindowExW.return_value = 0  # our window could not be created
+    opened = []
+    user.OpenClipboard.side_effect = lambda hwnd: opened.append(hwnd) or True
+    assert not module.WindowsBackend._open_clipboard(backend, for_write=True)
+    assert opened == [], "a write with no owner window of our own must fail, not borrow one"
+    # Reads may keep the old fallbacks, but still only after our window failed.
+    assert module.WindowsBackend._open_clipboard(backend)
+    assert opened and opened[0] is not None
+
+
+def test_read_path_prefers_our_own_window(win):
+    module, backend, user, _ = win
+    user.CreateWindowExW.return_value = 777
+    opened = []
+    user.OpenClipboard.side_effect = lambda hwnd: opened.append(hwnd) or True
+    assert module.WindowsBackend._open_clipboard(backend)
+    assert opened == [777]
+
+
+# -- verify -> paste race -----------------------------------------------------
+
+
+def test_clipboard_change_after_paste_keystroke_is_unverifiable(win, caplog):
+    import logging
+
+    _, backend, _, state = win
+
+    def paste():
+        state["text"] = "new user copy"
+        state["seq"] += 1
+        return True
+
+    backend._send_paste_keystroke = paste
+    with caplog.at_level(logging.WARNING, logger="medical_stt.injection.windows"):
+        assert backend.paste_text("dictation", True, 0)
+    assert state["text"] == "new user copy", "the newer copy wins; nothing is restored over it"
+    assert state["writes"] == ["dictation"]
+    assert "unverifiable" in caplog.text
+
+
+# -- restore_clipboard: false must not retain PHI ------------------------------
+
+
+def test_no_restore_replaces_dictated_text_with_placeholder(win, caplog):
+    import logging
+
+    from medical_stt.injection.backend import CLIPBOARD_CLEARED_PLACEHOLDER
+
+    _, backend, _, state = win
+    with caplog.at_level(logging.INFO, logger="medical_stt.injection.windows"):
+        assert backend.paste_text("dictation", False, 0)
+    assert state["text"] == CLIPBOARD_CLEARED_PLACEHOLDER
+    assert state["writes"][-1] == CLIPBOARD_CLEARED_PLACEHOLDER
+    assert "cleared" in caplog.text
+    assert "dictation" not in caplog.text
+
+
+def test_failed_set_after_empty_clipboard_still_records_sequence(win):
+    """Even when SetClipboardData fails, EmptyClipboard already created a
+    new sequence; recording it is what lets paste_text's finally restore."""
+    module, backend, user, state = win
+    kernel = module.kernel32
+    buffer = ctypes.create_string_buffer(1024)
+    kernel.GlobalAlloc.return_value = 123
+    kernel.GlobalLock.return_value = ctypes.addressof(buffer)
+
+    def empty():
+        state["seq"] += 1
+        return True
+
+    user.EmptyClipboard.side_effect = empty
+    user.SetClipboardData.return_value = 0
+    real_set = module.WindowsBackend._set_clipboard_text.__get__(backend)
+    assert not real_set("clinical text")
+    assert backend._last_written_sequence == state["seq"]
+
+
+# -- bounded clipboard read -----------------------------------------------------
+
+
+def test_clipboard_read_is_bounded_and_requires_a_terminator(win, monkeypatch):
+    module, backend, user, _ = win
+    kernel = module.kernel32
+
+    # Linux c_wchar is 4 bytes, so decode the UTF-16LE buffer explicitly;
+    # what is under test is the bound the code passes and its NUL check.
+    def fake_wstring_at(ptr, count):
+        return ctypes.string_at(ptr, count * 2).decode("utf-16-le")
+
+    monkeypatch.setattr(ctypes, "wstring_at", fake_wstring_at)
+    user.GetClipboardData.return_value = 999
+    kernel.GlobalUnlock.return_value = True
+
+    raw = "abc\0".encode("utf-16-le")
+    buffer = ctypes.create_string_buffer(raw, len(raw))
+    kernel.GlobalLock.return_value = ctypes.addressof(buffer)
+    kernel.GlobalSize.return_value = len(raw)
+    assert module.WindowsBackend.get_clipboard_text(backend) == "abc"
+
+    raw = "abcd".encode("utf-16-le")  # no terminator inside the bound
+    buffer = ctypes.create_string_buffer(raw, len(raw))
+    kernel.GlobalLock.return_value = ctypes.addressof(buffer)
+    kernel.GlobalSize.return_value = len(raw)
+    assert module.WindowsBackend.get_clipboard_text(backend) is None
+
+    raw = "abcdef\0".encode("utf-16-le")  # terminator beyond the cap
+    buffer = ctypes.create_string_buffer(raw, len(raw))
+    kernel.GlobalLock.return_value = ctypes.addressof(buffer)
+    kernel.GlobalSize.return_value = len(raw)
+    monkeypatch.setattr(module, "_MAX_CLIPBOARD_CHARS", 2)
+    assert module.WindowsBackend.get_clipboard_text(backend) is None
+
+
+# -- NULL foreground target ------------------------------------------------------
+
+
+def test_null_foreground_gets_the_focus_warning(win, caplog):
+    import logging
+
+    _, backend, user, _ = win
+    user.GetWindowThreadProcessId.reset_mock()
+    user.GetWindowThreadProcessId.side_effect = lambda *_a: 0
+    with caplog.at_level(logging.WARNING, logger="medical_stt.injection.windows"):
+        assert not backend._target_allowed(0)
+    assert "focus an external document" in caplog.text
+    user.GetWindowThreadProcessId.assert_not_called()
+
+
+# -- type path modifier hygiene ---------------------------------------------------
+
+
+def test_unicode_typing_releases_and_restores_interfering_modifiers(win):
+    module, backend, user, _ = win
+    physical_down = {module.VK_MENU}
+    batches = []
+
+    def record(inputs):
+        batches.append([(i.union.ki.wVk, bool(i.union.ki.dwFlags & module.KEYEVENTF_KEYUP)) for i in inputs])
+        return True
+
+    backend._send_inputs = record
+    user.GetAsyncKeyState.side_effect = lambda key: 0x8000 if key in physical_down else 0
+    user.MapVirtualKeyW.return_value = 0
+    assert module.WindowsBackend.send_unicode_text(backend, "A")
+    assert batches[0] == [(module.VK_MENU, True)], "held Alt must be released before typing"
+    assert batches[-1] == [(module.VK_MENU, False)], "still-held Alt is restored afterwards"

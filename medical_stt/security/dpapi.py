@@ -63,14 +63,22 @@ class _DATA_BLOB(ctypes.Structure):
     ]
 
 
+#: Process-wide cache of the configured libraries: loading the DLLs and
+#: re-assigning every prototype ran on EVERY protect/unprotect call.
+_LIBRARY_CACHE: "tuple[Any, Any] | None" = None
+
+
 def _libraries() -> "tuple[Any, Any]":
-    """Load crypt32/kernel32 with explicit argtypes/restypes.
+    """Load crypt32/kernel32 with explicit argtypes/restypes (once).
 
     ctypes defaults every restype to a 32-bit `int`; on 64-bit Windows
     that silently truncates the `HLOCAL` returned into `pbData`, so the
     copy back out of DPAPI would read from a bogus address (the same
     class of bug documented in injection/backend.py).
     """
+    global _LIBRARY_CACHE
+    if _LIBRARY_CACHE is not None:
+        return _LIBRARY_CACHE
     crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)  # type: ignore[attr-defined]
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
 
@@ -99,10 +107,15 @@ def _libraries() -> "tuple[Any, Any]":
 
     kernel32.LocalFree.argtypes = [ctypes.c_void_p]
     kernel32.LocalFree.restype = ctypes.c_void_p
-    return crypt32, kernel32
+    _LIBRARY_CACHE = (crypt32, kernel32)
+    return _LIBRARY_CACHE
 
 
 def _make_blob(data: bytes) -> "_BlobHolder":
+    # `create_string_buffer(b"", 0)` raises a raw ValueError; the DPAPI
+    # contract for callers is DPAPIError for every failure of this layer.
+    if not data:
+        raise DPAPIError("empty payload")
     return _BlobHolder(data)
 
 
@@ -131,6 +144,8 @@ def _copy_out(out_blob: _DATA_BLOB, kernel32: Any) -> bytes:
 
 def protect(data: bytes, entropy: bytes = APP_ENTROPY) -> bytes:
     """Encrypt `data` with the current user's DPAPI master key."""
+    if not data:
+        raise DPAPIError("empty payload")
     if not is_available():
         raise DPAPINotAvailable(
             "Windows DPAPI is only available on Windows. "
@@ -165,6 +180,8 @@ def unprotect(blob: bytes, entropy: bytes = APP_ENTROPY) -> bytes:
     machine, was tampered with (DPAPI adds a MAC), or is simply not a
     protected blob.
     """
+    if not blob:
+        raise DPAPIError("empty payload")
     if not is_available():
         raise DPAPINotAvailable(
             "Windows DPAPI is only available on Windows. "

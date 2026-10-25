@@ -102,3 +102,31 @@ def test_dpi_awareness_uses_fake_windows_dll(monkeypatch):
         shcore=SimpleNamespace(SetProcessDpiAwareness=lambda level: calls.append(level))), raising=False)
     fonts._win32_enable_dpi_awareness()
     assert calls == [2]
+
+
+def test_dpi_scale_factor_uses_actual_dpi_clamped(monkeypatch):
+    monkeypatch.setattr(fonts, "_SYSTEM", "windows")
+    assert fonts.dpi_scale_factor(object(), dpi_loader=lambda _: 96) == 1.0
+    assert fonts.dpi_scale_factor(object(), dpi_loader=lambda _: 144) == 1.5
+    assert fonts.dpi_scale_factor(object(), dpi_loader=lambda _: 48) == 1.0, "never shrink below 1x"
+    assert fonts.dpi_scale_factor(object(), dpi_loader=lambda _: 384) == 3.0, "clamped at 3x"
+
+
+def test_dpi_scale_factor_is_unity_off_windows_and_on_failure(monkeypatch):
+    monkeypatch.setattr(fonts, "_SYSTEM", "linux")
+    assert fonts.dpi_scale_factor(object(), dpi_loader=lambda _: 144) == 1.0
+    monkeypatch.setattr(fonts, "_SYSTEM", "windows")
+
+    def fail(_):
+        raise OSError("no DPI")
+
+    assert fonts.dpi_scale_factor(object(), dpi_loader=fail) == 1.0
+    assert fonts.dpi_scale_factor(object(), dpi_loader=lambda _: 99999) == 1.0
+
+
+def test_scaled_pixels_rounds_and_clamps():
+    assert fonts.scaled_pixels(72, 1.0) == 72
+    assert fonts.scaled_pixels(72, 1.5) == 108
+    assert fonts.scaled_pixels(2, 1.5) == 3
+    assert fonts.scaled_pixels(72, 10.0) == 216, "the factor itself is clamped to 3x"
+    assert fonts.scaled_pixels(1, 0.5) == 1, "a scaled length is never zero"

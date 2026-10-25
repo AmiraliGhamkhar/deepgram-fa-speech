@@ -76,10 +76,15 @@ _ZWNJ_BOTH_SIDES_SPACED_RE = re.compile(r"[ \t]+" + ZWNJ + r"[ \t]+")
 _ZWNJ_DUPLICATED_RE = re.compile(ZWNJ + "{2,}")
 
 # Persian/Arabic punctuation that should have no space before it and one
-# space after it, mirroring standard typographic conventions. We deliberately
-# exclude '/', '.', ':', '-' from this table because those are load-bearing
-# in numeric expressions (e.g. "120/80", "7.2", "10:00", ranges) and must be
-# left completely alone here; numeric protection happens in numbers.py.
+# space after it, mirroring standard typographic conventions. '/', '.' and
+# '-' are excluded from BOTH directions because they are load-bearing inside
+# numeric expressions ("120/80", "7.2", ranges). ':' is the exception that
+# proves the rule: it IS in the no-space-before set (prose writes
+# "نکته: مهم", not "نکته : مهم") but NOT in the space-after set, and both
+# uses are suppressed by the numeric-context guard in
+# `_fix_punctuation_spacing`, so a dictated time ("14:30", even spaced out
+# as "14 : 30") is never touched. Numeric protection proper happens in
+# numbers.py.
 _PUNCT_NO_SPACE_BEFORE = "،؛؟!,;:"
 _PUNCT_SPACE_AFTER = "،؛؟!,;"
 
