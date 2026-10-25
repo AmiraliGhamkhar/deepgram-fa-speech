@@ -10,6 +10,7 @@ import logging
 import threading
 import time
 
+import pytest
 
 from medical_stt.processing.negation import census_fully_negated_sources
 from medical_stt.stt.base import ErrorCategory, ProviderError, STTProvider, TranscriptEvent
@@ -107,3 +108,136 @@ def test_negation_census_warns_about_sources_that_can_never_fire(caplog):
         assert census_fully_negated_sources(["بیوپسی", "ندارد", "کاتتر"]) == 1
     assert "negation" in caplog.text
     assert census_fully_negated_sources(["بیوپسی"]) == 0
+
+
+# -- D2: DPAPI empty input + library caching -----------------------------------
+
+
+def test_dpapi_empty_payload_is_a_dpapi_error():
+    from medical_stt.security import dpapi
+
+    with pytest.raises(dpapi.DPAPIError, match="empty payload"):
+        dpapi.protect(b"")
+    with pytest.raises(dpapi.DPAPIError, match="empty payload"):
+        dpapi.unprotect(b"")
+    with pytest.raises(dpapi.DPAPIError, match="empty payload"):
+        dpapi._make_blob(b"")
+
+
+def test_dpapi_libraries_are_loaded_once(monkeypatch):
+    import ctypes
+    from types import SimpleNamespace
+
+    from medical_stt.security import dpapi
+
+    class _FakeFunc:
+        pass
+
+    def fake_lib():
+        return SimpleNamespace(
+            CryptProtectData=_FakeFunc(),
+            CryptUnprotectData=_FakeFunc(),
+            LocalFree=_FakeFunc(),
+        )
+
+    loads: list[str] = []
+    monkeypatch.setattr(
+        ctypes, "WinDLL", lambda name, **kw: loads.append(name) or fake_lib(), raising=False
+    )
+    monkeypatch.setattr(dpapi, "_LIBRARY_CACHE", None)
+    first = dpapi._libraries()
+    second = dpapi._libraries()
+    assert first is second or first == second
+    assert first[0] is second[0], "prototype setup must run once per process"
+    assert loads == ["crypt32", "kernel32"]
+
+
+# -- D3: single-instance fail-open scope ----------------------------------------
+
+
+def test_squatted_mutex_name_refuses_to_start(monkeypatch):
+    import ctypes
+
+    from medical_stt import app_instance
+
+    class _FakeKernel32:
+        def __init__(self):
+            # Plain function objects: the production code assigns
+            # `.argtypes`/`.restype` to them, which a bound method refuses.
+            self.CreateMutexW = lambda *_args: 0  # noqa: N802 - Win32 name
+            self.CloseHandle = lambda *_args: True  # noqa: N802 - Win32 name
+
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *a, **k: _FakeKernel32(), raising=False)
+    monkeypatch.setattr(app_instance, "_last_error", lambda: 5)  # ERROR_ACCESS_DENIED
+    instance = app_instance.SingleInstance()
+    assert instance._acquire_windows() is False
+    assert instance.acquired is False
+
+
+def test_unwritable_file_lock_dir_degrades_instead_of_crashing(tmp_path):
+    from medical_stt import app_instance
+
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory", encoding="utf-8")
+    instance = app_instance.SingleInstance(lock_path=blocker / "run.lock")
+    assert instance._acquire_file() is True
+    assert instance.acquired is True
+    instance.release()
+
+
+# -- D1: data-dir + env-secret hardening ------------------------------------------
+
+
+def test_data_dir_override_inside_install_dir_is_refused(monkeypatch):
+    from pathlib import Path
+
+    from medical_stt import paths
+
+    inside = Path(paths.__file__).resolve().parent / "sneaky-data"
+    monkeypatch.setenv(paths.APP_DATA_DIR_ENV, str(inside))
+    with pytest.raises(ValueError, match="install"):
+        paths.app_data_dir()
+
+
+def test_data_dir_override_in_windows_temp_is_refused(monkeypatch):
+    import tempfile
+    from pathlib import Path
+
+    from medical_stt import paths
+
+    monkeypatch.setattr(paths, "_IS_WINDOWS", True)
+    monkeypatch.setenv(paths.APP_DATA_DIR_ENV, str(Path(tempfile.gettempdir()) / "medicalstt-x"))
+    with pytest.raises(ValueError, match="temp"):
+        paths.app_data_dir()
+
+
+def test_data_dir_override_is_resolved_absolute(monkeypatch, tmp_path):
+    from medical_stt import paths
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv(paths.APP_DATA_DIR_ENV, "relative-data")
+    resolved = paths.app_data_dir()
+    assert resolved.is_absolute()
+    assert resolved == (tmp_path / "relative-data")
+
+
+def test_data_dir_is_logged_once_when_ensured(monkeypatch, tmp_path, caplog):
+    from medical_stt import paths
+
+    monkeypatch.setenv(paths.APP_DATA_DIR_ENV, str(tmp_path / "data"))
+    monkeypatch.setattr(paths, "_DATA_DIR_LOGGED", False, raising=False)
+    with caplog.at_level(logging.INFO, logger="medical_stt.paths"):
+        paths.ensure_app_data_dir()
+        paths.ensure_app_data_dir()
+    mentions = [r for r in caplog.records if str(tmp_path / "data") in r.getMessage()]
+    assert len(mentions) == 1
+
+
+def test_env_host_secret_shorter_than_24_chars_is_refused(monkeypatch):
+    from medical_stt import config
+
+    monkeypatch.setenv("MEDICALSTT_HOST_SECRET", "short")
+    with pytest.raises(config.ConfigError, match="24"):
+        config.load_host_secret()
+    monkeypatch.setenv("MEDICALSTT_HOST_SECRET", "x" * 24)
+    assert config.load_host_secret() == "x" * 24

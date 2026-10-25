@@ -500,10 +500,19 @@ def load_host_secret() -> str:
 
     `MEDICALSTT_HOST_SECRET` overrides it. That override exists purely for
     development/CI on platforms without DPAPI; it is never written to
-    disk and never logged.
+    disk and never logged. Because it can also arrive via a `.env` file a
+    launch directory dropped in our lap, a placeholder-grade value (under
+    24 characters, the host's own minimum) is refused outright instead of
+    being tried against the host as if it were a real credential.
     """
     override = os.getenv("MEDICALSTT_HOST_SECRET")
     if override:
+        if len(override) < 24:
+            raise ConfigError(
+                "MEDICALSTT_HOST_SECRET must be at least 24 characters "
+                "(the host refuses shorter shared secrets); refusing the "
+                "value from the environment/.env"
+            )
         return override
     try:
         secret = SecretStore(paths.secret_path()).load()
