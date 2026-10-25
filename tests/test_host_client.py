@@ -83,6 +83,14 @@ def test_network_failure_maps_to_network():
     assert excinfo.value.category is ErrorCategory.NETWORK
 
 
+def test_http_408_maps_to_timeout():
+    """B13: a host-side 408 fell into UNKNOWN, losing the diagnosis."""
+    with pytest.raises(ProviderError) as excinfo:
+        _client(lambda _r, _t: (_ for _ in ()).throw(_http_error(408))).fetch_session()
+    assert excinfo.value.category is ErrorCategory.TIMEOUT
+    assert excinfo.value.category.is_retryable is True
+
+
 def test_timeout_maps_to_timeout():
     def handler(request, timeout):
         raise TimeoutError("too slow")
