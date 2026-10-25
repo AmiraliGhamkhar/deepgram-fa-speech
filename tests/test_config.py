@@ -51,6 +51,23 @@ def test_low_host_timeout_warns_but_stays_valid(caplog):
     assert not caplog.records
 
 
+def test_first_run_template_write_is_atomic(monkeypatch, tmp_path):
+    """B17: the template was written with a bare write_text, so a crash
+    mid-write left a partial settings file for the next start."""
+    from medical_stt import config
+
+    monkeypatch.setenv("MEDICALSTT_APP_DATA_DIR", str(tmp_path))
+
+    def fail_replace(*_args):
+        raise OSError("simulated crash during the write")
+
+    monkeypatch.setattr(config.os, "replace", fail_replace)
+    with pytest.raises(OSError):
+        config.initialize_user_config()
+    assert not config.user_settings_path().exists(), "no partial file may be left behind"
+    assert not list(tmp_path.glob(".settings-*.tmp")), "the temp file must be cleaned up"
+
+
 def test_dpapi_failure_during_save_is_a_config_error(monkeypatch, tmp_path):
     """B16: save_host_credentials caught only OSError, so a DPAPI failure
     (SecretStoreError, a RuntimeError) escaped raw instead of surfacing

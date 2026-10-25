@@ -450,7 +450,19 @@ def initialize_user_config() -> Path:
             "specialty: general\n"
             "host_url: https://stt.example.com\n"
         )
-    target.write_text(header + body, encoding="utf-8")
+    # Atomic, like every other settings write in this module: a crash
+    # mid-write must not leave a truncated user settings file behind for
+    # the next start to choke on.
+    handle, temporary = tempfile.mkstemp(dir=target.parent, prefix=".settings-", suffix=".tmp")
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            stream.write(header + body)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, target)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
     log.info("created user settings template at %s", target)
     return target
 
