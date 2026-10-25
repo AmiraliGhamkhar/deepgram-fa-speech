@@ -36,6 +36,21 @@ def _valid_settings(**overrides) -> Settings:
     return Settings(**base)
 
 
+def test_low_host_timeout_warns_but_stays_valid(caplog):
+    """B14: a host_timeout under ~8s starves the readiness budget (host
+    grant ~7s worst case + the SDK's unconfigurable ~10s handshake, over
+    a fixed margin in app.py). Legal, but worth one loud log line."""
+    with caplog.at_level("WARNING", logger="medical_stt.config"):
+        errors = validate_settings(_valid_settings(host_timeout_seconds=5.0))
+    assert errors == []
+    assert any("host_timeout_seconds" in record.getMessage() for record in caplog.records)
+
+    caplog.clear()
+    with caplog.at_level("WARNING", logger="medical_stt.config"):
+        assert validate_settings(_valid_settings(host_timeout_seconds=10.0)) == []
+    assert not caplog.records
+
+
 def test_valid_settings_pass_validation():
     assert validate_settings(_valid_settings()) == []
 

@@ -633,7 +633,11 @@ class LiveMedicalSTT:
 
         sender: Optional[threading.Thread] = None
         try:
-            deadline = time.monotonic() + s.host_timeout_seconds + 12.0
+            # Margin over the host round trip: worst case is the host's own
+            # grant budget (~7s) plus the SDK's handshake timeout (~10s and
+            # not configurable from here), so 12s could undershoot a slow
+            # but healthy start and report a phantom timeout.
+            deadline = time.monotonic() + s.host_timeout_seconds + 15.0
             while not self._stop.is_set() and not self._shutdown.is_set():
                 if provider.wait_ready(0.05):
                     break

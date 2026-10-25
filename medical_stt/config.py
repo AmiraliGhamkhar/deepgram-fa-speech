@@ -614,6 +614,19 @@ def validate_settings(settings: Settings) -> List[str]:
         )
     if not (1.0 <= settings.host_timeout_seconds <= 60.0):
         errors.append("host_timeout_seconds must be between 1 and 60")
+    elif settings.host_timeout_seconds < 8.0:
+        # Legal, but tight: session readiness allows this plus a fixed
+        # margin (app.py) against the host's worst-case grant budget
+        # (~7s: 2s body + grant deadline) and the SDK's own ~10s
+        # handshake timeout, which is not configurable from here. Small
+        # values make Start flake on slow networks with a phantom
+        # "readiness timed out".
+        log.warning(
+            "host_timeout_seconds=%.1fs leaves little room over the host's "
+            "grant budget plus the Deepgram handshake; values of 8s or more "
+            "are recommended (the default is 10s)",
+            settings.host_timeout_seconds,
+        )
     if not (5 <= settings.session_ttl_seconds <= _MAX_SESSION_TTL_SECONDS):
         errors.append(
             f"session_ttl_seconds must be between 5 and {_MAX_SESSION_TTL_SECONDS} "
