@@ -127,6 +127,15 @@ def test_healthz_returns_ok(host):
     assert response.status_code == 200 and response.json() == {"status": "ok"}
 
 
+def test_openapi_schema_is_not_exposed(host):
+    """B1: docs/redoc were disabled but /openapi.json still enumerated the
+    whole API on a credentialed service."""
+    client = TestClient(host, base_url="https://stt.example.com")
+    assert client.get("/openapi.json").status_code == 404
+    assert client.get("/docs").status_code == 404
+    assert client.get("/redoc").status_code == 404
+
+
 def test_wrong_secret_is_rejected(host):
     client = TestClient(host, base_url="https://stt.example.com")
     response = client.post("/v1/session", headers={"Authorization": "Bearer nope"}, json={})

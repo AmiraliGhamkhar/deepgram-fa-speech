@@ -220,6 +220,9 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
         version="2.0.0",
         docs_url=None,   # no interactive docs on a credentialed service
         redoc_url=None,
+        # Without this, /openapi.json stays public and enumerates the whole
+        # API surface even though both doc UIs are disabled.
+        openapi_url=None,
         lifespan=lifespan,
     )
     # Built here rather than in `lifespan` so the app is usable even when a
