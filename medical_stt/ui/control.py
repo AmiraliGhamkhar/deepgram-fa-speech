@@ -530,7 +530,13 @@ class ControlWindow:
                 else:
                     if self._secret_var is not None:
                         self._secret_var.set("")
-                    self._set_status("● تنظیمات ذخیره شد", _OK)
+                    # An empty secret field means save_host_credentials kept
+                    # the stored secret; claiming a plain "saved" would
+                    # overstate what happened (A3.5).
+                    self._set_status(
+                        "● تنظیمات ذخیره شد" if secret else "● تنظیمات ذخیره شد (کلید قبلی حفظ شد)",
+                        _OK,
+                    )
             self._ui(finish, key="save-complete")
         threading.Thread(target=save, daemon=True, name="settings-save").start()
 

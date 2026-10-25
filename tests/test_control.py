@@ -575,6 +575,31 @@ def test_connection_test_guards_post_a_hint():
     assert "ذخیره" in statuses[-1][0]
 
 
+# -- A3.5: an empty secret field keeps the old secret -- say so ---------------
+
+
+def _save_and_final_status(window):
+    window._on_save_settings()
+    deadline = time.monotonic() + 1.0
+    while time.monotonic() < deadline:
+        if not window._saving and "ذخیره شد" in window._status.kwargs.get("text", ""):
+            return window._status.kwargs["text"]
+        time.sleep(0.005)
+    raise AssertionError("save never completed")
+
+
+def test_empty_secret_save_reports_that_the_old_secret_was_kept(monkeypatch):
+    window = _built_window(monkeypatch)
+    monkeypatch.setattr(control, "initialize_user_config", lambda: None)
+    monkeypatch.setattr(control, "save_host_credentials", lambda *_a: None)
+
+    window._secret_var.set("")
+    assert _save_and_final_status(window) == "● تنظیمات ذخیره شد (کلید قبلی حفظ شد)"
+
+    window._secret_var.set("a-new-secret")
+    assert _save_and_final_status(window) == "● تنظیمات ذخیره شد"
+
+
 def test_recovery_popup_is_themed_modal_and_confirms_copy(monkeypatch):
     from medical_stt.ui import colors
 
