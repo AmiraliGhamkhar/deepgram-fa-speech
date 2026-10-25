@@ -47,14 +47,36 @@ def _strong_direction(ch: str) -> Optional[str]:
 
 
 def base_direction(text: str) -> str:
-    """Return 'rtl' or 'ltr' using the first-strong-character rule (the
-    same heuristic browsers/UBA "auto" mode use), defaulting to 'ltr' for
-    text with no strong characters (pure numbers/punctuation)."""
+    """Return the paragraph direction from the majority of strong characters.
+
+    Persian dictation often starts with a Latin drug name or abbreviation
+    ("MI در ECG مشاهده شد"), but the paragraph is overwhelmingly RTL. Using
+    the first strong character alone gave that sentence an LRM and let an EMR
+    field with auto-direction flip the whole note to LTR, moving neutral
+    trailing punctuation to the wrong side. Counting strong characters fixes
+    that while preserving first-strong as the tie-breaker; pure-neutral text
+    (numbers/punctuation) keeps the established LTR default.
+    """
+    rtl_count = 0
+    ltr_count = 0
+    first_strong: Optional[str] = None
     for ch in text:
         direction = _strong_direction(ch)
-        if direction:
-            return direction
-    return "ltr"
+        if direction == "rtl":
+            rtl_count += 1
+        elif direction == "ltr":
+            ltr_count += 1
+        else:
+            continue
+        if first_strong is None:
+            first_strong = direction
+    if not rtl_count and not ltr_count:
+        return "ltr"
+    if rtl_count > ltr_count:
+        return "rtl"
+    if ltr_count > rtl_count:
+        return "ltr"
+    return first_strong or "ltr"
 
 
 def has_rtl_content(text: str) -> bool:
@@ -100,7 +122,9 @@ def to_injected(text: str) -> str:
     browsers, EMR web forms) already apply UBA to pasted text, so adding a
     directional *mark* only resolves the paragraph's base direction for
     otherwise-neutral leading punctuation, while leaving the mixed content
-    itself for the target application to reorder correctly.
+    itself for the target application to reorder correctly. The mark follows
+    `base_direction`'s majority-strong heuristic, so a Persian-dominant note
+    that starts with a Latin abbreviation still gets an RLM.
     """
     if not text:
         return text

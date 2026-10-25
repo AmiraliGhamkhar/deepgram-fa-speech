@@ -150,7 +150,7 @@ def test_multiple_consecutive_lines_keep_their_boundaries():
     source_lines = [f"line {index}" for index in range(5)]
     lines = _paste("\n".join(source_lines)).split("\n")
     # Only the very first line carries the directional mark (LRM here,
-    # because the first strong character is Latin).
+    # because every strong character in this sample is Latin).
     assert lines[0][0] in ("\u200e", "\u200f")
     assert lines[0][1:] == source_lines[0]
     assert lines[1:] == source_lines[1:]

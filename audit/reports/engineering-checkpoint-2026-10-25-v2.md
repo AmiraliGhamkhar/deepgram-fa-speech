@@ -23,7 +23,8 @@ production code. Failures below were observed, not inferred.
 | Item | Commit | Before (targeted regression) | After (targeted regression) |
 |---|---|---|---|
 | P0-7 letter-glued numeric spans + Persian units | `783e7f7` | `17 failed, 50 passed` in `tests/test_numbers.py tests/test_terminology.py` | `67 passed` in the same targeted suite; census: `835 rules, 9 digit-bearing sources, 9 numeric-span sources, loader: OK, rejected: 0` |
-| P0-8 normalized terminology rule storage | (this commit) | `5 failed, 132 passed` in `tests/test_terminology.py tests/test_config.py tests/test_data_safety.py` | `137 passed` in the same targeted suite; census: `835 raw rules, 1 raw non-normalized side, 0 parsed non-normalized sides, Arabic-yeh source fires: True` |
+| P0-8 normalized terminology rule storage | `13c8f25` | `5 failed, 132 passed` in `tests/test_terminology.py tests/test_config.py tests/test_data_safety.py` | `137 passed` in the same targeted suite; census: `835 raw rules, 1 raw non-normalized side, 0 parsed non-normalized sides, Arabic-yeh source fires: True` |
+| P0-9 majority-strong BiDi direction | (this commit) | `10 failed, 69 passed` in `tests/test_bidi.py tests/test_formatting_ownership.py tests/test_injection.py` | `79 passed` in the same targeted suite |
 
 ### P0-7 details
 
@@ -85,7 +86,7 @@ Full-suite validation after P0-7: `1071 passed, 4 skipped, 1 warning`;
 ## Remaining acceptance limitations
 
 - This checkpoint is appended incrementally; the latest per-fix section is the
-  authoritative progress marker. P0-9 through P0-14, all P1/P2 items and all
+  authoritative progress marker. P0-10 through P0-14, all P1/P2 items and all
   GUI changes remain outstanding at this revision.
 - The accepted Starlette test-client warning is preserved; no warning filters
   or lockfile edits were added.
@@ -140,3 +141,35 @@ Full-suite validation after P0-8: `1076 passed, 4 skipped, 1 warning`;
 `ruff check .`, `mypy medical_stt host benchmarks` and secret scan clean.
 No existing test pin was changed for P0-8; five new regression tests were
 added.
+
+### P0-9 details
+
+- `base_direction` now counts RTL/LTR strong characters, chooses the
+  majority, falls back to first-strong only on a tie, and keeps the LTR
+  default for pure-neutral text. `to_injected` still prefixes at most one
+  LRM/RLM, never RLE/PDF, and remains idempotent on already-marked text.
+- New medical examples cover Latin-leading Persian-dominant utterances,
+  Persian-leading Latin-dominant utterances, pure Persian/English, pure
+  numbers (`120/80`, `98%`), punctuation-only text and strong-count ties.
+- The comments in `to_injected` and the multiline injection test were updated
+  so the documented policy matches the implementation.
+
+Before (excerpt from `/tmp/p0_9_before.txt`):
+
+```text
+FAILED tests/test_bidi.py::test_base_direction_uses_persian_majority_when_latin_leads
+FAILED tests/test_bidi.py::test_base_direction_counts_strong_characters[MI در ECG مشاهده شد-rtl]
+FAILED tests/test_bidi.py::test_base_direction_counts_strong_characters[بیمار CT scan normal-ltr]
+FAILED tests/test_bidi.py::test_injected_mark_follows_majority_without_embeddings[MI در ECG مشاهده شد-\u200f]
+FAILED tests/test_bidi.py::test_injected_mark_follows_majority_without_embeddings[بیمار CT scan normal-\u200e]
+10 failed, 69 passed in 0.41s
+```
+
+After: targeted suite `79 passed`; full suite `1096 passed, 4 skipped,
+1 warning`; ruff, mypy and secret scan clean.
+
+Deliberately updated pin: `test_base_direction_ltr_when_latin_leads` →
+`test_base_direction_uses_persian_majority_when_latin_leads`, now asserting
+`rtl` for `"MI در ECG مشاهده شد"`. No other existing pin was weakened; the
+single-leading-mark and idempotence pins are re-asserted with the new
+majority-heuristic examples.
