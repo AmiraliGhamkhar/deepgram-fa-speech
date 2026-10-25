@@ -482,6 +482,57 @@ def test_build_survives_a_config_error(monkeypatch):
     assert window._client_id_var.get() == ""
 
 
+# -- A3.4: a running connection test must not block saving --------------------
+
+
+def test_connection_test_uses_its_own_flag_and_does_not_block_saving(monkeypatch):
+    import medical_stt.config as config_module
+    import medical_stt.host_client as host_client_module
+
+    window = _built_window(monkeypatch)
+    monkeypatch.setattr(
+        control, "get_settings",
+        lambda: SimpleNamespace(
+            host_url="https://stt.example.com", host_secret="test-secret",
+            host_timeout_seconds=1.0, host_client_id="doctor-01",
+        ),
+    )
+    monkeypatch.setattr(config_module, "validate_settings", lambda _s: [])
+
+    release_fetch = threading.Event()
+    fetch_entered = threading.Event()
+
+    class _BlockingClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def fetch_session(self):
+            fetch_entered.set()
+            release_fetch.wait(timeout=2.0)
+
+    monkeypatch.setattr(host_client_module, "HostSessionClient", _BlockingClient)
+
+    saved = threading.Event()
+    monkeypatch.setattr(control, "initialize_user_config", lambda: None)
+    monkeypatch.setattr(control, "save_host_credentials", lambda *_a: saved.set())
+
+    window._test_connection()
+    try:
+        assert fetch_entered.wait(timeout=1.0)
+        assert window._testing is True
+        assert window._saving is False, "the test must not borrow the saving flag"
+
+        window._on_save_settings()
+        assert saved.wait(timeout=1.0), "saving must proceed while a test is running"
+    finally:
+        release_fetch.set()
+
+    deadline = time.monotonic() + 1.0
+    while window._testing and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert window._testing is False
+
+
 def test_recovery_popup_is_themed_modal_and_confirms_copy(monkeypatch):
     from medical_stt.ui import colors
 

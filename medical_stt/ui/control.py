@@ -101,6 +101,9 @@ class ControlWindow:
         self._mailbox = dispatch.Mailbox()
         self._starting = False
         self._saving = False
+        #: Connection test in flight. Its OWN flag: it used to borrow
+        #: `_saving`, so a running test silently blocked saving (A3.4).
+        self._testing = False
         #: Set when the window had to render without usable settings (A3.1).
         self._config_error = ""
         self._start_done = threading.Event()
@@ -526,9 +529,9 @@ class ControlWindow:
         threading.Thread(target=save, daemon=True, name="settings-save").start()
 
     def _test_connection(self) -> None:
-        if self._saving or self._starting or self._running:
+        if self._testing or self._saving or self._starting or self._running:
             return
-        self._saving = True
+        self._testing = True
         self._set_status("● بررسی تنظیمات ذخیره‌شده...", _MUTED)
         def check() -> None:
             error = ""
@@ -545,7 +548,7 @@ class ControlWindow:
             except Exception as exc:
                 error = str(exc)
             def finish() -> None:
-                self._saving = False
+                self._testing = False
                 self._set_status("● اتصال ناموفق" if error else "● دریافت مجوز موفق", _REC if error else _OK, error)
             self._ui(finish, key="connection-test")
         threading.Thread(target=check, daemon=True, name="connection-test").start()
