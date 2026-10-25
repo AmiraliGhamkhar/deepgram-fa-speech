@@ -627,3 +627,34 @@ def test_registry_append_preserves_existing_entries_without_temp_files(tmp_path)
     assert text.startswith(first)
     assert "doctor-02:" in text
     assert not list(tmp_path.glob(".clients-*.tmp"))
+
+
+@pytest.mark.parametrize('count', ['0', '-1'])
+def test_provision_rejects_nonpositive_count(tmp_path, count):
+    assert provision.main(['--count', count, '--out', str(tmp_path / 'clients')]) == 2
+    assert not (tmp_path / 'clients').exists()
+
+
+def test_provision_warns_if_explicit_id_ignores_count(tmp_path, capsys):
+    assert provision.main(['--client-id', 'doctor-01', '--count', '2', '--out', str(tmp_path / 'clients')]) == 0
+    assert '--count' in capsys.readouterr().err
+
+
+def test_secret_files_are_exclusive_and_directory_private(tmp_path):
+    import stat
+    directory = tmp_path / 'secrets'
+    path = provision._write_secret_file(directory, 'doctor-01', 'not-a-real-secret')
+    assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    with pytest.raises(FileExistsError):
+        provision._write_secret_file(directory, 'doctor-01', 'replacement')
+    assert path.read_text() == 'not-a-real-secret\n'
+
+
+def test_secret_file_does_not_follow_symlink(tmp_path):
+    destination = tmp_path / 'original'
+    destination.write_text('keep')
+    (tmp_path / 'doctor-01.secret').symlink_to(destination)
+    with pytest.raises(OSError):
+        provision._write_secret_file(tmp_path, 'doctor-01', 'replacement')
+    assert destination.read_text() == 'keep'

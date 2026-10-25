@@ -259,7 +259,7 @@ set -a; . host/.env; set +a
 | `HOST_METRICS_ADMIN_TOKEN` | no | — | If set, `/metrics` requires it. |
 | `HOST_TLS_CERTFILE` / `HOST_TLS_KEYFILE` | no* | — | PEM certificate and key. |
 | `HOST_BIND` / `HOST_PORT` | no | `0.0.0.0` / `8443` | Listen address. Read only by `python -m host.app`; a WSGI host (cPanel/Passenger) owns its own listener and ignores both. |
-| `HOST_FORWARDED_ALLOW_IPS` | no | `127.0.0.1` | Which peers may set `X-Forwarded-Proto`. |
+| `HOST_FORWARDED_ALLOW_IPS` | no | `127.0.0.1,::1` | Which peers may set `X-Forwarded-Proto`. |
 | `HOST_ALLOW_HTTP` | no | `0` | `1` serves plaintext. **Development only.** |
 
 The service **refuses to start** if `DEEPGRAM_API_KEY` is missing or is not a
@@ -365,7 +365,7 @@ location / {
     proxy_set_header Host              $host;
     proxy_set_header X-Forwarded-Proto $scheme;
     proxy_set_header X-Real-IP         $remote_addr;
-    client_max_body_size 8k;   # matches HOST_MAX_REQUEST_BODY_BYTES
+    client_max_body_size 4k;   # matches HOST_MAX_REQUEST_BODY_BYTES
 }
 ```
 
@@ -374,7 +374,7 @@ Run the service as a dedicated, unprivileged user.
 ### Option C — Docker
 
 ```bash
-docker build -t medical-stt-host .
+docker build -f host/Dockerfile -t medical-stt-host .
 docker run -d --name medical-stt-host \
   -p 8443:8443 \
   --env-file /secure/path/host.env \
@@ -435,24 +435,12 @@ updates:
 | Metric | Type | Meaning |
 |---|---|---|
 | `inflight_grants` | gauge | Deepgram grant requests in flight right now |
-| `inflight_grants_capacity` | gauge | `HOST_MAX_INFLIGHT_GRANTS`; past it, 503 |
+| `inflight_grants_capacity` | gauge | effective `min(HOST_MAX_INFLIGHT_GRANTS, HOST_GRANT_MAX_CONNECTIONS)`; past it, 503 |
 | `registry_clients` | gauge | client identities the host can authenticate |
 | `session_starts_total` | counter | authenticated session requests received |
 | `session_success_total` | counter | tokens issued |
 | `session_failures_total` | counter | authenticated requests that produced no token: rate-limited, malformed body, refused at capacity, or failed upstream |
 | `session_requests_by_client_total` | counter | the same outcomes per device: `{client_id, outcome}` with `outcome` in `ok`, `rate_limited`, `body_too_large`, `body_timeout`, `incomplete_body`, `invalid_request`, `upstream_saturated`, `upstream_error`, `internal_error`, `cancelled` (the client disconnected before a token was minted) |
-
-`session_success_total + session_failures_total == session_starts_total` is the
-invariant every terminal outcome in the route must preserve — a request that
-produced no token is a failure, including the ones the host refuses itself.
-Without it, "nobody is calling" and "everything is failing" render
-identically, which is the one distinction a scrape of this service exists to
-make. It is asserted in
-`tests/test_backend_fixes.py::test_every_authenticated_request_is_counted_as_success_or_failure`.
-
-`session_requests_by_client_total` is the only labelled series, and it is
-labelled with the **authenticated** id, never a presented one: fabricated ids
-cannot inflate the cardinality bound or attribute someone else's traffic.
 | `token_requests_total`, `token_request_failures_total` | counter | upstream grant attempts / failures |
 | `deepgram_connection_failures_total` | counter | grant failed because Deepgram was unreachable or too slow (503/504) |
 | `auth_failures_total` | counter | rejected `POST /v1/session` credentials |
@@ -466,6 +454,18 @@ cannot inflate the cardinality bound or attribute someone else's traffic.
 | `host_uptime_seconds` | gauge | seconds since this metrics registry was created |
 | `token_request_latency` | histogram | seconds per upstream grant, cumulative buckets |
 | `session_http_latency` | histogram | seconds for the whole session route, cumulative buckets |
+
+`session_success_total + session_failures_total == session_starts_total` is the
+invariant every terminal outcome in the route must preserve — a request that
+produced no token is a failure, including the ones the host refuses itself.
+Without it, "nobody is calling" and "everything is failing" render
+identically, which is the one distinction a scrape of this service exists to
+make. It is asserted in
+`tests/test_backend_fixes.py::test_every_authenticated_request_is_counted_as_success_or_failure`.
+
+`session_requests_by_client_total` is the per-client series, and it is
+labelled with the **authenticated** id, never a presented one: fabricated ids
+cannot inflate the cardinality bound or attribute someone else's traffic.
 
 Per-session audio and transcript timings are **not** published here, by
 design: the host mints a token and never sees the stream, so `active_sessions`,

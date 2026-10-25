@@ -576,7 +576,8 @@ def test_main_warns_when_plaintext_serving_will_reject_every_request(
 
 def test_main_says_so_when_plaintext_is_deliberate(stubbed_uvicorn, monkeypatch, caplog):
     app_module, _ = stubbed_uvicorn
-    monkeypatch.setenv("HOST_ALLOW_HTTP", "1")
+    from dataclasses import replace
+    monkeypatch.setattr(app_module.app.state, "settings", replace(app_module.app.state.settings, allow_http=True))
     with caplog.at_level(logging.WARNING, logger="medical_stt.host"):
         assert app_module.main() == 0
     message = " ".join(record.getMessage() for record in caplog.records)
@@ -595,3 +596,32 @@ def test_main_is_quiet_about_tls_when_a_certificate_is_configured(
     assert calls[0]["ssl_certfile"] == "/etc/ssl/host.crt"
     assert calls[0]["ssl_keyfile"] == "/etc/ssl/host.key"
     assert not [r for r in caplog.records if "HOST_TLS_CERTFILE" in r.getMessage()]
+
+
+@pytest.mark.parametrize('bind', ['', '   ', 'bad host', 'https://example.com'])
+def test_main_refuses_invalid_bind(stubbed_uvicorn, monkeypatch, bind):
+    module, calls = stubbed_uvicorn
+    monkeypatch.setenv('HOST_BIND', bind)
+    assert module.main() == 2
+    assert not calls
+
+
+def test_main_reuses_already_parsed_settings(stubbed_uvicorn, monkeypatch):
+    module, calls = stubbed_uvicorn
+    def fail():
+        raise AssertionError('settings parsed twice')
+    monkeypatch.setattr(module.HostSettings, 'from_env', fail)
+    assert module.main() == 0
+    assert len(calls) == 1
+
+
+def test_invalid_ttl_has_terminal_session_log(host, caplog):
+    with TestClient(host, base_url='https://stt.example.com') as client:
+        with caplog.at_level(logging.INFO, logger='medical_stt.host'):
+            response = client.post('/v1/session', headers={'Authorization': f'Bearer {SECRET}'},
+                                   json={'ttl_seconds': 'invalid'})
+    assert response.status_code == 422
+    started = next(r.getMessage() for r in caplog.records if 'session_started' in r.getMessage())
+    session_id = started.split('session_id=')[1].split()[0]
+    assert any('session_error' in r.getMessage() and f'session_id={session_id}' in r.getMessage()
+               for r in caplog.records)

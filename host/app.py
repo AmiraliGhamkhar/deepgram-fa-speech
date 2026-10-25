@@ -40,6 +40,8 @@ import logging
 import asyncio
 import json
 import os
+import re
+import ipaddress
 import time
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Optional
@@ -442,10 +444,14 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
                 "session_requests_by_client_total", client_id=identity.client_id, outcome=outcome
             )
 
+        session_id: Optional[str] = None
+
         def refuse(status_code: int, detail: str, outcome: str,
                    headers: Optional[dict] = None) -> JSONResponse:
             """`record_failure` plus the JSON error response for that outcome."""
             record_failure(outcome)
+            if session_id is not None:
+                log.error("session_error session_id=%s reason=%s status=%d", session_id, outcome, status_code)
             return JSONResponse({"detail": detail}, status_code=status_code, headers=headers)
 
         # -- layered rate limits, keyed on identity, not on the NAT IP ----
@@ -511,6 +517,7 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
             # Client disconnected mid-body: counted, then re-raised so the
             # cancellation still unwinds normally.
             record_failure("cancelled")
+            log.info("session_error session_id=%s reason=cancelled", session_id)
             raise
         except Exception:
             return refuse(400, "incomplete request body", "incomplete_body")
@@ -641,12 +648,20 @@ def main() -> int:  # pragma: no cover - operational entry point
     import uvicorn
 
     logging.basicConfig(level=logging.INFO)
+    # Import-time create_app already validated settings and emitted warnings.
+    settings = app.state.settings
+    host = os.getenv("HOST_BIND", "0.0.0.0").strip()
     try:
-        settings = HostSettings.from_env()
-    except ConfigurationError as exc:
-        log.error("host configuration error: %s", exc)
+        ipaddress.ip_address(host)
+        valid_bind = True
+    except ValueError:
+        valid_bind = bool(host) and len(host) <= 253 and all(
+            re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label)
+            for label in host.rstrip(".").split(".")
+        )
+    if not valid_bind:
+        log.error("HOST_BIND must be a non-empty IP address or hostname")
         return 2
-    host = os.getenv("HOST_BIND", "0.0.0.0")
     raw_port = os.getenv("HOST_PORT", "8443").strip()
     try:
         port = int(raw_port)
