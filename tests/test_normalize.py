@@ -132,3 +132,29 @@ def test_punctuation_tables_have_no_duplicate_entries():
 
     for table in (_PUNCT_NO_SPACE_BEFORE, _PUNCT_SPACE_AFTER):
         assert len(table) == len(set(table)), f"duplicated marks in {table!r}"
+
+
+def test_zwnj_cleanup_never_joins_separate_lines():
+    for text in ("خط اول\n\u200c\nخط دوم", "خط اول\n \u200c \nخط دوم", "خط اول\t\u200c\nخط دوم"):
+        assert normalize(text).count("\n") == text.count("\n")
+        assert normalize(text).splitlines()[0].startswith("خط اول")
+        assert normalize(text).splitlines()[-1] == "خط دوم"
+
+
+def test_normalization_is_idempotent_for_medical_corpus_and_zwnj_punctuation():
+    from pathlib import Path
+    import yaml
+
+    cases = yaml.safe_load((Path(__file__).parent / "fixtures" / "medical_regression_corpus.yaml").read_text(
+        encoding="utf-8"))["cases"]
+    samples = [case["input"] for case in cases]
+    samples.extend(
+        f"{left}{punct}{join}{right}"
+        for left in ("سلام", "بیمار", "ECG")
+        for punct in ("،", "؛", "؟", ",", ";", "!")
+        for join in ("\u200c", "\u200c\u200c", " \u200c ", "\n\u200c\n")
+        for right in ("دنیا", "پایدار", "MI")
+    )
+    for sample in samples:
+        once = normalize(sample)
+        assert normalize(once) == once, repr(sample)

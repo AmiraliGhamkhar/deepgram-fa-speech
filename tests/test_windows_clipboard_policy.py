@@ -149,47 +149,32 @@ def test_diagnostic_expected_target_cannot_be_replaced_by_another_app(win):
 # -- B19(c): modifier re-press must not leave a logical key stuck ------------
 
 
-def _drive_paste_keystroke(module, backend, user, shift_states):
-    """Run the REAL _send_paste_keystroke with recorded inputs.
-
-    `shift_states` is what GetAsyncKeyState(Shift) returns on successive
-    calls: the sweep first, the re-check second.
-    """
+@pytest.mark.parametrize("modifier", ["VK_SHIFT", "VK_MENU", "VK_LWIN", "VK_RWIN", "VK_CONTROL"])
+def test_snapshot_modifiers_are_restored_after_synthetic_keyup(win, modifier):
+    module, backend, user, _ = win
+    vk = getattr(module, modifier)
+    # Async state includes synthetic input: our keyup clears its high bit,
+    # even though the user has not physically released the key.
+    logical_down = {vk}
     sent = []
 
     def record(inputs):
-        sent.extend(inputs)
+        for inp in inputs:
+            key = inp.union.ki.wVk
+            sent.append((key, bool(inp.union.ki.dwFlags & module.KEYEVENTF_KEYUP)))
+            if inp.union.ki.dwFlags & module.KEYEVENTF_KEYUP:
+                logical_down.discard(key)
+            else:
+                logical_down.add(key)
         return True
 
     backend._send_inputs = record
-    remaining = list(shift_states)
-
-    def key_state(vk):
-        if vk == module.VK_SHIFT and remaining:
-            return remaining.pop(0)
-        return 0
-
-    user.GetAsyncKeyState.side_effect = key_state
+    user.GetAsyncKeyState.side_effect = lambda key: 0x8000 if key in logical_down else 0
     user.MapVirtualKeyW.return_value = 0
-    assert module.WindowsBackend._send_paste_keystroke(backend) is True
-    return [
-        i for i in sent
-        if i.union.ki.wVk == module.VK_SHIFT and not (i.union.ki.dwFlags & module.KEYEVENTF_KEYUP)
-    ]
-
-
-def test_a_modifier_released_during_paste_is_not_repressed(win):
-    module, backend, user, _ = win
-    # Down at the sweep (so it gets released for a clean Ctrl+V), up by the
-    # re-check: re-pressing it would stick a logical Shift with no key held.
-    re_presses = _drive_paste_keystroke(module, backend, user, [0x8000, 0])
-    assert re_presses == []
-
-
-def test_a_modifier_still_held_is_repressed(win):
-    module, backend, user, _ = win
-    re_presses = _drive_paste_keystroke(module, backend, user, [0x8000, 0x8000])
-    assert len(re_presses) == 1
+    assert module.WindowsBackend._send_paste_keystroke(backend)
+    assert vk in logical_down
+    assert sent[0] == (vk, True)
+    assert sent[-1] == (vk, False)
 
 
 def test_a_target_with_pid_zero_is_refused(win):
@@ -213,3 +198,58 @@ def test_last_written_sequence_is_initialized_before_any_paste(win):
     appear as a side effect of the first successful write."""
     _, backend, _, _ = win
     assert backend._last_written_sequence is None
+
+
+@pytest.mark.parametrize("failure", ["allocate", "lock", "set"])
+def test_failed_native_clipboard_write_preserves_original(win, failure):
+    module, backend, user, state = win
+    kernel = module.kernel32
+    buffer = ctypes.create_string_buffer(1024)
+    attempts = {"allocate": 0, "lock": 0, "set": 0}
+
+    def allocate(*args):
+        attempts["allocate"] += 1
+        return 0 if failure == "allocate" and attempts["allocate"] == 1 else 123
+
+    def lock(*args):
+        attempts["lock"] += 1
+        return 0 if failure == "lock" and attempts["lock"] == 1 else ctypes.addressof(buffer)
+
+    def empty():
+        state["text"] = ""
+        state["seq"] += 1
+        return True
+
+    def set_data(*args):
+        attempts["set"] += 1
+        if failure == "set" and attempts["set"] == 1:
+            return 0
+        state["text"] = buffer.raw.decode("utf-16-le").split("\0", 1)[0]
+        state["seq"] += 1
+        return 123
+
+    kernel.GlobalAlloc.side_effect = allocate
+    kernel.GlobalLock.side_effect = lock
+    user.EmptyClipboard.side_effect = empty
+    user.SetClipboardData.side_effect = set_data
+    backend._set_clipboard_text = module.WindowsBackend._set_clipboard_text.__get__(backend)
+    backend._last_written_sequence = 0  # stale prior ownership must not block recovery
+    assert not backend.paste_text("clinical text", True, 0)
+    assert state["text"] == "original"
+    assert not state["pastes"]
+    if failure in ("allocate", "lock"):
+        user.EmptyClipboard.assert_not_called()
+
+
+def test_clipboard_restore_failure_is_logged_without_content(win, caplog):
+    _, backend, _, _ = win
+    write = backend._set_clipboard_text
+    def fail_restore(text, expected_sequence=None):
+        if text == "original":
+            return False
+        return write(text, expected_sequence)
+    backend._set_clipboard_text = fail_restore
+    assert backend.paste_text("clinical text", True, 0)
+    assert "restore" in caplog.text
+    assert "clinical text" not in caplog.text
+    assert "original" not in caplog.text
