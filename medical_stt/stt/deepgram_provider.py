@@ -138,6 +138,23 @@ def classify_deepgram_exception(exc: BaseException) -> ErrorCategory:
     return ErrorCategory.UNKNOWN
 
 
+def connection_close_frame(connection: Any) -> tuple[Optional[int], str]:
+    """The close frame of a live SDK connection's websocket, if readable.
+
+    The SDK emits `EventType.CLOSE` with no payload, so when no ERROR
+    event preceded it (the listen loop simply ended), the close code has
+    to be read off the transport -- otherwise a `1008 DATA-*` close
+    arriving by that path would be misclassified as a retryable
+    disconnect and the reconnect loop would spin on undecodable audio.
+    """
+    transport = getattr(connection, "_websocket", None)
+    if transport is None:
+        return None, ""
+    code = getattr(transport, "close_code", None)
+    reason = str(getattr(transport, "close_reason", "") or "").strip()
+    return (code if isinstance(code, int) else None), reason
+
+
 def _optional_float(value: object) -> Optional[float]:
     try:
         parsed = float(value) if value is not None else None  # type: ignore[arg-type]
@@ -487,13 +504,37 @@ class DeepgramProvider(STTProvider):
                     else:
                         _emit_error(ProviderError(category, f"Deepgram error ({category.value})", cause=cause))
 
-                def _on_close(_: object) -> None:
-                    if not stop_event.is_set():
-                        _emit_error(
-                            ConnectionClosed(
-                                ErrorCategory.SERVER_DISCONNECT, "Deepgram connection closed"
-                            )
+                def _on_close(event: object) -> None:
+                    if stop_event.is_set():
+                        return
+                    # No ERROR preceded this CLOSE (or `_emit_error` would
+                    # swallow this anyway). Classify by the close frame
+                    # wherever it can be read -- the event payload if a
+                    # future SDK passes the exception, else the transport
+                    # -- so a 1008/DATA-* close is CONFIG on this path too,
+                    # not a retryable disconnect.
+                    code, reason = (None, "")
+                    if isinstance(event, BaseException):
+                        code, reason = _close_code_and_reason(event)
+                    if code is None:
+                        code, reason = connection_close_frame(connection)
+                    category = (
+                        ErrorCategory.CONFIG
+                        if code == 1008 or reason.startswith("DATA-")
+                        else ErrorCategory.SERVER_DISCONNECT
+                    )
+                    details = f"{code} {reason}".strip() if code is not None else ""
+                    log.warning(
+                        "deepgram_connection_closed %s (%s)",
+                        details or "no close frame", category.value,
+                    )
+                    _emit_error(
+                        ConnectionClosed(
+                            category,
+                            f"Deepgram connection closed ({details})" if details
+                            else "Deepgram connection closed",
                         )
+                    )
 
                 connection.on(EventType.OPEN, lambda _: log.info("deepgram_connected"))
                 connection.on(EventType.MESSAGE, _on_message)

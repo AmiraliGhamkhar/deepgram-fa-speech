@@ -178,6 +178,38 @@ def test_one_disconnect_emits_exactly_one_error(monkeypatch):
     assert len(errors) == 1
 
 
+def test_a_close_only_data_close_is_still_a_config_error(monkeypatch):
+    """B9: when no ERROR event precedes CLOSE, the close frame must be
+    read off the transport -- a 1008/DATA-* close by that path is a
+    configuration fault, not a retryable disconnect."""
+    from types import SimpleNamespace
+
+    from deepgram.core.events import EventType
+
+    _provider, connection, _captured, _events, errors = _started_provider(monkeypatch)
+    connection._websocket = SimpleNamespace(close_code=1008, close_reason="DATA-0000")
+    connection.handlers[EventType.CLOSE](None)
+
+    assert len(errors) == 1
+    assert errors[0].category is ErrorCategory.CONFIG
+    assert errors[0].category.is_retryable is False
+    assert "1008 DATA-0000" in str(errors[0])
+
+
+def test_a_close_only_clean_close_is_a_retryable_disconnect(monkeypatch):
+    from types import SimpleNamespace
+
+    from deepgram.core.events import EventType
+
+    _provider, connection, _captured, _events, errors = _started_provider(monkeypatch)
+    connection._websocket = SimpleNamespace(close_code=1000, close_reason="")
+    connection.handlers[EventType.CLOSE](None)
+
+    assert len(errors) == 1
+    assert errors[0].category is ErrorCategory.SERVER_DISCONNECT
+    assert errors[0].category.is_retryable is True
+
+
 def test_a_data_close_stops_the_session_as_a_config_error(monkeypatch):
     from deepgram.core.events import EventType
 
