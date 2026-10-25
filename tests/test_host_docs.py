@@ -349,3 +349,72 @@ def test_production_readiness_claim_is_not_overstated():
     assert "provider capacity" in lowered
     # The unsupported claim must be refused explicitly, not implied.
     assert "what is *not* claimed" in lowered or "what is not claimed" in lowered
+
+
+#: The four operational trade-offs B24 requires to stay documented. Each is a
+#: deliberate property of the code that an operator cannot discover from the
+#: settings table alone, so deleting one of these sentences silently
+#: reintroduces the surprise the audit filed. Each entry is a label plus the
+#: concepts that must appear; a concept is satisfied by ANY of its spellings,
+#: because the two documents legitimately word the same trade-off differently.
+_TRADE_OFF_CONCEPTS = (
+    (
+        "R-1 open /metrics",
+        (
+            ("host_metrics_admin_token",),
+            ("unthrottled", "not rate-limited", "unauthenticated"),
+        ),
+    ),
+    (
+        "failed-auth bucket keyed on the direct peer",
+        (
+            ("direct peer",),
+            ("loopback reverse proxy", "loopback proxy"),
+        ),
+    ),
+    (
+        "revocation needs a restart",
+        (
+            ("revocation", "revoking"),
+            ("restart",),
+        ),
+    ),
+    (
+        "Deepgram's per-project stream pool is invisible to the host",
+        (
+            # README.md says "per-project stream pool"; host/README.md
+            # explains that all keys of one project "share one pool".
+            ("stream pool", "one pool", "pool"),
+            ("429",),
+            ("session_success_total",),
+        ),
+    ),
+)
+
+
+def _normalized(path: Path) -> str:
+    return re.sub(r"\s+", " ", path.read_text(encoding="utf-8")).lower()
+
+
+def test_the_four_operator_trade_offs_stay_documented():
+    """B24: every deliberate trade-off must remain documented in both files.
+
+    These are the answers to "why did it behave like that?" during an
+    incident, so each one has to survive a documentation edit.
+    """
+    for path in (ROOT_README, HOST_README):
+        text = _normalized(path)
+        for label, concepts in _TRADE_OFF_CONCEPTS:
+            for alternatives in concepts:
+                assert any(phrase in text for phrase in alternatives), (
+                    f"{path.name} no longer documents the {label} trade-off "
+                    f"(none of {alternatives} present)"
+                )
+
+
+def test_the_metrics_trade_off_names_the_default():
+    """R-1 is only actionable if the reader is told the token is optional."""
+    for path in (ROOT_README, HOST_README):
+        text = _normalized(path)
+        assert "host_metrics_admin_token" in text
+        assert "unset" in text or "not set" in text or "optional" in text

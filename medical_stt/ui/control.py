@@ -194,8 +194,20 @@ class ControlWindow:
             self._root.mainloop()
         except tk.TclError as exc:
             log.error("failed to create the control window: %s", exc)
-            self._ready.set()
+        except Exception as exc:  # noqa: BLE001 - any build fault, not just Tk's
+            # `_build` touches settings and the filesystem, so it can raise
+            # more than TclError (an unreadable settings file, a widget
+            # option Tk refuses, ...). Uncaught, that killed the UI thread
+            # with `_ready` never set: `start()` then blocked its full 5 s
+            # and reported a bare "cannot start" with nothing in the log.
+            # Only the exception TYPE is logged -- messages from the config
+            # layer are user-facing text, not log material.
+            log.error("control window build failed (%s)", type(exc).__name__)
         finally:
+            # Idempotent: the success path has already set it before
+            # `mainloop()`, so this only runs first for a failed build --
+            # which is exactly the case that must not hang `start()`.
+            self._ready.set()
             dispatch.clear_owner()
 
     def _pump(self) -> None:
@@ -361,7 +373,17 @@ class ControlWindow:
             self._start()
 
     def _start(self) -> None:
-        if self._starting or self._saving:
+        if self._starting:
+            # Unreachable from the circle (`_on_toggle` routes an in-flight
+            # start to Stop), but a direct caller must still see why nothing
+            # happened instead of a silently ignored press (A3.3).
+            self._set_status("● در حال اتصال...", _MUTED)
+            return
+        if self._saving:
+            # Reachable: pressing the circle while a settings save was in
+            # flight returned with no feedback at all, which reads as a dead
+            # button on the application's primary control.
+            self._set_status("● در حال ذخیره…؛ برای شروع صبر کنید", _MUTED)
             return
         self._starting = True
         self._start_done.clear()
@@ -544,6 +566,12 @@ class ControlWindow:
         threading.Thread(target=save, daemon=True, name="settings-save").start()
 
     def _test_connection(self) -> None:
+        if self._stopping:
+            # A stop is in flight, so the stored settings are being torn down
+            # with the session; a test here would report on a configuration
+            # nobody is about to use. Refuse it AND say so (A3.3).
+            self._set_status("● در حال توقف…", _MUTED)
+            return
         if self._testing:
             self._set_status("● در حال بررسی اتصال…", _MUTED)
             return

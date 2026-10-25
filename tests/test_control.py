@@ -164,6 +164,43 @@ def test_drag_without_a_window_or_origin_is_ignored():
     assert window._root.geometry_calls == []
 
 
+def test_drag_keeps_pace_across_five_consecutive_motion_events():
+    """A3.2 acceptance: over five motion events the window tracks the
+    pointer exactly, one absolute move per event, with no compounding."""
+    window = ControlWindow(_StoppedController())
+    root = _FakeWidget()
+    window._root = root  # at +500+300
+
+    window._on_drag_start(_FakeEvent(1000, 800))
+    moves = [(1010, 810), (1025, 830), (1060, 845), (1100, 900), (1199, 999)]
+    for x, y in moves:
+        window._on_drag_move(_FakeEvent(x, y))
+
+    assert root.geometry_calls == [
+        f"+{500 + (x - 1000)}+{300 + (y - 800)}" for x, y in moves
+    ]
+    # Each step is exactly one pointer delta away from the previous one: the
+    # window's own position never feeds back into the calculation.
+    assert root.geometry_calls[-1] == "+699+499"
+
+
+# -- A3.1 (extension): a build fault must not hang the UI thread -----------
+
+
+def test_a_non_tcl_error_during_build_still_releases_start(monkeypatch):
+    """`_build` reads settings and the filesystem, so it can raise more than
+    TclError. Uncaught, the UI thread died with `_ready` never set and
+    `start()` blocked its whole 5 s timeout, reporting nothing."""
+    _install_fake_tk(monkeypatch)
+    monkeypatch.setattr(ControlWindow, "_build", lambda self, root: (_ for _ in ()).throw(OSError("unreadable")))
+
+    window = ControlWindow(_StoppedController())
+    started = time.monotonic()
+    assert window.start() is False
+    assert time.monotonic() - started < 2.0, "a failed build must not burn the full start timeout"
+    assert window._initialized is False
+
+
 # -- fake-Tk harness -------------------------------------------------------
 #
 # `_build` runs the real widget-construction code against these stand-ins,
@@ -573,6 +610,52 @@ def test_connection_test_guards_post_a_hint():
     window._saving = True
     window._test_connection()
     assert "ذخیره" in statuses[-1][0]
+
+
+def test_start_guard_while_saving_posts_a_hint():
+    """A3.3: pressing the circle during a settings save must say why it did
+    nothing. `_start` used to return silently, leaving the primary control
+    looking dead for the duration of the save."""
+    class _RecordingController(_StoppedController):
+        started = False
+
+        def start(self) -> None:
+            self.started = True
+
+    controller = _RecordingController()
+    window = ControlWindow(controller)
+    statuses, _ = _capture_status(window)
+    window._saving = True
+
+    window._on_toggle()
+
+    assert statuses, "the guard hit must post a status line"
+    assert "ذخیره" in statuses[-1][0]
+    assert window._starting is False, "the guard still refuses to start"
+    assert controller.started is False, "no session may be started while saving"
+
+
+def test_start_guard_while_already_starting_posts_a_hint():
+    window = ControlWindow(_StoppedController())
+    statuses, _ = _capture_status(window)
+    window._starting = True
+
+    window._start()
+
+    assert statuses and "اتصال" in statuses[-1][0]
+
+
+def test_connection_test_guard_while_stopping_posts_a_hint():
+    """A stop in flight means the settings under test are going away; the
+    guard must refuse AND say so instead of starting a test."""
+    window = ControlWindow(_StoppedController())
+    statuses, _ = _capture_status(window)
+    window._stopping = True
+
+    window._test_connection()
+
+    assert statuses and "توقف" in statuses[-1][0]
+    assert window._testing is False, "no connection test may start during a stop"
 
 
 # -- A3.5: an empty secret field keeps the old secret -- say so ---------------
