@@ -105,6 +105,56 @@ def _started_provider(monkeypatch, settings: Settings | None = None):
     return provider, connection, captured, events, errors
 
 
+# -- connect parameters -------------------------------------------------------
+
+
+def test_connect_parameters_omit_everything_unset():
+    """The stream query is a pure function of settings, and optional keys are
+    absent rather than `None`: the SDK's encoder is not ours to rely on."""
+    from medical_stt.config import Settings
+    from medical_stt.stt.deepgram_provider import DeepgramProvider
+
+    provider = DeepgramProvider(
+        Settings(host_url="https://stt.example.com", host_secret="secret"),
+        token_provider=lambda: "short-lived-token",
+    )
+    params = provider._connect_parameters()
+
+    assert params["encoding"] == "linear16"
+    assert params["interim_results"] is True
+    assert params["multichannel"] is False, "mono capture must not ask for 2 channels"
+    for optional in ("replace", "mip_opt_out", "keyterm", "keywords", "tag", "extra"):
+        assert optional not in params, f"{optional} must be omitted when unset"
+    assert all(value is not None for value in params.values())
+
+
+def test_connect_parameters_carry_the_configured_extras():
+    from medical_stt.config import Settings
+    from medical_stt.stt.deepgram_provider import DeepgramProvider
+
+    provider = DeepgramProvider(
+        Settings(
+            host_url="https://stt.example.com",
+            host_secret="secret",
+            host_client_id="doctor-01",
+            channels=2,
+            mip_opt_out=True,
+        ),
+        keyterms=["قند خون"],
+        asr_replacements=["pompe:pompidou"],
+        token_provider=lambda: "short-lived-token",
+    )
+    provider._host_session_id = "abc123"
+    params = provider._connect_parameters()
+
+    assert params["multichannel"] is True
+    assert params["mip_opt_out"] is True
+    assert params["replace"] == ["pompe:pompidou"]
+    assert params["tag"] == ["doctor-01"], "usage reports are filtered by device"
+    assert params["extra"] == ["session_id:abc123"]
+    assert params["keyterm"] == ["قند خون"], "Nova-3 uses keyterm prompting"
+
+
 # -- close codes -------------------------------------------------------------
 
 

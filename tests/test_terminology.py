@@ -200,11 +200,12 @@ def test_numeric_opt_in_requires_a_boolean():
 def test_yaml_loader_rejects_dead_or_digit_changing_rules(tmp_path, monkeypatch, rule):
     import yaml
     from medical_stt import config as config_module
+    from medical_stt.configuration import catalogs as catalogs_module
 
     (tmp_path / "corrections.yaml").write_text(
         yaml.safe_dump({"rules": [rule]}, allow_unicode=True), encoding="utf-8"
     )
-    monkeypatch.setattr(config_module, "_DATA_DIR", tmp_path)
+    monkeypatch.setattr(catalogs_module, "DATA_DIR", tmp_path)
     with pytest.raises(ConfigError, match="numeric_in_source|identical digit sequences"):
         config_module.load_correction_rules_raw()
 

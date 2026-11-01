@@ -212,7 +212,7 @@ def test_stop_snapshots_the_started_thread_under_the_lock(monkeypatch):
     that samples `_stt`/`_thread` outside that lock can see the previous `None`
     and return before the new thread even exists.
     """
-    import medical_stt.app as app_module
+    from medical_stt.session import controller as controller_module
 
     real_thread = threading.Thread
     created_threads: list[real_thread] = []
@@ -229,7 +229,7 @@ def test_stop_snapshots_the_started_thread_under_the_lock(monkeypatch):
                 joined_threads.append(self)
             super().join(timeout)
 
-    monkeypatch.setattr(app_module.threading, "Thread", RecordingThread)
+    monkeypatch.setattr(controller_module.threading, "Thread", RecordingThread)
 
     class GatedSTT:
         """The session thread stays alive until stop()'s own request_stop().
@@ -315,7 +315,7 @@ def test_stop_snapshots_the_started_thread_under_the_lock(monkeypatch):
 
 def test_stop_releases_the_lock_before_joining(monkeypatch):
     """The snapshot lock must never be held for the duration of join()."""
-    import medical_stt.app as app_module
+    from medical_stt.session import controller as controller_module
 
     real_thread = threading.Thread
     join_started = threading.Event()
@@ -329,7 +329,7 @@ def test_stop_releases_the_lock_before_joining(monkeypatch):
             assert release_join.wait(timeout=2.0)
             super().join(timeout)
 
-    monkeypatch.setattr(app_module.threading, "Thread", JoinProbeThread)
+    monkeypatch.setattr(controller_module.threading, "Thread", JoinProbeThread)
 
     class BlockingSTT:
         def request_stop(self) -> None:

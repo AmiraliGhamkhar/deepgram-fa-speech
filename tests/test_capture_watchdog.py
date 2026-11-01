@@ -92,11 +92,13 @@ def _host_credentials(monkeypatch):
 
 def _build_session(provider: STTProvider, monkeypatch):
     from medical_stt import app as app_module
+    from medical_stt.audio import microphone as microphone_module
+    from medical_stt.session import watchdog as watchdog_module
 
-    monkeypatch.setattr(app_module, "load_sounddevice", lambda: _FakeSoundDevice)
+    monkeypatch.setattr(microphone_module, "load_sounddevice", lambda: _FakeSoundDevice)
     # Fast thresholds: the behaviour is the same, the test is not 3 s slower.
-    monkeypatch.setattr(app_module, "AUDIO_SILENCE_SECONDS", 0.3)
-    monkeypatch.setattr(app_module, "KEEP_ALIVE_INTERVAL_SECONDS", 0.1)
+    monkeypatch.setattr(watchdog_module, "DEFAULT_SILENCE_SECONDS", 0.3)
+    monkeypatch.setattr(watchdog_module, "DEFAULT_KEEP_ALIVE_INTERVAL_SECONDS", 0.1)
     stt = app_module.LiveMedicalSTT(provider=provider)
     stt.injector = TextInjector(backend=DryRunBackend(), paste_settle_seconds=0.0)
     stt.overlay.enabled = False
@@ -193,10 +195,11 @@ def test_a_dropped_frame_still_counts_as_captured_audio(monkeypatch):
 
 def test_rate_limit_shows_a_capacity_message_until_a_session_records(monkeypatch):
     from medical_stt import app as app_module
+    from medical_stt.session import supervisor as supervisor_module
     from medical_stt.stt.reconnect import ReconnectDecision
 
     # The backoff itself is tested elsewhere; here it must not slow the test.
-    monkeypatch.setattr(app_module, "decide", lambda *_a, **_k: ReconnectDecision(True, 0.0, "test"))
+    monkeypatch.setattr(supervisor_module, "decide", lambda *_a, **_k: ReconnectDecision(True, 0.0, "test"))
     provider = RateLimitedThenFineProvider(failures=2)
     stt = _build_session(provider, monkeypatch)
     seen_capacity = threading.Event()
@@ -223,9 +226,10 @@ def test_rate_limit_shows_a_capacity_message_until_a_session_records(monkeypatch
 
 def test_a_rate_limit_that_never_clears_keeps_the_message_and_keeps_retrying(monkeypatch):
     from medical_stt import app as app_module
+    from medical_stt.session import supervisor as supervisor_module
     from medical_stt.stt.reconnect import ReconnectDecision
 
-    monkeypatch.setattr(app_module, "decide", lambda *_a, **_k: ReconnectDecision(True, 0.01, "test"))
+    monkeypatch.setattr(supervisor_module, "decide", lambda *_a, **_k: ReconnectDecision(True, 0.01, "test"))
     provider = RateLimitedThenFineProvider(failures=10_000)
     stt = _build_session(provider, monkeypatch)
     runner = _run_on_thread(stt.run)
@@ -264,9 +268,10 @@ class RateLimitThenNetworkProvider(KeepAliveProvider):
 
 def test_a_later_failure_of_another_kind_withdraws_the_capacity_message(monkeypatch):
     from medical_stt import app as app_module
+    from medical_stt.session import supervisor as supervisor_module
     from medical_stt.stt.reconnect import ReconnectDecision
 
-    monkeypatch.setattr(app_module, "decide", lambda *_a, **_k: ReconnectDecision(True, 0.01, "test"))
+    monkeypatch.setattr(supervisor_module, "decide", lambda *_a, **_k: ReconnectDecision(True, 0.01, "test"))
     provider = RateLimitThenNetworkProvider()
     stt = _build_session(provider, monkeypatch)
     runner = _run_on_thread(stt.run)

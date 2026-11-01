@@ -115,8 +115,9 @@ def _host_credentials(monkeypatch):
 def _build_session(provider: STTProvider, monkeypatch):
     """A fully wired, GUI-free, audio-free session."""
     from medical_stt import app as app_module
+    from medical_stt.audio import microphone as microphone_module
 
-    monkeypatch.setattr(app_module, "load_sounddevice", lambda: _FakeSoundDevice)
+    monkeypatch.setattr(microphone_module, "load_sounddevice", lambda: _FakeSoundDevice)
     stt = app_module.LiveMedicalSTT(provider=provider)
     stt.injector = TextInjector(backend=DryRunBackend(), paste_settle_seconds=0.0)
     stt.overlay.enabled = False
@@ -332,13 +333,14 @@ def test_one_failing_session_does_not_disturb_the_others(monkeypatch):
 
 def test_a_session_stops_during_backoff_without_waiting_it_out(monkeypatch):
     """Test 4/Phase 6: Stop must cancel a pending reconnect immediately."""
-    from medical_stt import app as app_module
 
     provider = ConcurrentProvider(marker=0, fail_always=True)
     stt = _build_session(provider, monkeypatch)
     # A long base delay: if the backoff were not interruptible, Stop would
     # block for this long.
-    stt.settings = app_module.get_settings()
+    from medical_stt.config import get_settings
+
+    stt.settings = get_settings()
     object.__setattr__(stt.settings, "reconnect_delay", 30.0)
     object.__setattr__(stt.settings, "max_reconnect_attempts", 0)
 

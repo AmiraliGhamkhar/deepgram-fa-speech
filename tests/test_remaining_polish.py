@@ -44,14 +44,22 @@ def test_positive_jitter_accepts_injected_rng():
 
 
 def test_bidi_has_one_owner_at_injection_boundary():
-    assert 'to_injected(' not in inspect.getsource(LiveMedicalSTT._render_and_inject)
+    """Neither the session nor the renderer may format for display.
+
+    Directional marks belong to `TextInjector`, so a second BiDi call site
+    here would mean one of them operates on already-marked text.
+    """
+    from medical_stt.session.renderer import UtteranceRenderer
+
+    for owner in (LiveMedicalSTT._render_and_inject, UtteranceRenderer._render):
+        assert 'to_injected(' not in inspect.getsource(owner)
     backend = DryRunBackend()
     injector = TextInjector(backend=backend)
     assert injector.type_text('گزارش', add_directional_mark=True)
 
 
 def test_p2_tradeoffs_are_explicit():
-    assert 'delta-seconds only' in (ROOT / 'host/core.py').read_text()
+    assert 'delta-seconds only' in (ROOT / 'host/grant.py').read_text()
     assert 'public-api-only' in TextInjector.type_delta_from_partial.__doc__.lower()
     assert '25' in (ROOT / 'medical_stt/host_client.py').read_text()
     assert 'watchdog' in (ROOT / 'host/passenger_wsgi.py').read_text().lower()

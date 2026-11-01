@@ -12,21 +12,42 @@ thread calls `after` to drain them, so audio/network workers never enter Tcl.
 The host shared secret typed here is passed straight to
 `config.save_host_credentials`, which protects it with Windows DPAPI. It is
 never written to `settings.yaml` and never logged.
+
+Where the pieces live
+---------------------
+=========================  ==================================================
+`ui.circles`               the canvas-drawn circular controls themselves
+`ui.strings`               every user-visible caption, in one catalog
+`ui.state`                 the persisted window position
+`ui.dispatch`              the worker-thread -> Tk mailbox
+`ui.fonts`, `ui.colors`    DPI-aware fonts and the single palette
+=========================  ==================================================
+
+This module is the conductor: it builds the window out of those parts, owns
+the Start/Stop state machine, and keeps every Tk call on the Tk thread.
 """
 from __future__ import annotations
 
-import json
 import logging
-import os
 import platform
-import tempfile
 import threading
 import time
-from typing import Any, Callable, Optional, Protocol
+from typing import Any, Callable, Dict, Literal, Optional, Protocol
 
-from .. import paths
 from ..config import ConfigError, get_settings, initialize_user_config, save_host_credentials
-from . import colors, dispatch, fonts
+from . import dispatch, fonts, state, strings
+from .circles import CircleButton, darken as _darken
+from .colors import (
+    ACCENT as _ACCENT,
+    BG as _BG,
+    BORDER as _BORDER,
+    FG as _FG,
+    MUTED as _MUTED,
+    OK as _OK,
+    ON_LIGHT as _ON_LIGHT,
+    REC as _REC,
+    SURFACE as _SURFACE,
+)
 
 log = logging.getLogger("medical_stt.ui.control")
 
@@ -35,43 +56,28 @@ _SYSTEM = platform.system().lower()
 _TK_AVAILABLE = False
 try:
     import tkinter as tk
+
     _TK_AVAILABLE = True
 except ImportError:  # pragma: no cover - depends on the Python build
     _TK_AVAILABLE = False
-
-# The palette itself lives in `colors.py`, shared with the overlay; these
-# aliases keep the widget-building code below short.
-_BG = colors.BG
-_SURFACE = colors.SURFACE
-_BORDER = colors.BORDER
-_FG = colors.FG
-_MUTED = colors.MUTED
-_OK = colors.OK
-_REC = colors.REC
-_ACCENT = colors.ACCENT
-_ON_LIGHT = colors.ON_LIGHT
 
 #: Diameters of the Canvas-drawn circular controls (GUI R1):
 #: the Start/Stop toggle, the three settings actions, and the quit mark.
 _TOGGLE_DIAMETER = 72
 _SECONDARY_DIAMETER = 52
 _QUIT_DIAMETER = 20
-STATUS_DOT = "\u25cf"
+STATUS_DOT = strings.STATUS_DOT
 
-
-def _darken(color: str, factor: float = 0.9) -> str:
-    """Darken a `#rrggbb` colour by `factor`, for the toggle's hover state.
-
-    Anything that is not a six-digit hex literal is returned unchanged:
-    a hover effect must never be able to break the button it decorates.
-    """
-    if len(color) != 7 or not color.startswith("#"):
-        return color
-    try:
-        channels = [int(color[i:i + 2], 16) for i in (1, 3, 5)]
-    except ValueError:
-        return color
-    return "#" + "".join(f"{max(0, min(255, round(c * factor))):02x}" for c in channels)
+#: Re-exported for callers that imported the helpers from this module before
+#: they moved. `_darken` lives in `ui.circles` (the only user) and the status
+#: glyph in `ui.strings`.
+__all__ = [
+    "ControlWindow",
+    "STATUS_DOT",
+    "SessionControllerLike",
+    "_ACCENT",
+    "_darken",
+]
 
 
 class SessionControllerLike(Protocol):
@@ -123,22 +129,46 @@ class ControlWindow:
         self._close_requested = False
         self._status: Optional["tk.Label"] = None
         self._detail: Optional["tk.Label"] = None
-        # The Start/Stop toggle is a Canvas-drawn circle, not a tk.Button:
-        # `_toggle` is the canvas, `_toggle_oval`/`_toggle_text` its items.
-        self._toggle: Optional["tk.Canvas"] = None
-        self._toggle_oval: Optional[int] = None
-        self._toggle_text: Optional[int] = None
+        #: The circles, keyed by the canvas the rest of the code (and the
+        #: tests) identify them by.
+        self._circles: Dict[Any, CircleButton] = {}
+        self._toggle_button: Optional[CircleButton] = None
         self._toggle_color: str = _OK
-        self._toggle_hover = False
         self._settings_entries: list[Any] = []
-        self._test_circle: Optional[Any] = None
-        self._save_circle: Optional[Any] = None
+        self._test_button: Optional[CircleButton] = None
+        self._save_button: Optional[CircleButton] = None
+        self._quit_button: Optional[CircleButton] = None
         self._drag_widgets: tuple[Any, ...] = ()
-        self._circle_states: dict[Any, dict[str, Any]] = {}
         self._action_row: Optional["tk.Frame"] = None
-        self._quit: Optional["tk.Canvas"] = None
         self._url_var: Optional["tk.StringVar"] = None
         self._secret_var: Optional["tk.StringVar"] = None
+
+    # -- compatibility accessors ------------------------------------------
+    # The toggle is the window's primary control, and both the code below and
+    # the tests refer to its canvas and item ids directly.
+    @property
+    def _toggle(self) -> Any:
+        return self._toggle_button.widget() if self._toggle_button else None
+
+    @property
+    def _toggle_oval(self) -> Optional[int]:
+        return self._toggle_button.oval if self._toggle_button else None
+
+    @property
+    def _toggle_text(self) -> Optional[int]:
+        return self._toggle_button.label if self._toggle_button else None
+
+    @property
+    def _test_circle(self) -> Any:
+        return self._test_button.widget() if self._test_button else None
+
+    @property
+    def _save_circle(self) -> Any:
+        return self._save_button.widget() if self._save_button else None
+
+    @property
+    def _quit(self) -> Any:
+        return self._quit_button.widget() if self._quit_button else None
 
     # -- lifecycle --------------------------------------------------------
 
@@ -183,15 +213,19 @@ class ControlWindow:
         self._stopping = False
         if completed or (not self._starting and not self._controller.is_running):
             self._running = False
-            self._set_button("شروع", _OK)
-            self._set_status(f"{STATUS_DOT} آماده", _MUTED, getattr(self._controller, "health", {}).get("warning", ""))
+            self._set_button(strings.START, _OK)
+            self._set_status(
+                strings.READY,
+                _MUTED,
+                getattr(self._controller, "health", {}).get("warning", ""),
+            )
             if self._close_requested:
                 self._destroy_window()
             return
 
         self._running = True
         self._close_requested = False
-        self._set_status(f"{STATUS_DOT} توقف کامل نشد", _REC, "جلسه هنوز در حال پایان است.")
+        self._set_status(strings.STOP_INCOMPLETE, _REC, strings.STOP_INCOMPLETE_DETAIL)
 
     # -- Tk thread --------------------------------------------------------
 
@@ -234,10 +268,12 @@ class ControlWindow:
     def _pump(self) -> None:
         self._mailbox.drain()
         if self._root is not None:
-            self._root.after(25, self._pump)
+            self._root.after(30, self._pump)
+
+    # -- construction -----------------------------------------------------
 
     def _build(self, root: "tk.Tk") -> None:
-        root.title("Medical STT")
+        root.title(strings.TITLE)
         root.overrideredirect(True)
         root.attributes("-topmost", True)
         root.resizable(False, False)
@@ -252,30 +288,30 @@ class ControlWindow:
         header = tk.Frame(inner, bg=_BG)
         header.pack(fill="x")
         title = tk.Label(
-            header, text="Medical STT", bg=_BG, fg=_FG, anchor="w",
+            header, text=strings.TITLE, bg=_BG, fg=_FG, anchor="w",
             font=fonts.font(root, 10, "bold"),
         )
         title.pack(side="right")
-        self._quit = self._circle_button(
+        self._quit_button = self._make_circle(
             header, _QUIT_DIAMETER, self.close,
-            text="\u2715", fill=_SURFACE, hover_fill=_REC, text_fill=_MUTED,
-            font=fonts.font(root, 7, "bold"), tag="quit",
+            text=strings.GLYPH_QUIT, fill=_SURFACE, hover_fill=_REC,
+            text_fill=_MUTED, font=fonts.font(root, 7, "bold"), tag="quit",
         )
-        self._quit.pack(side="left", padx=(0, 6))
+        self._quit_button.pack(side="left", padx=(0, 6))
 
         self._status = tk.Label(
-            inner, text=f"{STATUS_DOT} آماده", bg=_BG, fg=_MUTED, anchor="e", justify="right",
-            font=fonts.font(root, 10),
+            inner, text=strings.READY, bg=_BG, fg=_MUTED, anchor="e",
+            justify="right", font=fonts.font(root, 10),
         )
         self._status.pack(fill="x", pady=(8, 0))
 
-        toggle = self._circle_button(
+        self._toggle_button = self._make_circle(
             inner, _TOGGLE_DIAMETER, self._on_toggle,
-            fill=self._toggle_color, remember=True,
+            text=strings.START, fill=self._toggle_color, text_fill=_ON_LIGHT,
+            font=fonts.font(root, 12, "bold"), primary=True,
         )
-        self._toggle = toggle
         # Centered, never fill="x": a circle must not stretch with the window.
-        toggle.pack(anchor="center", pady=(8, 0))
+        self._toggle_button.pack(anchor="center", pady=(8, 0))
 
         self._detail = tk.Label(
             inner, text="", bg=_BG, fg=_MUTED, anchor="e", justify="right",
@@ -291,21 +327,10 @@ class ControlWindow:
         self._url_var = tk.StringVar(value=self._current_host_url())
         self._secret_var = tk.StringVar(value="")
 
-        url_label = tk.Label(inner, text="میزبان (https)", bg=_BG, fg=_MUTED, anchor="e",
-                 font=fonts.font(root, 8))
-        url_label.pack(fill="x")
-        url_entry = tk.Entry(inner, textvariable=self._url_var, bg=_SURFACE, fg=_FG,
-                 insertbackground=_FG, relief="flat", justify="left",
-                 font=fonts.font(root, 9))
-        url_entry.pack(fill="x", pady=(2, 0), ipady=3)
-
-        secret_label = tk.Label(inner, text="کلید مشترک", bg=_BG, fg=_MUTED, anchor="e",
-                 font=fonts.font(root, 8))
-        secret_label.pack(fill="x", pady=(6, 0))
-        secret_entry = tk.Entry(inner, textvariable=self._secret_var, show="\u2022", bg=_SURFACE,
-                 fg=_FG, insertbackground=_FG, relief="flat", justify="left",
-                 font=fonts.font(root, 9))
-        secret_entry.pack(fill="x", pady=(2, 0), ipady=3)
+        url_label = self._form_label(inner, root, strings.HOST_LABEL)
+        url_entry = self._form_entry(inner, root, self._url_var, justify="left")
+        secret_label = self._form_label(inner, root, strings.SECRET_LABEL, top=6)
+        secret_entry = self._form_entry(inner, root, self._secret_var, justify="left", show="\u2022")
 
         try:
             client_id_value = get_settings().host_client_id
@@ -318,38 +343,37 @@ class ControlWindow:
             self._config_error = str(exc)
             log.error("control window opened with unusable settings: %s", exc)
         self._client_id_var = tk.StringVar(value=client_id_value)
-        id_label = tk.Label(inner, text="شناسه دستگاه", bg=_BG, fg=_MUTED, anchor="e",
-                 font=fonts.font(root, 8))
-        id_label.pack(fill="x", pady=(6, 0))
-        id_entry = tk.Entry(inner, textvariable=self._client_id_var, bg=_SURFACE, fg=_FG,
-                 insertbackground=_FG, relief="flat", justify="right",
-                 font=fonts.font(root, 9))
-        id_entry.pack(fill="x", pady=(2, 0), ipady=3)
+        id_label = self._form_label(inner, root, strings.CLIENT_ID_LABEL, top=6)
+        id_entry = self._form_entry(inner, root, self._client_id_var, justify="right")
         self._settings_entries = [url_entry, secret_entry, id_entry]
+
         # The three settings actions are 52px circles in one RTL row: the
         # first action sits at the right edge, reading order follows Persian.
         self._action_row = tk.Frame(inner, bg=_BG)
         self._action_row.pack(fill="x", pady=(8, 0))
         for label, command, glyph in (
-            ("بررسی\nاتصال", self._test_connection, "↗"),
-            ("متن\nبازیابی", self._show_recovery, "≡"),
-            ("ذخیره\nتنظیمات", self._on_save_settings, "✓"),
+            (strings.ACTION_TEST, self._test_connection, strings.GLYPH_TEST),
+            (strings.ACTION_RECOVERY, self._show_recovery, strings.GLYPH_RECOVERY),
+            (strings.ACTION_SAVE, self._on_save_settings, strings.GLYPH_SAVE),
         ):
-            circle = self._circle_button(
+            circle = self._make_circle(
                 self._action_row, _SECONDARY_DIAMETER, command,
                 text=label, fill=_SURFACE, hover_fill=_BORDER, text_fill=_FG,
-                font=fonts.font(root, 8), tag="action", glyph=glyph, on_disabled=command,
+                font=fonts.font(root, 8), tag="action", glyph=glyph,
+                on_disabled=command,
             )
             circle.pack(side="right", padx=4)
             if command == self._test_connection:
-                self._test_circle = circle
+                self._test_button = circle
             elif command == self._on_save_settings:
-                self._save_circle = circle
+                self._save_button = circle
 
         # Drag support: the window is borderless, so there is no title bar
         # to move it with.
-        self._drag_widgets = (root, inner, header, title, self._status, self._detail,
-                              url_label, secret_label, id_label, separator)
+        self._drag_widgets = (
+            root, inner, header, title, self._status, self._detail,
+            url_label, secret_label, id_label, separator,
+        )
         for widget in self._drag_widgets:
             widget.bind("<ButtonPress-1>", self._on_drag_start)
             widget.bind("<B1-Motion>", self._on_drag_move)
@@ -358,11 +382,40 @@ class ControlWindow:
         if self._config_error:
             # Written directly, not via the mailbox: this IS the Tk thread,
             # and the pump has not started yet.
-            self._status.config(text=f"{STATUS_DOT} خطای پیکربندی", fg=_REC)
-            self._detail.config(text="فایل تنظیمات نامعتبر است؛ آن را اصلاح کنید و دوباره تلاش کنید")
+            self._status.config(text=strings.CONFIG_ERROR_STATUS, fg=_REC)
+            self._detail.config(text=strings.CONFIG_ERROR_DETAIL)
 
         x, y = self._load_window_position()
         root.geometry(f"+{x}+{y}")
+
+    def _form_label(self, parent: Any, root: Any, text: str, top: int = 0) -> Any:
+        """One right-aligned caption above its entry."""
+        label = tk.Label(
+            parent, text=text, bg=_BG, fg=_MUTED, anchor="e",
+            font=fonts.font(root, 8),
+        )
+        label.pack(fill="x", pady=(top, 0) if top else 0)
+        return label
+
+    def _form_entry(
+        self,
+        parent: Any,
+        root: Any,
+        variable: Any,
+        *,
+        justify: Literal["left", "center", "right"],
+        show: str = "",
+    ) -> Any:
+        options: Dict[str, Any] = dict(
+            textvariable=variable, bg=_SURFACE, fg=_FG,
+            insertbackground=_FG, relief="flat", justify=justify,
+            font=fonts.font(root, 9),
+        )
+        if show:
+            options["show"] = show
+        entry = tk.Entry(parent, **options)
+        entry.pack(fill="x", pady=(2, 0), ipady=3)
+        return entry
 
     # -- dragging ---------------------------------------------------------
 
@@ -391,7 +444,9 @@ class ControlWindow:
         # whole delta and the window accelerated away from the cursor.
         # (The even older bug, audit N-02, passed the raw delta as the
         # position and parked the window near the screen origin.)
-        wx, wy = getattr(self, "_drag_window_origin", (self._root.winfo_x(), self._root.winfo_y()))
+        wx, wy = getattr(
+            self, "_drag_window_origin", (self._root.winfo_x(), self._root.winfo_y())
+        )
         dx = getattr(event, "x_root", 0) - origin[0]
         dy = getattr(event, "y_root", 0) - origin[1]
         self._root.geometry(f"+{wx + dx}+{wy + dy}")
@@ -408,46 +463,15 @@ class ControlWindow:
         self._save_window_position()
 
     def _load_window_position(self) -> "tuple[int, int]":
-        """Restore the last dragged position, or the default corner.
-
-        Corrupt or absurd state falls back to the default rather than
-        refusing to start; the file is a UI nicety, not configuration.
-        """
-        try:
-            raw = json.loads(paths.ui_state_path().read_text(encoding="utf-8"))
-            x, y = raw["x"], raw["y"]
-            if type(x) is int and type(y) is int and abs(x) <= 100000 and abs(y) <= 100000:
-                return x, y
-        except Exception as exc:  # noqa: BLE001 - see docstring
-            log.debug("window position not restored (%s)", type(exc).__name__)
-        return 40, 40
+        """Restore the last dragged position, or the default corner."""
+        return state.load_window_position()
 
     def _save_window_position(self) -> None:
         """Persist the window position (atomic, best effort)."""
         root = self._root
         if root is None:
             return
-        try:
-            x, y = int(root.winfo_x()), int(root.winfo_y())
-            target = paths.ui_state_path()
-            target.parent.mkdir(parents=True, exist_ok=True)
-            handle, temporary = tempfile.mkstemp(
-                dir=str(target.parent), prefix=".ui-state-", suffix=".tmp"
-            )
-            try:
-                with os.fdopen(handle, "w", encoding="utf-8") as stream:
-                    json.dump({"x": x, "y": y}, stream)
-                    stream.flush()
-                    os.fsync(stream.fileno())
-                os.replace(temporary, target)
-            except BaseException:
-                try:
-                    os.unlink(temporary)
-                except OSError:
-                    pass
-                raise
-        except Exception as exc:  # noqa: BLE001 - a UI nicety, never fatal
-            log.debug("window position not saved (%s)", type(exc).__name__)
+        state.save_window_position(int(root.winfo_x()), int(root.winfo_y()))
 
     # -- state / actions --------------------------------------------------
 
@@ -467,14 +491,17 @@ class ControlWindow:
         """Tk-thread-only visual reflection of the existing action guards."""
         busy = self._starting or self._running or self._stopping or self._saving
         for entry in self._settings_entries:
-            entry.config(state="disabled" if busy else "normal",
-                         disabledbackground=_SURFACE, disabledforeground=_MUTED,
-                         fg=_FG)
-        if self._test_circle is not None:
-            self._set_circle_enabled(self._test_circle, not (busy or self._testing))
-        if self._save_circle is not None:
+            entry.config(
+                state="disabled" if busy else "normal",
+                disabledbackground=_SURFACE,
+                disabledforeground=_MUTED,
+                fg=_FG,
+            )
+        if self._test_button is not None:
+            self._test_button.set_enabled(not (busy or self._testing))
+        if self._save_button is not None:
             # Connection tests deliberately do not block saving (A3.4).
-            self._set_circle_enabled(self._save_circle, not busy)
+            self._save_button.set_enabled(not busy)
 
     def _set_status(self, text: str, color: str, detail: str = "") -> None:
         def _() -> None:
@@ -489,7 +516,7 @@ class ControlWindow:
     def _on_toggle(self) -> None:
         if self._stopping:
             # Say so: a press that silently does nothing reads as a frozen UI.
-            self._set_status(f"{STATUS_DOT} در حال توقف...", _MUTED)
+            self._set_status(strings.STOPPING, _MUTED)
             return
         if self._running or self._starting:
             self._stop()
@@ -501,40 +528,45 @@ class ControlWindow:
             # Unreachable from the circle (`_on_toggle` routes an in-flight
             # start to Stop), but a direct caller must still see why nothing
             # happened instead of a silently ignored press (A3.3).
-            self._set_status(f"{STATUS_DOT} در حال اتصال...", _MUTED)
+            self._set_status(strings.ALREADY_STARTING, _MUTED)
             return
         if self._saving:
             # Reachable: pressing the circle while a settings save was in
             # flight returned with no feedback at all, which reads as a dead
             # button on the application's primary control.
-            self._set_status(f"{STATUS_DOT} در حال ذخیره…؛ برای شروع صبر کنید", _MUTED)
+            self._set_status(strings.SAVING_BLOCKS_START, _MUTED)
             return
         self._starting = True
         self._start_done.clear()
-        self._set_status(f"{STATUS_DOT} در حال اتصال...", _MUTED)
-        self._set_button("توقف", _REC)
+        self._set_status(strings.CONNECTING, _MUTED)
+        self._set_button(strings.STOP, _REC)
 
         def prepare() -> None:
             error = ""
             try:
                 self._controller.start()
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - reported in the UI instead
                 error = str(exc)
             finally:
                 self._start_done.set()
+
             def finish() -> None:
                 self._starting = False
                 if self._stopping or self._closed:
                     return
                 if error:
                     self._running = False
-                    self._set_button("شروع", _OK)
-                    self._set_status(f"{STATUS_DOT} شروع ناموفق", _REC, error)
+                    self._set_button(strings.START, _OK)
+                    self._set_status(strings.START_FAILED, _REC, error)
                     return
                 self._running = True
                 self._refresh_settings_state()
-                threading.Thread(target=self._watch, name="control-watch", daemon=True).start()
+                threading.Thread(
+                    target=self._watch, name="control-watch", daemon=True
+                ).start()
+
             self._ui(finish, key="start-complete")
+
         threading.Thread(target=prepare, name="control-start", daemon=True).start()
 
     def _stop(self) -> None:
@@ -542,7 +574,7 @@ class ControlWindow:
             return
         self._stopping = True
         getattr(self._controller, "cancel_start", lambda: None)()
-        self._set_status(f"{STATUS_DOT} در حال توقف...", _MUTED)
+        self._set_status(strings.STOPPING, _MUTED)
 
         def stop_controller() -> None:
             try:
@@ -564,178 +596,129 @@ class ControlWindow:
         last_health = None
         while self._controller.is_running:
             health = getattr(self._controller, "health", {})
-            state = (health.get("phase", "connecting"), health.get("warning", ""))
-            if state != last_health and not self._stopping:
-                phase, warning = state
-                labels = {"recording": f"{STATUS_DOT} در حال ضبط...", "reconnecting": f"{STATUS_DOT} اتصال مجدد...", "stopping": f"{STATUS_DOT} در حال توقف..."}
-                self._set_status(labels.get(phase, f"{STATUS_DOT} در حال اتصال..."), _REC if phase == "recording" else _MUTED, warning)
-                last_health = state
+            current = (health.get("phase", "connecting"), health.get("warning", ""))
+            if current != last_health and not self._stopping:
+                phase, warning = current
+                label = strings.PHASE_LABELS.get(phase, strings.PHASE_FALLBACK)
+                self._set_status(label, _REC if phase == "recording" else _MUTED, warning)
+                last_health = current
             time.sleep(0.2)
         if not self._running:
             return  # the user already pressed Stop; _stop() updated the UI
         self._running = False
-        self._set_button("شروع", _OK)
+        self._set_button(strings.START, _OK)
         error = self._controller.last_error
         if error:
-            self._set_status(f"{STATUS_DOT} خطا", _REC, error)
+            self._set_status(strings.FAILED, _REC, error)
         else:
-            self._set_status(f"{STATUS_DOT} آماده", _MUTED, getattr(self._controller, "health", {}).get("warning", ""))
+            self._set_status(
+                strings.READY,
+                _MUTED,
+                getattr(self._controller, "health", {}).get("warning", ""),
+            )
+
+    # -- the circular controls --------------------------------------------
+
+    def _make_circle(
+        self,
+        parent: Any,
+        diameter: int,
+        command: Callable[[], None],
+        *,
+        text: str = strings.START,
+        fill: str = _OK,
+        text_fill: str = _ON_LIGHT,
+        font: Optional[tuple] = None,
+        tag: str = "toggle",
+        hover_fill: Optional[str] = None,
+        primary: bool = False,
+        glyph: str = "",
+        on_disabled: Optional[Callable[[], None]] = None,
+    ) -> CircleButton:
+        """Build one circle and remember it by its canvas."""
+        button = CircleButton(
+            tk, parent, diameter, command,
+            text=text, fill=fill, text_fill=text_fill, font=font, tag=tag,
+            hover_fill=hover_fill, primary=primary, glyph=glyph,
+            on_disabled=on_disabled, on_blocked=self._explain_disabled_press,
+        )
+        self._circles[button.widget()] = button
+        return button
 
     def _circle_button(
-        self, parent: Any, diameter: int, command: Callable[[], None], *,
-        text: str = "شروع", fill: str = _OK, text_fill: str = _ON_LIGHT,
-        font: Optional[tuple] = None, tag: str = "toggle",
-        hover_fill: Optional[str] = None, remember: bool = False,
-        glyph: str = "", on_disabled: Optional[Callable[[], None]] = None,
-    ) -> "tk.Canvas":
-        """One Canvas circle implementation for primary, secondary and quit.
-
-        Oval, caption and optional glyph share the click tag. A click takes
-        focus and activates; press/release and hover only recolor, with no
-        animation. The dashed focus ring is independent of the 2px state ring.
-        Disabled controls retain guarded feedback, never silently eat a click.
-        All painting is called exclusively by the Tk/mailbox thread.
-        """
-        canvas = tk.Canvas(parent, width=diameter, height=diameter, bg=_BG,
-                           highlightthickness=0, cursor="hand2", takefocus=1)
-        oval = canvas.create_oval(2, 2, diameter - 2, diameter - 2,
-                                  fill=fill, outline=_BORDER, width=2, tags=(tag,))
-        label = canvas.create_text(
-            diameter / 2, diameter * .67 if glyph else diameter / 2,
-            text=text, fill=text_fill, font=font or fonts.font(parent, 12, "bold"),
-            tags=(tag,), width=max(8, diameter - 10), justify="center",
-        )
-        labels = [label]
-        if glyph:
-            labels.append(canvas.create_text(diameter / 2, diameter * .28, text=glyph,
-                          fill=text_fill, font=fonts.font(parent, 11), tags=(tag,)))
-        focus = canvas.create_oval(1, 1, diameter - 1, diameter - 1, fill="",
-                                  outline=_ACCENT, width=1, dash=(2, 2), state="hidden")
-        self._circle_states[canvas] = dict(
-            oval=oval, labels=labels, focus=focus, fill=fill, text_fill=text_fill,
-            hover_fill=hover_fill, hover=False, pressed=False, enabled=True,
-            primary=remember,
-        )
-
-        def activate(_event: object = None) -> None:
-            if self._circle_states[canvas]["enabled"]:
-                command()
-            elif on_disabled is not None:
-                on_disabled()
-            else:
-                self._set_status(f"{STATUS_DOT} برای ادامه، ابتدا عملیات جاری را متوقف کنید", _MUTED)
-
-        def press(_event: object) -> None:
-            canvas.focus_set()
-            self._circle_states[canvas]["pressed"] = True
-            self._paint_circle(canvas)
-            activate()
-
-        def release(_event: object) -> None:
-            self._circle_states[canvas]["pressed"] = False
-            self._paint_circle(canvas)
-
-        def hover(entered: bool) -> None:
-            self._circle_states[canvas]["hover"] = entered
-            if not entered:
-                self._circle_states[canvas]["pressed"] = False
-            if remember:
-                self._toggle_hover = entered
-            self._paint_circle(canvas)
-
-        canvas.tag_bind(tag, "<Button-1>", press)
-        canvas.tag_bind(tag, "<Enter>", lambda _e: hover(True))
-        canvas.tag_bind(tag, "<Leave>", lambda _e: hover(False))
-        canvas.bind("<ButtonRelease-1>", release)
-        canvas.bind("<FocusIn>", lambda _e: canvas.itemconfig(focus, state="normal"))
-        canvas.bind("<FocusOut>", lambda _e: canvas.itemconfig(focus, state="hidden"))
-        canvas.bind("<Destroy>", lambda _e: self._circle_states.pop(canvas, None))
-        canvas.bind("<Return>", activate)
-        canvas.bind("<space>", activate)
-        if remember:
-            self._toggle_oval, self._toggle_text = oval, label
-        return canvas
-
-    def _paint_circle(self, canvas: Any) -> None:
-        state = self._circle_states[canvas]
-        fill = state["fill"]
-        if not state["enabled"]:
-            fill = colors.blend(fill, _BG)
-        elif state["pressed"]:
-            fill = _darken(fill, .8)
-        elif state["hover"]:
-            fill = state["hover_fill"] or _darken(fill)
-        ring = _REC if state["primary"] and state["fill"] == _REC else _BORDER
-        canvas.itemconfig(state["oval"], fill=fill, outline=ring)
-        ink = state["text_fill"] if state["enabled"] else colors.blend(state["text_fill"], _BG)
-        for label in state["labels"]:
-            canvas.itemconfig(label, fill=ink)
+        self, parent: Any, diameter: int, command: Callable[[], None], **kwargs: Any
+    ) -> Any:
+        """`_make_circle` returning the raw canvas, as older callers expect."""
+        return self._make_circle(parent, diameter, command, **kwargs).widget()
 
     def _set_circle_enabled(self, canvas: Any, enabled: bool) -> None:
-        self._circle_states[canvas]["enabled"] = enabled
-        self._circle_states[canvas]["pressed"] = False
-        canvas.config(cursor="hand2" if enabled else "arrow")
-        self._paint_circle(canvas)
+        button = self._circles.get(canvas)
+        if button is not None:
+            button.set_enabled(enabled)
+
+    def _explain_disabled_press(self) -> None:
+        """A disabled press says why, instead of doing nothing."""
+        self._set_status(strings.STOP_BLOCKS_ACTION, _MUTED)
 
     def _paint_toggle(self) -> None:
-        if self._toggle is None:
-            return
-        state = self._circle_states[self._toggle]
-        state["fill"] = self._toggle_color
-        state["hover"] = self._toggle_hover
-        self._paint_circle(self._toggle)
+        if self._toggle_button is not None:
+            self._toggle_button.paint()
 
     def _on_toggle_hover(self, _event: object = None) -> None:
-        self._toggle_hover = True
-        self._paint_toggle()
+        if self._toggle_button is not None:
+            self._toggle_button.set_hovered(True)
 
     def _on_toggle_leave(self, _event: object = None) -> None:
-        self._toggle_hover = False
-        self._paint_toggle()
+        if self._toggle_button is not None:
+            self._toggle_button.set_hovered(False)
 
     def _set_button(self, text: str, color: str) -> None:
         def _() -> None:
             self._toggle_color = color
-            self._paint_toggle()
-            if self._toggle is not None and self._toggle_text is not None:
-                self._toggle.itemconfig(self._toggle_text, text=text, fill=_ON_LIGHT)
+            if self._toggle_button is not None:
+                self._toggle_button.set_style(fill=color, text=text)
 
         self._ui(_, key="button")
 
+    # -- settings actions --------------------------------------------------
+
     def _on_save_settings(self) -> None:
         if self._saving:
-            self._set_status(f"{STATUS_DOT} در حال ذخیره…", _MUTED)
+            self._set_status(strings.SAVING, _MUTED)
             return
         if self._starting or self._running or self._stopping:
-            self._set_status(f"{STATUS_DOT} برای ذخیره، ابتدا ضبط را متوقف کنید", _MUTED)
+            self._set_status(strings.STOP_BLOCKS_SAVE, _MUTED)
             return
         url = self._url_var.get().strip() if self._url_var is not None else ""
         secret = self._secret_var.get().strip() if self._secret_var is not None else ""
         client_id = self._client_id_var.get().strip() if self._client_id_var is not None else ""
         self._saving = True
-        self._set_status(f"{STATUS_DOT} در حال ذخیره...", _MUTED)
+        self._set_status(strings.SAVING_ELLIPSIS, _MUTED)
+
         def save() -> None:
             error = ""
             try:
                 initialize_user_config()
                 save_host_credentials(url, secret, client_id)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - surfaced to the user
                 error = str(exc)
+
             def finish() -> None:
                 self._saving = False
                 if error:
-                    self._set_status(f"{STATUS_DOT} ذخیره نشد", _REC, error)
-                else:
-                    if self._secret_var is not None:
-                        self._secret_var.set("")
-                    # An empty secret field means save_host_credentials kept
-                    # the stored secret; claiming a plain "saved" would
-                    # overstate what happened (A3.5).
-                    self._set_status(
-                        f"{STATUS_DOT} تنظیمات ذخیره شد" if secret else f"{STATUS_DOT} تنظیمات ذخیره شد (کلید قبلی حفظ شد)",
-                        _OK,
-                    )
+                    self._set_status(strings.SAVE_FAILED, _REC, error)
+                    return
+                if self._secret_var is not None:
+                    self._secret_var.set("")
+                # An empty secret field means save_host_credentials kept the
+                # stored secret; claiming a plain "saved" would overstate what
+                # happened (A3.5).
+                self._set_status(
+                    strings.SAVED if secret else strings.SAVED_KEPT_SECRET, _OK
+                )
+
             self._ui(finish, key="save-complete")
+
         threading.Thread(target=save, daemon=True, name="settings-save").start()
 
     def _test_connection(self) -> None:
@@ -743,43 +726,55 @@ class ControlWindow:
             # A stop is in flight, so the stored settings are being torn down
             # with the session; a test here would report on a configuration
             # nobody is about to use. Refuse it AND say so (A3.3).
-            self._set_status(f"{STATUS_DOT} در حال توقف…", _MUTED)
+            self._set_status(strings.STOPPING, _MUTED)
             return
         if self._testing:
-            self._set_status(f"{STATUS_DOT} در حال بررسی اتصال…", _MUTED)
+            self._set_status(strings.TEST_IN_FLIGHT, _MUTED)
             return
         if self._saving:
-            self._set_status(f"{STATUS_DOT} در حال ذخیره…", _MUTED)
+            self._set_status(strings.SAVING, _MUTED)
             return
         if self._starting or self._running:
-            self._set_status(f"{STATUS_DOT} برای بررسی اتصال، ابتدا ضبط را متوقف کنید", _MUTED)
+            self._set_status(strings.STOP_BLOCKS_TEST, _MUTED)
             return
         self._testing = True
-        self._set_status(f"{STATUS_DOT} بررسی تنظیمات ذخیره‌شده...", _MUTED)
+        self._set_status(strings.TESTING, _MUTED)
+
         def check() -> None:
             error = ""
             try:
-                from ..host_client import HostSessionClient
                 from ..config import validate_settings
+                from ..host_client import HostSessionClient
+
                 settings = get_settings()
                 errors = validate_settings(settings)
                 if errors:
                     raise ConfigError("; ".join(errors))
-                HostSessionClient(settings.host_url, settings.host_secret,
-                                  timeout=settings.host_timeout_seconds,
-                                  client_id=settings.host_client_id).fetch_session()
-            except Exception as exc:
+                HostSessionClient(
+                    settings.host_url,
+                    settings.host_secret,
+                    timeout=settings.host_timeout_seconds,
+                    client_id=settings.host_client_id,
+                ).fetch_session()
+            except Exception as exc:  # noqa: BLE001 - surfaced to the user
                 error = str(exc)
+
             def finish() -> None:
                 self._testing = False
-                self._set_status(f"{STATUS_DOT} اتصال ناموفق" if error else f"{STATUS_DOT} دریافت مجوز موفق", _REC if error else _OK, error)
+                self._set_status(
+                    strings.TEST_FAILED if error else strings.TEST_OK,
+                    _REC if error else _OK,
+                    error,
+                )
+
             self._ui(finish, key="connection-test")
+
         threading.Thread(target=check, daemon=True, name="connection-test").start()
 
     def _show_recovery(self) -> None:
         # Explicit review only: never automatically paste into the focused EMR.
         popup = tk.Toplevel(self._root)
-        popup.title("متن بازیابی — فقط در حافظه")
+        popup.title(strings.RECOVERY_TITLE)
         popup.configure(bg=_BG)
         popup.transient(self._root)
         try:
@@ -787,8 +782,10 @@ class ControlWindow:
         except tk.TclError:  # pragma: no cover - no grab without a viewable window
             pass
         popup.bind("<Escape>", lambda _e: popup.destroy())
-        text = tk.Text(popup, wrap="word", width=70, height=16, bg=_SURFACE, fg=_FG,
-                       insertbackground=_FG, relief="flat", font=fonts.font(popup, 9))
+        text = tk.Text(
+            popup, wrap="word", width=70, height=16, bg=_SURFACE, fg=_FG,
+            insertbackground=_FG, relief="flat", font=fonts.font(popup, 9),
+        )
         text.pack(fill="both", expand=True)
         text.insert("1.0", getattr(self._controller, "recovery_text", lambda: "")())
         # Text has no widget-level justify option; a full-range tag is the
@@ -796,20 +793,32 @@ class ControlWindow:
         text.tag_configure("rtl", justify="right")
         text.tag_add("rtl", "1.0", "end")
         text.configure(state="disabled")
-        feedback = tk.Label(popup, text="", bg=_BG, fg=_OK, anchor="e", font=fonts.font(popup, 8))
+        feedback = tk.Label(
+            popup, text="", bg=_BG, fg=_OK, anchor="e", font=fonts.font(popup, 8)
+        )
         feedback.pack(fill="x")
+
         def copy() -> None:
             popup.clipboard_clear()
             popup.clipboard_append(text.get("1.0", "end-1c"))
-            feedback.config(text="کپی شد")
+            feedback.config(text=strings.RECOVERY_COPIED)
+
         actions = tk.Frame(popup, bg=_BG)
         actions.pack(anchor="e", pady=4)
-        self._circle_button(actions, _SECONDARY_DIAMETER, copy, text="کپی", glyph="⧉",
-                            fill=_SURFACE, hover_fill=_BORDER, text_fill=_FG,
-                            font=fonts.font(popup, 8), tag="action").pack(side="right", padx=4)
+        self._make_circle(
+            actions, _SECONDARY_DIAMETER, copy,
+            text=strings.RECOVERY_COPY, glyph=strings.RECOVERY_COPY_GLYPH,
+            fill=_SURFACE, hover_fill=_BORDER, text_fill=_FG,
+            font=fonts.font(popup, 8), tag="action",
+        ).pack(side="right", padx=4)
+
         def clear() -> None:
             getattr(self._controller, "clear_recovery", lambda: None)()
             popup.destroy()
-        self._circle_button(actions, _SECONDARY_DIAMETER, clear, text="پاک‌کردن", glyph="×",
-                            fill=_SURFACE, hover_fill=_BORDER, text_fill=_FG,
-                            font=fonts.font(popup, 8), tag="action").pack(side="right", padx=4)
+
+        self._make_circle(
+            actions, _SECONDARY_DIAMETER, clear,
+            text=strings.RECOVERY_CLEAR, glyph=strings.RECOVERY_CLEAR_GLYPH,
+            fill=_SURFACE, hover_fill=_BORDER, text_fill=_FG,
+            font=fonts.font(popup, 8), tag="action",
+        ).pack(side="right", padx=4)

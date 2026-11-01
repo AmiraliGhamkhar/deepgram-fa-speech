@@ -31,8 +31,16 @@ desktop app ──HTTPS POST /v1/session (client id + secret)──▶ host ─�
 
 | File | Purpose |
 |------|---------|
-| `core.py` | env config, client registry, constant-time auth, token-bucket limiters, async Deepgram grant. No web framework. |
-| `app.py` | FastAPI wiring: HTTPS enforcement, `POST /v1/session`, `/healthz`, `/readyz`, `/metrics`. |
+| `app.py` | composition root and `main()`: builds the app, starts uvicorn. |
+| `core.py` | facade re-exporting the host's business logic, so every caller (and the tests) still import one module. |
+| `config.py` | `HostSettings`, environment parsing, Deepgram regions/TTLs, API-key shape. No web framework. |
+| `identity.py` | hashed client secrets, the client registry, constant-time authentication. |
+| `ratelimit.py` | token-bucket (per client + global) and fixed-window (failed auth) limiters. |
+| `limits.py` | admission control: the five limiters, sized from settings. |
+| `grant.py` | exchanging the host key for a short-lived Deepgram token (sync and async). |
+| `request_guard.py` | HTTPS/`X-Forwarded-Proto` decisions and TTL clamping. |
+| `hardening.py` | security headers, plaintext refusal, `/healthz`, `/readyz`, `/metrics`. |
+| `session_service.py` | the `POST /v1/session` use case: authenticate, limit, cap the body, mint a token. |
 | `metrics.py` | dependency-free counters/gauges/histograms in Prometheus text format. |
 | `provision.py` | mints `client_id` + secret per device; writes only hashes to the registry. |
 | `passenger_wsgi.py` | WSGI entry point for cPanel "Setup Python App" / Passenger; see [`docs/CPANEL_HOSTING.md`](../docs/CPANEL_HOSTING.md). Not used by uvicorn/Docker deployments. |
@@ -87,7 +95,7 @@ the handle you delete to revoke a device, and a field in every log line.
 `str.isalnum()` is Unicode-aware, so a permissive grammar accepts `саfé-01`
 (Cyrillic) as a *different* identity from `safe-01` while looking identical in
 an editor and in `grep` — which is exactly what makes revocation unsafe. The
-same rule is enforced in three places (`host/core.py`, `host/provision.py`,
+same rule is enforced in three places (`host/config.py`, `host/provision.py`,
 `medical_stt/config.py`) and `tests/test_backend_fixes.py::test_all_three_copies_of_the_grammar_agree`
 keeps them in step; an id one accepts and another refuses is a device that can
 never connect, reported as a credential error.

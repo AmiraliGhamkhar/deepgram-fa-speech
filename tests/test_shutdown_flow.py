@@ -136,8 +136,9 @@ def _host_credentials(monkeypatch):
 
 def _build_session(provider: STTProvider, monkeypatch):
     from medical_stt import app as app_module
+    from medical_stt.audio import microphone as microphone_module
 
-    monkeypatch.setattr(app_module, "load_sounddevice", lambda: _FakeSoundDevice)
+    monkeypatch.setattr(microphone_module, "load_sounddevice", lambda: _FakeSoundDevice)
     stt = app_module.LiveMedicalSTT(provider=provider)
     backend = DryRunBackend()
     stt.injector = TextInjector(backend=backend, paste_settle_seconds=0.0)
@@ -255,11 +256,12 @@ def test_send_failure_stops_the_sender_without_losing_the_session(monkeypatch):
 
 
 def test_stop_clears_queued_audio_and_partial_injector_state(monkeypatch):
-    from medical_stt import app as app_module
 
     provider = BlockingProvider()
+    from medical_stt.session import runner as runner_module
+
     stt, _backend = _build_session(provider, monkeypatch)
-    monkeypatch.setattr(app_module, "SENDER_JOIN_TIMEOUT_SECONDS", 0.15)
+    monkeypatch.setattr(runner_module, "SENDER_JOIN_TIMEOUT_SECONDS", 0.15)
     partials_before_reset: list[str] = []
     original_reset = stt.injector.reset_partial
 
@@ -378,10 +380,10 @@ def _threads_named(name: str) -> list:
 
 def _fast_teardown(monkeypatch) -> None:
     """Shorten the join timeouts so a wedged thread is abandoned quickly."""
-    from medical_stt import app as app_module
+    from medical_stt.session import runner as runner_module
 
-    monkeypatch.setattr(app_module, "SENDER_JOIN_TIMEOUT_SECONDS", 0.2)
-    monkeypatch.setattr(app_module, "PROVIDER_JOIN_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(runner_module, "SENDER_JOIN_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(runner_module, "PROVIDER_JOIN_TIMEOUT_SECONDS", 0.2)
 
 
 class WedgedStartProvider(STTProvider):

@@ -60,41 +60,76 @@ path.
 
 ```
 medical_stt/
-├── app.py                 # wires the pipeline; Start/Stop session controller
+├── app.py                 # entry point + public facade (logging, single
+│                          #   instance, first-run config, control window)
+├── diagnostics.py         # logging setup and version reporting
 ├── paths.py               # %APPDATA%\MedicalSTT locations
-├── config.py              # settings + YAML loading & validation, first run
+├── config.py              # public facade over configuration/
+├── configuration/         # Settings model, validation, YAML I/O, catalogs,
+│                          #   first-run bootstrap, secret loading
 ├── host_client.py         # fetches a short-lived session from the host
 ├── app_instance.py        # single-instance mutex
 ├── security/
 │   ├── dpapi.py           # CryptProtectData / CryptUnprotectData via ctypes
 │   └── secret_store.py    # DPAPI-protected local secret storage
 ├── audio/
-│   └── queue.py           # bounded, instrumented audio queue (with drain)
+│   ├── queue.py           # bounded, instrumented audio queue (with drain)
+│   └── microphone.py      # sounddevice device open + error classification
 ├── stt/
 │   ├── base.py            # STTProvider interface + ErrorCategory taxonomy
+│   ├── accumulator.py     # interim/final segments -> one utterance
 │   ├── deepgram_provider.py  # Deepgram via host-issued session tokens
-│   └── reconnect.py        # exponential backoff + retry/no-retry policy
+│   ├── reconnect.py       # exponential backoff + retry/no-retry policy
+│   └── runner.py          # provider loop for one session
+├── session/
+│   ├── dictation.py       # LiveMedicalSTT: one dictation's state, composed
+│   ├── runner.py          # one session's threads and teardown order
+│   ├── supervisor.py      # retry/backoff between sessions
+│   ├── controller.py      # Start/Stop lifecycle, no GUI
+│   ├── transcripts.py     # provider events -> utterances (routing)
+│   ├── renderer.py        # utterance -> injected text (or recovery)
+│   ├── latency.py         # staged timings for one utterance
+│   ├── recovery.py        # in-memory "text that never reached the EMR"
+│   ├── warnings.py        # one visible warning at a time
+│   ├── watchdog.py        # silent-capture detection, keep-alive, threads
+│   ├── audio_health.py    # drop counting and StreamStatus interpretation
+│   ├── messages.py        # user-facing Persian strings
+│   └── runtime.py         # SessionHost protocol between the pieces
 ├── processing/
 │   ├── normalize.py        # Unicode/digit/whitespace normalization
 │   ├── numbers.py           # protects clinical numeric expressions
 │   ├── negation.py          # protects negation/fidelity phrases
 │   ├── fst.py               # deterministic longest-match rewriter
 │   ├── terminology.py       # safety-categorized terminology engine
+│   ├── confidence.py        # low-confidence token warnings
+│   ├── pipeline.py          # the ordered text stages, as one object
 │   └── bidi.py               # logical / display / injected text views
 ├── injection/
 │   ├── backend.py            # InjectionBackend interface + DryRunBackend
 │   ├── _windows_backend.py    # native Win32 SendInput + clipboard
 │   ├── _fallback_backend.py    # pyautogui/pyperclip (Linux/macOS)
+│   ├── strategies.py         # type-vs-paste delivery, chosen once
 │   └── text_injector.py        # delta backspacing + paste orchestration
 └── ui/
     ├── control.py              # floating Start/Stop window (primary UI)
+    ├── circles.py              # the canvas-drawn circular controls
+    ├── strings.py              # every user-visible caption
+    ├── state.py                # persisted window position
+    ├── dispatch.py              # worker-thread -> Tk mailbox
+    ├── fonts.py, colors.py     # DPI-aware fonts, the single palette
     └── overlay.py               # optional floating transcript overlay
 
 host/                       # the self-hosted service (has the API key)
-├── core.py                # env config, client registry, auth, rate limits,
-│                           #   async Deepgram grant
-├── app.py                 # FastAPI wiring (HTTPS, /v1/session, /healthz,
-│                           #   /readyz, /metrics)
+├── app.py                 # composition root + uvicorn entry point
+├── core.py                # facade re-exporting the modules below
+├── config.py              # env config, Deepgram regions/TTLs, key shape
+├── identity.py            # hashed secrets, client registry, constant-time auth
+├── ratelimit.py           # token-bucket + fixed-window limiters
+├── limits.py              # admission control wired from settings
+├── grant.py               # async/sync Deepgram token exchange
+├── request_guard.py       # HTTPS decisions, TTL clamping
+├── hardening.py           # security headers, /healthz, /readyz, /metrics
+├── session_service.py     # the POST /v1/session use case
 ├── metrics.py             # dependency-free counters/gauges/histograms
 ├── provision.py           # mints client_id + secret per device
 ├── requirements.txt       # fastapi, uvicorn, httpx — no Deepgram SDK
@@ -126,6 +161,9 @@ specific walk-throughs:
 - **[`docs/WINDOWS_POWERSHELL.md`](docs/WINDOWS_POWERSHELL.md)** —
   building, installing and troubleshooting the Windows client entirely
   from PowerShell.
+- **[`docs/CODE_REVIEW.md`](docs/CODE_REVIEW.md)** — the SOLID pass over
+  every section: what each module owns now, what was deliberately left long
+  and why.
 
 The short version:
 
@@ -423,7 +461,7 @@ The checked-in `.env.example` documents the same variables
 ```bash
 pytest tests/ -q          # no network, no Windows, no credentials
 ruff check medical_stt tests scripts host
-mypy medical_stt host/core.py
+mypy medical_stt host benchmarks
 ```
 
 The default run includes the 50-client concurrency suite
@@ -914,7 +952,7 @@ GitHub Actions jobs:
 
 - **Test** on Python 3.10/3.11/3.12 (Ubuntu): dependency install, the full
   test suite (everything mocked, no credentials, no network), `ruff` over
-  `medical_stt tests scripts host`, `mypy medical_stt host/core.py`.
+  `medical_stt tests scripts host`, `mypy medical_stt host benchmarks`.
 - **Host service tests** (Ubuntu): `tests/test_host_service.py` and
   `tests/test_host_client.py` without any Deepgram key.
 - **Windows platform checks** (`windows-latest`): the platform tests plus

@@ -1011,7 +1011,14 @@ def test_recovery_text_has_right_justified_tag_and_shared_font(monkeypatch):
 
 
 def test_status_dot_is_centralized():
+    """One definition, in the strings catalog, and no copies elsewhere."""
     from pathlib import Path
-    source = Path(control.__file__).read_text()
+
+    from medical_stt.ui import strings
+
+    catalog = Path(strings.__file__).read_text()
+    control_source = Path(control.__file__).read_text()
     assert control.STATUS_DOT == '●'
-    assert source.count('●') + source.count(r'\u25cf') == 1
+    assert strings.STATUS_DOT == '●'
+    assert catalog.count('●') + catalog.count(r'\u25cf') == 1
+    assert control_source.count('●') + control_source.count(r'\u25cf') == 0

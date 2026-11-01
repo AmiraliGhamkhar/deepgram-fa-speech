@@ -13,10 +13,27 @@ The desktop client then opens its WebSocket straight to Deepgram with
 Deepgram's "Token-Based Auth" guide. That keeps the audio path low
 latency while the long-lived API key never leaves this host.
 
+Where the pieces live
+---------------------
+============================  ===============================================
+`core`                        facade over the host's business logic
+`config`                      settings, environment parsing, Deepgram setup
+`identity`, `ratelimit`       who you are, and how often you may ask
+`limits`                      admission control: per-client, global, in-flight
+`grant`                       the Deepgram token exchange (sync and async)
+`request_guard`               HTTPS decisions and TTL clamping
+`hardening`                   security headers, plaintext refusal, probes
+`session_service`             the `/v1/session` use case
+============================  ===============================================
+
+This module is only the composition root: it builds those objects, hands them
+the app's shared state, and starts uvicorn. Kept small on purpose -- everything
+here is wiring, and everything that is not wiring has a module of its own.
+
 Concurrency model
 -----------------
 The host issues *tokens only*; it never carries audio. Scaling to 50
-concurrent clinicians therefore needs three things, all here:
+concurrent clinicians therefore needs three things, all wired below:
 
 1. **No blocking I/O on the event loop.** The Deepgram grant goes through
    a single reused `httpx.AsyncClient` (`core.AsyncGrantClient`) with
@@ -36,144 +53,87 @@ for local development.
 """
 from __future__ import annotations
 
+import ipaddress
 import logging
-import asyncio
-import json
 import os
 import re
-import ipaddress
-import time
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Optional
 
 from fastapi import FastAPI, Header, Request
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse
 
 try:  # allows `python host/app.py` from a checkout
-    from .core import (
-        AsyncGrantClient,
-        ConfigurationError,
-        GrantError,
-        HostSettings,
-        RateLimiter,
-        TokenBucketRateLimiter,
-        auth_failure_key,
-        authenticate_client,
-        grant_session_async,
-        new_session_id,
-        normalize_ttl,
-        request_is_secure,
-    )
+    from .config import ConfigurationError, HostSettings
+    from .core import AsyncGrantClient, grant_session_async
+    from .hardening import SECURITY_HEADERS, install_hardening, install_ops_routes
+    from .hardening import token_matches as _token_matches
+    from .limits import Limiters
     from .metrics import new_metrics
+    from .session_service import SessionService
 except ImportError:  # pragma: no cover - direct script execution
-    from core import (  # type: ignore[no-index]
-        AsyncGrantClient,
-        ConfigurationError,
-        GrantError,
-        HostSettings,
-        RateLimiter,
-        TokenBucketRateLimiter,
-        auth_failure_key,
-        authenticate_client,
-        grant_session_async,
-        new_session_id,
-        normalize_ttl,
-        request_is_secure,
+    from config import ConfigurationError, HostSettings  # type: ignore[no-index]
+    from core import AsyncGrantClient, grant_session_async  # type: ignore[no-index]
+    from hardening import (  # type: ignore[no-index]
+        SECURITY_HEADERS,
+        install_hardening,
+        install_ops_routes,
     )
+    from hardening import token_matches as _token_matches  # type: ignore[no-index]
+    from limits import Limiters  # type: ignore[no-index]
     from metrics import new_metrics  # type: ignore[no-index]
+    from session_service import SessionService  # type: ignore[no-index]
 
 log = logging.getLogger("medical_stt.host")
+
+#: `SECURITY_HEADERS` and `_token_matches` are re-exported for the tests that
+#: assert the hardening headers and the constant-time comparison directly; they
+#: are owned by `hardening`.
+__all__ = [
+    "CLIENT_ID_HEADER",
+    "SECURITY_HEADERS",
+    "create_app",
+    "main",
+    "_token_matches",
+]
 
 #: Header carrying the provisioned client id. Not a credential on its own:
 #: the secret in `Authorization` is what authenticates.
 CLIENT_ID_HEADER = "X-Client-Id"
 
-#: Security headers added to every response. Conservative and safe for a
-#: JSON API with no HTML surface: `nosniff` and a deny-all frame policy.
-_SECURITY_HEADERS = {
-    "X-Content-Type-Options": "nosniff",
-    "X-Frame-Options": "DENY",
-    "Cache-Control": "no-store",
-    "Referrer-Policy": "no-referrer",
-}
 
+async def _grant(settings: HostSettings, ttl: int, client: Any) -> Any:
+    """Resolve the module-level grant function at call time.
 
-class _InflightLimiter:
-    """Bounded semaphore for concurrent upstream grants.
-
-    50 simultaneous token requests must all be servable, but an unbounded
-    number of them must not be allowed to pile up if Deepgram slows down:
-    each one holds a response object and a socket. Past the cap the host
-    returns 503 immediately -- an explicit, controlled error rather than a
-    silent queue that grows without limit.
+    Deliberately indirect: `grant_session_async` is the single seam tests and
+    operators replace, and a direct reference captured by the closure would
+    bind it at import time.
     """
-
-    def __init__(self, capacity: int) -> None:
-        self._capacity = max(1, capacity)
-        self._in_flight = 0
-
-    @property
-    def in_flight(self) -> int:
-        return self._in_flight
-
-    @property
-    def capacity(self) -> int:
-        return self._capacity
-
-    def acquire(self) -> bool:
-        if self._in_flight >= self._capacity:
-            return False
-        self._in_flight += 1
-        return True
-
-    def release(self) -> None:
-        if self._in_flight > 0:
-            self._in_flight -= 1
+    return await grant_session_async(settings, ttl, client)
 
 
-def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
-    """Build the ASGI app. Settings come from the environment by default."""
-    resolved = settings or HostSettings.from_env()
-    metrics = new_metrics()
-    registry = resolved.build_client_registry()
+def _publish_capacity(
+    metrics: Any, settings: HostSettings, registry: Any, limiters: Limiters
+) -> None:
+    """Publish capacity facts as soon as the app exists.
 
-    # Per-client: generous and burst tolerant, so 50 colleagues starting at
-    # once all succeed and only a genuinely looping client is throttled.
-    client_limiter = TokenBucketRateLimiter(
-        capacity=resolved.client_burst,
-        refill_per_second=resolved.client_rate_limit_requests / resolved.rate_limit_window_seconds,
-    )
-    # Global ceiling: protects the host from the aggregate, while staying far
-    # above the 50-concurrent-session target.
-    global_limiter = TokenBucketRateLimiter(
-        capacity=resolved.global_burst,
-        refill_per_second=resolved.global_rate_limit_requests / resolved.rate_limit_window_seconds,
-    )
-    # Failed authentication is keyed on IP on purpose: it is abuse, not
-    # legitimate traffic, so a shared NAT address must not exempt it.
-    auth_failure_limiter = RateLimiter(
-        limit=resolved.auth_failure_limit,
-        window_seconds=resolved.rate_limit_window_seconds,
-    )
-    inflight = _InflightLimiter(min(resolved.max_inflight_grants, resolved.grant_max_connections))
-    active = _InflightLimiter(resolved.max_active_requests)
-
-    #: One-shot flag, so a deployment that cannot attribute failed
-    #: authentication is reported once instead of on every rejected request.
-    unattributable_failure_warned = [False]
-
-    # Capacity facts, published as soon as the app exists rather than in
-    # `lifespan`: a WSGI deployment (host/passenger_wsgi.py, via a2wsgi) never
-    # runs the ASGI lifespan protocol, so anything set only there would read
-    # as a permanent zero on cPanel.
-    metrics.set_gauge("inflight_grants_capacity", inflight.capacity)
+    Not in `lifespan`: a WSGI deployment (host/passenger_wsgi.py, via a2wsgi)
+    never runs the ASGI lifespan protocol, so anything set only there would
+    read as a permanent zero on cPanel.
+    """
+    metrics.set_gauge("inflight_grants_capacity", limiters.inflight.capacity)
     metrics.set_gauge("registry_clients", len(registry))
-    metrics.set_gauge("inflight_grants", inflight.in_flight)
+    metrics.set_gauge("inflight_grants", limiters.inflight.in_flight)
 
-    if not resolved.metrics_admin_token:
-        # Not fatal -- a loopback-only or proxy-shielded deployment may
-        # reasonably leave it open -- but it is a fact an operator should see
-        # once at startup rather than discover from a scrape in the wild.
+
+def _log_deployment_warnings(settings: HostSettings) -> None:
+    """Say the two things an operator must know but cannot infer.
+
+    Both are supported configurations, so neither is fatal -- but each turns
+    into a bug report ("the service is at capacity", "metrics are public")
+    if nobody ever says it out loud at startup.
+    """
+    if not settings.metrics_admin_token:
         log.warning(
             "HOST_METRICS_ADMIN_TOKEN is not set: /metrics is readable by "
             "anyone who can reach this port. It exposes no credential and no "
@@ -181,39 +141,47 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
             "registered clients."
         )
 
-    if not resolved.clients_file:
-        # Same reasoning as the two warnings above: legacy mode is a supported
-        # single-clinician configuration, and the docs say it is not a
-        # multi-clinician one -- but nothing in the runtime ever said so. With
-        # one identity, every device on the site shares a *single* token
-        # bucket, so 50 clinicians pressing Start at once get 10 tokens and 40
-        # 429s, and the sustained ceiling is `client_rate_limit_requests`
-        # requests per window for the whole clinic. That reads to the clinicians
-        # as "the service is at capacity" and to nobody as a configuration
-        # mistake, which is exactly the trap this file refuses to leave silent.
-        log.warning(
-            "running in single-identity (legacy) mode: HOST_CLIENTS_FILE is not "
-            "set, so every device is rate limited as one shared identity -- at "
-            "most %d burst and %d sustained requests per %ds across the whole "
-            "site. One clinician is fine; a clinic is not. Provision per-device "
-            "credentials (python -m host.provision --count N --out "
-            "/secure/host/clients.txt) and set HOST_CLIENTS_FILE. Revoking one "
-            "device also revokes everything else while in this mode. Devices "
-            "that send X-Client-Id cannot authenticate at all here -- the id "
-            "resolves to a registry entry that does not exist -- so a clinic "
-            "that provisions ids on the clients before setting "
-            "HOST_CLIENTS_FILE on the host sees only 401s; the 401 detail "
-            "names this trap.",
-            resolved.client_burst, resolved.client_rate_limit_requests,
-            resolved.rate_limit_window_seconds,
-        )
+    if settings.clients_file:
+        return
+    # Single-identity mode is a supported single-clinician configuration, and
+    # the docs say it is not a multi-clinician one -- but nothing in the
+    # runtime ever said so. With one identity, every device on the site shares
+    # a *single* token bucket, so 50 clinicians pressing Start at once get 10
+    # tokens and 40 429s. That reads to the clinicians as "the service is at
+    # capacity" and to nobody as a configuration mistake, which is exactly the
+    # trap this warning refuses to leave silent.
+    log.warning(
+        "running in single-identity (legacy) mode: HOST_CLIENTS_FILE is not "
+        "set, so every device is rate limited as one shared identity -- at "
+        "most %d burst and %d sustained requests per %ds across the whole "
+        "site. One clinician is fine; a clinic is not. Provision per-device "
+        "credentials (python -m host.provision --count N --out "
+        "/secure/host/clients.txt) and set HOST_CLIENTS_FILE. Revoking one "
+        "device also revokes everything else while in this mode. Devices "
+        "that send X-Client-Id cannot authenticate at all here -- the id "
+        "resolves to a registry entry that does not exist -- so a clinic "
+        "that provisions ids on the clients before setting "
+        "HOST_CLIENTS_FILE on the host sees only 401s; the 401 detail "
+        "names this trap.",
+        settings.client_burst,
+        settings.client_rate_limit_requests,
+        settings.rate_limit_window_seconds,
+    )
+
+
+def _build_lifespan(settings: HostSettings, registry: Any) -> Any:
+    """Startup/shutdown hooks: log the shape, then release the pool."""
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         log.info(
-            "host ready: clients=%d client_burst=%d global_burst=%d max_inflight=%d deepgram_region=%s",
-            len(registry), resolved.client_burst, resolved.global_burst, resolved.max_inflight_grants,
-            resolved.deepgram_region,
+            "host ready: clients=%d client_burst=%d global_burst=%d "
+            "max_inflight=%d deepgram_region=%s",
+            len(registry),
+            settings.client_burst,
+            settings.global_burst,
+            settings.max_inflight_grants,
+            settings.deepgram_region,
         )
         try:
             yield
@@ -222,15 +190,28 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
             await app.state.grant_client.aclose()
             log.info("host shut down cleanly (closed the Deepgram connection pool)")
 
+    return lifespan
+
+
+def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
+    """Build the ASGI app. Settings come from the environment by default."""
+    resolved = settings or HostSettings.from_env()
+    metrics = new_metrics()
+    registry = resolved.build_client_registry()
+    limiters = Limiters.from_settings(resolved)
+
+    _publish_capacity(metrics, resolved, registry, limiters)
+    _log_deployment_warnings(resolved)
+
     app = FastAPI(
         title="Medical STT host",
         version="2.0.0",
-        docs_url=None,   # no interactive docs on a credentialed service
+        docs_url=None,  # no interactive docs on a credentialed service
         redoc_url=None,
         # Without this, /openapi.json stays public and enumerates the whole
         # API surface even though both doc UIs are disabled.
         openapi_url=None,
-        lifespan=lifespan,
+        lifespan=_build_lifespan(resolved, registry),
     )
     # Built here rather than in `lifespan` so the app is usable even when a
     # caller drives the ASGI app without running startup/shutdown (the test
@@ -249,388 +230,27 @@ def create_app(settings: Optional[HostSettings] = None) -> FastAPI:
     app.state.registry = registry
     # Exposed for the concurrency/soak tests to assert that limiter state
     # stays bounded, and for operational introspection.
-    app.state.client_limiter = client_limiter
-    app.state.global_limiter = global_limiter
-    app.state.auth_failure_limiter = auth_failure_limiter
-    app.state.inflight = inflight
-    app.state.active_requests = active
+    app.state.client_limiter = limiters.client
+    app.state.global_limiter = limiters.global_
+    app.state.auth_failure_limiter = limiters.auth_failure
+    app.state.inflight = limiters.inflight
+    app.state.active_requests = limiters.active
 
-    @app.middleware("http")
-    async def harden(request: Request, call_next: Any) -> Any:
-        """Refuse plaintext requests and add security headers.
+    install_hardening(app, resolved, metrics, limiters.active)
+    install_ops_routes(app, resolved, metrics)
 
-        `X-Forwarded-Proto` is honoured only when the immediate peer is a
-        configured reverse proxy (`HOST_FORWARDED_ALLOW_IPS`, loopback by
-        default), so a direct HTTP client cannot forge the header to make a
-        plaintext request look like TLS.
-        """
-        is_session = request.url.path == "/v1/session" and request.method == "POST"
-        admitted = False
-        started = time.monotonic()
-        outcome = "499"  # client closed request; conventional numeric status, not an HTTP response
-        if is_session:
-            metrics.increment("session_http_requests_total")
-        try:
-            peer_host = request.client.host if request.client else None
-            secure = request_is_secure(request.url.scheme, peer_host,
-                                       request.headers.get("x-forwarded-proto"), resolved)
-            if not secure and not resolved.allow_http:
-                response: Any = JSONResponse({"detail": "HTTPS is required"}, status_code=400)
-            elif is_session and not active.acquire():
-                response = JSONResponse({"detail": "host request capacity reached"}, status_code=503,
-                                        headers={"Retry-After": "1"})
-            else:
-                admitted = is_session
-                metrics.set_gauge("active_session_requests", active.in_flight)
-                response = await call_next(request)
-            outcome = str(response.status_code)
-            for header, value in _SECURITY_HEADERS.items():
-                response.headers.setdefault(header, value)
-            return response
-        except Exception:
-            outcome = "500"
-            raise
-        finally:
-            if admitted:
-                active.release()
-            if is_session:
-                metrics.set_gauge("active_session_requests", active.in_flight)
-                metrics.increment("session_http_outcomes_total", status=outcome)
-                metrics.observe("session_http_latency", time.monotonic() - started)
-
-    @app.exception_handler(Exception)
-    async def unhandled_exception(request: Request, exc: Exception) -> JSONResponse:
-        """Unhandled 500s carry the security headers too.
-
-        Starlette's ServerErrorMiddleware is the outermost layer and builds
-        the 500 response itself, so the `harden` middleware's re-raise path
-        skipped its own header loop for exactly the responses an incident
-        produces. No exception detail crosses the wire.
-        """
-        log.error("unhandled host error (%s)", type(exc).__name__)
-        return JSONResponse(
-            {"detail": "internal error"}, status_code=500, headers=dict(_SECURITY_HEADERS)
-        )
-
-    @app.get("/healthz")
-    async def healthz() -> dict:
-        return {"status": "ok"}
-
-    @app.get("/readyz")
-    async def readyz(request: Request) -> Any:
-        """Readiness: is the Deepgram pool initialized?
-
-        Deliberately not authenticated -- a load balancer must be able to
-        probe it -- so it reports only a boolean.
-        """
-        grant_client = getattr(request.app.state, "grant_client", None)
-        ready = grant_client is not None and not grant_client.closed
-        return JSONResponse({"status": "ready" if ready else "starting"}, status_code=200 if ready else 503)
-
-    @app.get("/metrics")
-    async def prometheus_metrics(request: Request, authorization: Optional[str] = Header(default=None)) -> Any:
-        """Operational metrics. Requires the admin token when one is set.
-
-        Counters and durations only: no token, secret, client credential or
-        transcript ever reaches this registry.
-        """
-        if resolved.metrics_admin_token:
-            if not _token_matches(authorization, resolved.metrics_admin_token):
-                # Counted separately from `auth_failures_total`: a scraper
-                # with a stale token must not look like somebody brute
-                # forcing session credentials.
-                metrics.increment("metrics_auth_failures_total")
-                return JSONResponse({"detail": "invalid credentials"}, status_code=401)
-        return PlainTextResponse(
-            request.app.state.metrics.render(), media_type="text/plain; version=0.0.4"
-        )
+    sessions = SessionService(resolved, registry, metrics, limiters, _grant)
 
     @app.post("/v1/session")
     async def create_session(
         request: Request,
         authorization: Optional[str] = Header(default=None),
         x_client_id: Optional[str] = Header(default=None, alias=CLIENT_ID_HEADER),
-    ) -> Any:
-        # `None` when the server supplied no peer address (a WSGI/Passenger
-        # environ without REMOTE_PORT, for example); never a placeholder that
-        # would silently merge every such request into one bucket.
-        peer = request.client.host if request.client else None
-
-        # -- abuse guard: a locked-out identity is refused without any work ---
-        identity = authenticate_client(authorization, x_client_id, registry)
-        auth_key = auth_failure_key(peer, x_client_id)
-        if identity is None and auth_key is not None:
-            locked, lock_retry_after = auth_failure_limiter.is_locked(auth_key)
-            if locked:
-                metrics.increment("rate_limited_total")
-                return JSONResponse(
-                    {"detail": "too many failed authentication attempts"},
-                    status_code=429,
-                    headers={"Retry-After": str(lock_retry_after)},
-                )
-
-        if identity is None:
-            # Charge the brute-force budget *only* on a real failure.
-            # Charging every request would make a hospital's 50 legitimate
-            # colleagues exhaust each other's budget on a shared NAT address,
-            # which is precisely the bug this work fixes.
-            retry_after = 0
-            if auth_key is not None:
-                _allowed, retry_after = auth_failure_limiter.allow(auth_key)
-            elif not unattributable_failure_warned[0]:
-                # Said once, not per request: this is a deployment property,
-                # not something the caller can act on each time.
-                unattributable_failure_warned[0] = True
-                log.warning(
-                    "failed authentication cannot be attributed to a peer "
-                    "address or a client id, so no brute-force lockout is "
-                    "applied to it (authentication is still enforced). Run "
-                    "behind a server that supplies REMOTE_ADDR/REMOTE_PORT, or "
-                    "provision client ids, to re-enable the lockout."
-                )
-            metrics.increment("auth_failures_total")
-            # Never log the presented credential or the client id.
-            log.warning(
-                "rejected unauthenticated session request from %s", peer or "unknown"
-            )
-            headers = {"Retry-After": str(retry_after)} if retry_after else None
-            detail = "invalid credentials"
-            if x_client_id and not resolved.clients_file:
-                # The un-migrated-deployment trap: this host has exactly one
-                # shared-secret identity, so a presented client id resolves
-                # to a registry entry that does not exist and the correct
-                # secret still 401s. Name the trap so the operator can fix
-                # the deployment instead of rotating a good secret. This
-                # reveals nothing about which ids exist -- in this mode the
-                # answer is "none beyond the shared one" by definition.
-                detail = (
-                    "invalid credentials: this host uses a single shared secret "
-                    "and does not accept a client id (X-Client-Id); clear the "
-                    "device id in the client, or provision per-device "
-                    "identities and set HOST_CLIENTS_FILE"
-                )
-            return JSONResponse(
-                {"detail": detail}, status_code=401, headers=headers
-            )
-
-        # Counted only for authenticated callers: brute-force noise must not
-        # inflate the session-start metric.
-        metrics.increment("session_starts_total")
-
-        def record_failure(outcome: str) -> None:
-            """Charge an authenticated request that minted no token.
-
-            Every `return` past `session_starts_total` must go through here (or
-            through the success path), so that `session_success_total` plus
-            `session_failures_total` always equals `session_starts_total`. When
-            they do not reconcile, an operator reading `/metrics` during an
-            incident cannot tell "no traffic" from "all traffic failing", which
-            is the only question this service's metrics exist to answer.
-
-            `outcome` is a fixed, small vocabulary (never a raw client value)
-            and `client_id` is the *authenticated* id, so the per-client series
-            cannot be inflated by fabricated ids -- `Metrics` folds anything
-            past `MAX_LABELLED_CLIENTS` into `other` regardless.
-
-            A client that disconnects mid-request surfaces as
-            `asyncio.CancelledError` -- a `BaseException`, so no
-            `except Exception` sees it. The two await points below catch it
-            explicitly, record outcome `cancelled`, and re-raise: the
-            request produced no token, so the invariant counts it as a
-            failure exactly like the refusals.
-            """
-            metrics.increment("session_failures_total")
-            metrics.increment(
-                "session_requests_by_client_total", client_id=identity.client_id, outcome=outcome
-            )
-
-        session_id: Optional[str] = None
-
-        def refuse(status_code: int, detail: str, outcome: str,
-                   headers: Optional[dict] = None) -> JSONResponse:
-            """`record_failure` plus the JSON error response for that outcome."""
-            record_failure(outcome)
-            if session_id is not None:
-                log.error("session_error session_id=%s reason=%s status=%d", session_id, outcome, status_code)
-            return JSONResponse({"detail": detail}, status_code=status_code, headers=headers)
-
-        # -- layered rate limits, keyed on identity, not on the NAT IP ----
-        # Global first: a request the global ceiling refuses must not also
-        # burn one of the client's own tokens. With the old order, global
-        # saturation drained every client's personal budget on requests
-        # that were never going to be served anyway.
-        allowed, retry_after = global_limiter.allow("global")
-        if allowed:
-            allowed, retry_after = client_limiter.allow(f"client:{identity.client_id}")
-        if not allowed:
-            metrics.increment("rate_limited_total")
-            log.warning(
-                "rate limit hit client_id=%s peer=%s retry_after=%ds",
-                identity.client_id, peer or "unknown", retry_after,
-            )
-            return refuse(
-                429, "too many session requests", "rate_limited",
-                headers={"Retry-After": str(retry_after)},
-            )
-
-        # -- bounded request body ----------------------------------------
-        #
-        # The declared length is refused before reading anything, and the
-        # body itself is read *in chunks* with the same cap applied while
-        # streaming. `await request.body()` would buffer an entire chunked
-        # request (which declares no Content-Length) before the size check
-        # could run, so any authenticated client could exhaust host memory
-        # with `Transfer-Encoding: chunked` and take the shared token
-        # service down for every clinician. Chunk-by-chunk, the connection
-        # is aborted at the cap instead.
-        declared = request.headers.get("content-length")
-        if declared is not None:
-            try:
-                over_cap = int(declared) > resolved.max_request_body_bytes
-            except ValueError:
-                return refuse(400, "invalid request", "invalid_request")
-            if over_cap:
-                metrics.increment("request_body_rejections_total")
-                log.warning("session refused reason=declared_body_over_cap bytes=%s", declared)
-                return refuse(413, "request body too large", "body_too_large")
-
-        session_id = new_session_id()
-        log.info("session_started session_id=%s client_id=%s", session_id, identity.client_id)
-
-        async def read_body() -> bytes:
-            raw = bytearray()
-            async for chunk in request.stream():
-                if len(raw) + len(chunk) > resolved.max_request_body_bytes:
-                    raise OverflowError("body cap")
-                raw.extend(chunk)
-            return bytes(raw)
-
-        try:
-            raw = await asyncio.wait_for(read_body(), resolved.request_body_timeout_seconds)
-        except asyncio.TimeoutError:
-            metrics.increment("request_body_rejections_total")
-            return refuse(408, "request body timed out", "body_timeout")
-        except OverflowError:
-            metrics.increment("request_body_rejections_total")
-            return refuse(413, "request body too large", "body_too_large")
-        except asyncio.CancelledError:
-            # Client disconnected mid-body: counted, then re-raised so the
-            # cancellation still unwinds normally.
-            record_failure("cancelled")
-            log.info("session_error session_id=%s reason=cancelled", session_id)
-            raise
-        except Exception:
-            return refuse(400, "incomplete request body", "incomplete_body")
-        try:
-            body = json.loads(raw) if raw else {}
-            if not isinstance(body, dict):
-                raise ValueError("object required")
-            requested = body.get("ttl_seconds")
-            if requested is not None and (type(requested) is not int or not 5 <= requested <= resolved.max_ttl_seconds):
-                raise ValueError("invalid TTL")
-        except (ValueError, UnicodeError, RecursionError, OverflowError):
-            return refuse(
-                422, "ttl_seconds must be a bounded integer in a JSON object", "invalid_request"
-            )
-        ttl = normalize_ttl(requested, resolved)
-
-        if not inflight.acquire():
-            # Explicit controlled error, not a silent drop and not an
-            # unbounded wait for a Deepgram slot.
-            metrics.increment("grant_capacity_rejections_total")
-            return refuse(
-                503, "host is at capacity, retry shortly", "upstream_saturated",
-                headers={"Retry-After": "1"},
-            )
-
-        started = time.monotonic()
-        metrics.increment("token_requests_total")
-        metrics.set_gauge("inflight_grants", inflight.in_flight)
-        try:
-            try:
-                token, expires_in = await asyncio.wait_for(
-                    grant_session_async(resolved, ttl, request.app.state.grant_client),
-                    timeout=resolved.grant_deadline_seconds,
-                )
-            except asyncio.TimeoutError as exc:
-                raise GrantError("Deepgram grant deadline exceeded", 504) from exc
-        except GrantError as exc:
-            elapsed = time.monotonic() - started
-            metrics.observe("token_request_latency", elapsed)
-            metrics.increment("token_request_failures_total")
-            if exc.status in (503, 504):
-                # Upstream unreachable or too slow: an operator problem with
-                # Deepgram, as opposed to a 502 (our own key is wrong) or a
-                # 429 we shed ourselves.
-                metrics.increment("deepgram_connection_failures_total")
-            # The message never contains the Deepgram key or its body.
-            return refuse(
-                exc.status, str(exc), "upstream_error",
-                headers={"Retry-After": str(exc.retry_after)} if exc.retry_after else None,
-            )
-        except asyncio.CancelledError:
-            # Client disconnected mid-grant (or the server is shutting
-            # down). `CancelledError` is a BaseException: without this
-            # handler the request vanished from both counters and
-            # success + failures stopped equalling starts.
-            metrics.observe("token_request_latency", time.monotonic() - started)
-            metrics.increment("token_request_failures_total")
-            record_failure("cancelled")
-            log.info("session_error session_id=%s reason=cancelled", session_id)
-            raise
-        except Exception as exc:  # noqa: BLE001 - the grant path must reconcile
-            # `core.grant_session_async` maps every known upstream failure onto
-            # `GrantError`, so reaching here means an unexpected internal
-            # fault. It is still a request that produced no token: record it
-            # that way before letting the framework turn it into a 500. A
-            # failure the counters do not see is indistinguishable, on
-            # `/metrics`, from a host that nobody is calling.
-            metrics.observe("token_request_latency", time.monotonic() - started)
-            metrics.increment("token_request_failures_total")
-            record_failure("internal_error")
-            log.error("session_error session_id=%s reason=unexpected (%s)", session_id, type(exc).__name__)
-            raise
-        finally:
-            inflight.release()
-            metrics.set_gauge("inflight_grants", inflight.in_flight)
-
-        elapsed = time.monotonic() - started
-        metrics.observe("token_request_latency", elapsed)
-        metrics.increment("session_success_total")
-        metrics.increment(
-            "session_requests_by_client_total", client_id=identity.client_id, outcome="ok"
-        )
-        log.info("token_issued session_id=%s client_id=%s", session_id, identity.client_id)
-
-        return JSONResponse(
-            {
-                "access_token": token,
-                "expires_in": expires_in,
-                "session_id": session_id,
-                "client_id": identity.client_id,
-            }
-        )
+    ) -> JSONResponse:
+        """Exchange device credentials for a short-lived Deepgram token."""
+        return await sessions.create_session(request)
 
     return app
-
-
-def _token_matches(authorization: Optional[str], expected: str) -> bool:
-    """Constant-time admin-token comparison for `/metrics`.
-
-    `hmac.compare_digest` raises `TypeError` on non-ASCII input, so both
-    sides are compared as UTF-8 bytes: a caller who sends a non-ASCII
-    bearer token gets 401, never a 500.
-    """
-    import hmac
-
-    if not authorization:
-        return False
-    scheme, _, presented = authorization.partition(" ")
-    if scheme.strip().lower() != "bearer":
-        return False
-    return hmac.compare_digest(
-        presented.strip().encode("utf-8"), expected.encode("utf-8")
-    )
 
 
 # Fail fast at import if the Deepgram key is absent: this service has no
@@ -641,6 +261,64 @@ except ConfigurationError as _exc:  # pragma: no cover - misconfiguration path
     raise SystemExit(f"host configuration error: {_exc}") from _exc
 
 
+def _parse_bind(raw: str) -> bool:
+    """True if `HOST_BIND` is an IP address or a plausible hostname."""
+    host = raw.strip()
+    if not host:
+        return False
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        return len(host) <= 253 and all(
+            re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label)
+            for label in host.rstrip(".").split(".")
+        )
+
+
+def _parse_port(raw: str) -> Optional[int]:
+    """Parse `HOST_PORT`, logging (not raising) on an unusable value.
+
+    A bare `int()` traceback reads like a crash in the service rather than a
+    typo in one environment variable, and it is the first thing an operator
+    hits when a panel rewrites `HOST_PORT` to `""` or `"8443 "`.
+    """
+    try:
+        port = int(raw)
+    except ValueError:
+        log.error("HOST_PORT must be an integer; got %r", raw)
+        return None
+    if not 1 <= port <= 65535:
+        log.error("HOST_PORT must be between 1 and 65535; got %d", port)
+        return None
+    return port
+
+
+def _warn_about_tls(settings: HostSettings, certfile: str) -> None:
+    """Explain what plaintext serving means, once, before uvicorn starts."""
+    if certfile:
+        return
+    if settings.allow_http:
+        log.warning("HOST_ALLOW_HTTP is set: serving plaintext (development only)")
+        return
+    # Not fatal, and not a misconfiguration in the common case: a reverse proxy
+    # that terminates TLS and forwards X-Forwarded-Proto from an address in
+    # HOST_FORWARDED_ALLOW_IPS is exactly how this is meant to be deployed
+    # behind Apache or a load balancer. But when there is no such proxy the app
+    # rejects every request with 400 and the container healthcheck fails
+    # forever, which looks like a hung service rather than a missing
+    # certificate -- so say which it is, once, at startup.
+    log.warning(
+        "no TLS certificate (HOST_TLS_CERTFILE) and HOST_ALLOW_HTTP is not set: "
+        "this process serves plaintext while the app requires HTTPS, so every "
+        "request will be rejected with 400 unless a trusted reverse proxy "
+        "terminates TLS and sends X-Forwarded-Proto: https from an address in "
+        "HOST_FORWARDED_ALLOW_IPS (currently %s). Without such a proxy, set "
+        "HOST_TLS_CERTFILE/HOST_TLS_KEYFILE.",
+        ",".join(settings.forwarded_allow_ips) or "<none>",
+    )
+
+
 def main() -> int:  # pragma: no cover - operational entry point
     """Run the service. TLS is provided by uvicorn's cert files."""
     import uvicorn
@@ -649,53 +327,15 @@ def main() -> int:  # pragma: no cover - operational entry point
     # Import-time create_app already validated settings and emitted warnings.
     settings = app.state.settings
     host = os.getenv("HOST_BIND", "0.0.0.0").strip()
-    try:
-        ipaddress.ip_address(host)
-        valid_bind = True
-    except ValueError:
-        valid_bind = bool(host) and len(host) <= 253 and all(
-            re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label)
-            for label in host.rstrip(".").split(".")
-        )
-    if not valid_bind:
+    if not _parse_bind(host):
         log.error("HOST_BIND must be a non-empty IP address or hostname")
         return 2
-    raw_port = os.getenv("HOST_PORT", "8443").strip()
-    try:
-        port = int(raw_port)
-    except ValueError:
-        # A bare int() traceback here reads like a crash in the service rather
-        # than a typo in one environment variable, and it is the first thing
-        # an operator hits when a panel rewrites HOST_PORT to "" or "8443 ".
-        log.error("HOST_PORT must be an integer; got %r", raw_port)
-        return 2
-    if not 1 <= port <= 65535:
-        log.error("HOST_PORT must be between 1 and 65535; got %d", port)
+    port = _parse_port(os.getenv("HOST_PORT", "8443").strip())
+    if port is None:
         return 2
     certfile = os.getenv("HOST_TLS_CERTFILE", "")
     keyfile = os.getenv("HOST_TLS_KEYFILE", "")
-
-    if not certfile:
-        if settings.allow_http:
-            log.warning("HOST_ALLOW_HTTP is set: serving plaintext (development only)")
-        else:
-            # Not fatal, and not a misconfiguration in the common case: a
-            # reverse proxy that terminates TLS and forwards
-            # X-Forwarded-Proto from an address in HOST_FORWARDED_ALLOW_IPS is
-            # exactly how this is meant to be deployed behind Apache or a
-            # load balancer. But when there is no such proxy the app rejects
-            # every request with 400 and the container healthcheck fails
-            # forever, which looks like a hung service rather than a missing
-            # certificate -- so say which it is, once, at startup.
-            log.warning(
-                "no TLS certificate (HOST_TLS_CERTFILE) and HOST_ALLOW_HTTP is not set: "
-                "this process serves plaintext while the app requires HTTPS, so every "
-                "request will be rejected with 400 unless a trusted reverse proxy "
-                "terminates TLS and sends X-Forwarded-Proto: https from an address in "
-                "HOST_FORWARDED_ALLOW_IPS (currently %s). Without such a proxy, set "
-                "HOST_TLS_CERTFILE/HOST_TLS_KEYFILE.",
-                ",".join(settings.forwarded_allow_ips) or "<none>",
-            )
+    _warn_about_tls(settings, certfile)
 
     # One worker is the supported topology: the in-memory client registry and
     # limiters are per process. Scale with a reverse proxy and a shared

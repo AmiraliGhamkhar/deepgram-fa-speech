@@ -374,6 +374,40 @@ class DeepgramProvider(STTProvider):
             return {"keywords": self._keyterms}
         return {}
 
+    def _connect_parameters(self) -> dict:
+        """The `listen.v1.connect(**params)` call, as data instead of a literal.
+
+        Split out of `start` because it is the one part of opening a stream
+        that is a pure function of configuration: a test can assert the exact
+        query it produces without a network or a fake SDK.
+
+        Optional parameters are OMITTED when unset rather than passed as
+        `None`: whether the SDK's query encoder drops None values is an SDK
+        internal this client must not depend on -- an encoder change could
+        just as well start sending `mip_opt_out=None` to Deepgram.
+        """
+        s = self._settings
+        params: dict[str, Any] = {
+            "model": s.model,
+            "language": s.language,
+            "encoding": "linear16",
+            "sample_rate": s.sample_rate,
+            "multichannel": s.channels == 2,
+            "interim_results": True,
+            "endpointing": s.endpointing,
+            "utterance_end_ms": s.utterance_end_ms,
+            "vad_events": True,
+            "smart_format": True,
+            "punctuate": True,
+        }
+        if self._asr_replacements:
+            params["replace"] = self._asr_replacements
+        if s.mip_opt_out:
+            params["mip_opt_out"] = True
+        params.update(self._attribution_parameters())
+        params.update(self._recognition_hint_parameters())
+        return params
+
     def start(self, on_transcript: OnTranscript, on_error: OnError) -> None:
         stop_event = self._stop_event
         ready = self._ready
@@ -414,31 +448,7 @@ class DeepgramProvider(STTProvider):
             # instead of a long-lived API key, for both the websocket
             # handshake and any HTTP request.
             client = DeepgramClient(access_token=session_token, environment=environment)
-            connect_params: dict[str, Any] = {
-                "model": s.model,
-                "language": s.language,
-                "encoding": "linear16",
-                "sample_rate": s.sample_rate,
-                "multichannel": s.channels == 2,
-                "interim_results": True,
-                "endpointing": s.endpointing,
-                "utterance_end_ms": s.utterance_end_ms,
-                "vad_events": True,
-                "smart_format": True,
-                "punctuate": True,
-            }
-            # Optional parameters are OMITTED when unset rather than passed
-            # as None: whether the SDK's query encoder drops None values is
-            # an SDK internal this client must not depend on -- an encoder
-            # change could just as well start sending `mip_opt_out=None`
-            # to Deepgram.
-            if self._asr_replacements:
-                connect_params["replace"] = self._asr_replacements
-            if s.mip_opt_out:
-                connect_params["mip_opt_out"] = True
-            connect_params.update(self._attribution_parameters())
-            connect_params.update(self._recognition_hint_parameters())
-            with client.listen.v1.connect(**connect_params) as connection:
+            with client.listen.v1.connect(**self._connect_parameters()) as connection:
                 with self._connection_lock:
                     if stop_event.is_set() or stop_event is not self._stop_event:
                         self._abort_connection(connection)
