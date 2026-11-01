@@ -12,6 +12,7 @@ import pytest
 
 from medical_stt.app import LatencyTracker, LiveMedicalSTT, SessionController
 from medical_stt.audio import BoundedAudioQueue
+from medical_stt.audio import microphone as microphone_module
 from medical_stt.config import ConfigError, Settings, validate_settings
 from medical_stt.injection.backend import DryRunBackend, FailingBackend
 from medical_stt.injection.text_injector import TextInjector
@@ -55,10 +56,12 @@ class Provider(STTProvider):
 
 @pytest.fixture
 def build_session(monkeypatch):
-    from medical_stt import app
+    from medical_stt.session import dictation as dictation_module
     from medical_stt.ui import overlay
     monkeypatch.setattr(overlay, "_TK_AVAILABLE", False)
-    monkeypatch.setattr(app, "get_settings", lambda: Settings(
+    # `LiveMedicalSTT` resolves its settings from its own module, so that is
+    # where the fake has to be installed.
+    monkeypatch.setattr(dictation_module, "get_settings", lambda: Settings(
         host_url="https://example.test", host_secret="fake-test-secret", overlay_enabled=False))
     captured = threading.Event()
 
@@ -74,7 +77,7 @@ def build_session(monkeypatch):
         def __exit__(self, *args):
             return False
 
-    monkeypatch.setattr(app, "load_sounddevice", lambda: SimpleNamespace(RawInputStream=Input))
+    monkeypatch.setattr(microphone_module, "load_sounddevice", lambda: SimpleNamespace(RawInputStream=Input))
 
     def build(provider=None):
         stt = LiveMedicalSTT(provider=provider or Provider())
@@ -416,8 +419,10 @@ def test_wav_format_must_match_stream(tmp_path):
 
 def test_invalid_url_does_not_write_credentials(monkeypatch):
     from medical_stt import config
+    from medical_stt.configuration import bootstrap as bootstrap_module
+
     store = Mock()
-    monkeypatch.setattr(config, "SecretStore", store)
+    monkeypatch.setattr(bootstrap_module, "SecretStore", store)
     with pytest.raises(ConfigError):
         config.save_host_credentials("http://untrusted.test", "fake")
     store.assert_not_called()
@@ -555,7 +560,9 @@ def test_settings_save_is_atomic_and_preserves_client_id(monkeypatch, tmp_path):
     original = config.user_settings_path().read_bytes()
     def fail(*args):
         raise OSError("disk unavailable")
-    monkeypatch.setattr(config.os, "replace", fail)
+    from medical_stt.configuration import yaml_io
+
+    monkeypatch.setattr(yaml_io.os, "replace", fail)
     with pytest.raises(ConfigError, match="not saved"):
         config.save_host_credentials("https://second.example.test", "", "doctor-two")
     assert config.user_settings_path().read_bytes() == original

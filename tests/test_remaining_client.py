@@ -10,6 +10,7 @@ from medical_stt.app import LiveMedicalSTT
 from medical_stt.config import Settings
 from medical_stt.stt.accumulator import UtteranceAccumulator
 from medical_stt.stt.base import TranscriptEvent, WordInfo
+from medical_stt.session.transcripts import UtteranceRouter
 from medical_stt.stt.deepgram_provider import DeepgramProvider
 from tests.test_asr_replacements import _load_pair
 
@@ -44,13 +45,24 @@ def test_connection_counter_reads_under_connection_lock():
 
 
 def test_interim_paths_share_one_normalization_helper():
+    """Both interim entry points normalize through `UtteranceRouter`."""
     assert hasattr(LiveMedicalSTT, '_display_interim')
-    source = inspect.getsource(LiveMedicalSTT)
-    assert source.count('self._display_interim(event)') == 2
+    # The delegated entry point must be the router's, not a second copy.
+    assert 'display_interim' in inspect.getsource(LiveMedicalSTT._display_interim)
+    router_source = inspect.getsource(UtteranceRouter.display_interim)
+    assert 'normalize(event.text[' in router_source
 
 
 def test_final_latency_rotation_precedes_bounded_queue_post():
-    source = inspect.getsource(LiveMedicalSTT._run_session)
+    """A speech-final must rotate the tracker before the bounded hand-off.
+
+    The ordering is the invariant: if the post came first, one utterance's
+    latency marks would be attached to the next one. It lives in the session
+    runner, which owns the transcription threads.
+    """
+    from medical_stt.session.runner import SessionRunner
+
+    source = inspect.getsource(SessionRunner.run_once)
     post = source.index('finals.put_nowait')
     rotation = source.index('receive_latency = LatencyTracker()', source.index('def handle_transcript'))
     assert rotation < post

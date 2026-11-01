@@ -11,11 +11,13 @@ from medical_stt.config import ConfigError
 
 
 def _load_pair(tmp_path, monkeypatch, source: str, target: str) -> list[str]:
+    from medical_stt.configuration import catalogs as catalogs_module
+
     (tmp_path / "asr_replacements.yaml").write_text(
         yaml.safe_dump({"replacements": [{"from": source, "to": target}]}, allow_unicode=True),
         encoding="utf-8",
     )
-    monkeypatch.setattr(config, "_DATA_DIR", tmp_path)
+    monkeypatch.setattr(catalogs_module, "DATA_DIR", tmp_path)
     return config.load_asr_replacements()
 
 

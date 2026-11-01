@@ -44,7 +44,15 @@ def test_positive_jitter_accepts_injected_rng():
 
 
 def test_bidi_has_one_owner_at_injection_boundary():
-    assert 'to_injected(' not in inspect.getsource(LiveMedicalSTT._render_and_inject)
+    """Neither the session nor the renderer may format for display.
+
+    Directional marks belong to `TextInjector`, so a second BiDi call site
+    here would mean one of them operates on already-marked text.
+    """
+    from medical_stt.session.renderer import UtteranceRenderer
+
+    for owner in (LiveMedicalSTT._render_and_inject, UtteranceRenderer._render):
+        assert 'to_injected(' not in inspect.getsource(owner)
     backend = DryRunBackend()
     injector = TextInjector(backend=backend)
     assert injector.type_text('گزارش', add_directional_mark=True)

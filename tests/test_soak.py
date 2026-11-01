@@ -138,8 +138,9 @@ def _host_credentials(monkeypatch):
 def test_50_clients_soak_without_growth(monkeypatch, capsys):
     """Hold 50 sessions for 30+ minutes and assert nothing degrades."""
     from medical_stt import app as app_module
+    from medical_stt.audio import microphone as microphone_module
 
-    monkeypatch.setattr(app_module, "load_sounddevice", lambda: _FakeSoundDevice)
+    monkeypatch.setattr(microphone_module, "load_sounddevice", lambda: _FakeSoundDevice)
 
     providers = [SoakProvider(marker=i) for i in range(CLIENT_COUNT)]
     sessions = []

@@ -61,7 +61,9 @@ def test_first_run_template_write_is_atomic(monkeypatch, tmp_path):
     def fail_replace(*_args):
         raise OSError("simulated crash during the write")
 
-    monkeypatch.setattr(config.os, "replace", fail_replace)
+    from medical_stt.configuration import yaml_io
+
+    monkeypatch.setattr(yaml_io.os, "replace", fail_replace)
     with pytest.raises(OSError):
         config.initialize_user_config()
     assert not config.user_settings_path().exists(), "no partial file may be left behind"
@@ -73,6 +75,7 @@ def test_dpapi_failure_during_save_is_a_config_error(monkeypatch, tmp_path):
     (SecretStoreError, a RuntimeError) escaped raw instead of surfacing
     as the documented ConfigError partial outcome."""
     from medical_stt import config
+    from medical_stt.configuration import bootstrap as bootstrap_module
     from medical_stt.security import SecretStoreError
 
     monkeypatch.setenv("MEDICALSTT_APP_DATA_DIR", str(tmp_path))
@@ -86,7 +89,7 @@ def test_dpapi_failure_during_save_is_a_config_error(monkeypatch, tmp_path):
         def save(self, _secret):
             raise SecretStoreError("DPAPI protect failed")
 
-    monkeypatch.setattr(config, "SecretStore", _FailingStore)
+    monkeypatch.setattr(bootstrap_module, "SecretStore", _FailingStore)
     with pytest.raises(ConfigError, match="not saved"):
         config.save_host_credentials("https://stt.example.com", "a-brand-new-secret", "doctor-01")
     assert config.user_settings_path().read_bytes() == original
@@ -303,8 +306,9 @@ def test_malformed_yaml_raises_config_error(tmp_path, monkeypatch):
     bad_yaml.write_text("rules: [this is: not: valid: yaml", encoding="utf-8")
 
     import medical_stt.config as config_module
+    from medical_stt.configuration import catalogs as catalogs_module
 
-    monkeypatch.setattr(config_module, "_DATA_DIR", tmp_path)
+    monkeypatch.setattr(catalogs_module, "DATA_DIR", tmp_path)
     with pytest.raises(ConfigError):
         config_module.load_correction_rules_raw()
 
@@ -314,8 +318,9 @@ def test_corrections_yaml_without_rules_key_raises(tmp_path, monkeypatch):
     weird.write_text("not_rules: []\n", encoding="utf-8")
 
     import medical_stt.config as config_module
+    from medical_stt.configuration import catalogs as catalogs_module
 
-    monkeypatch.setattr(config_module, "_DATA_DIR", tmp_path)
+    monkeypatch.setattr(catalogs_module, "DATA_DIR", tmp_path)
     with pytest.raises(ConfigError):
         config_module.load_correction_rules_raw()
 
@@ -325,8 +330,9 @@ def test_empty_corrections_yaml_returns_empty_list(tmp_path, monkeypatch):
     empty.write_text("", encoding="utf-8")
 
     import medical_stt.config as config_module
+    from medical_stt.configuration import catalogs as catalogs_module
 
-    monkeypatch.setattr(config_module, "_DATA_DIR", tmp_path)
+    monkeypatch.setattr(catalogs_module, "DATA_DIR", tmp_path)
     assert config_module.load_correction_rules_raw() == []
 
 
@@ -335,8 +341,9 @@ def test_corrections_yaml_rules_not_a_list_raises(tmp_path, monkeypatch):
     bad.write_text("rules: \"not a list\"\n", encoding="utf-8")
 
     import medical_stt.config as config_module
+    from medical_stt.configuration import catalogs as catalogs_module
 
-    monkeypatch.setattr(config_module, "_DATA_DIR", tmp_path)
+    monkeypatch.setattr(catalogs_module, "DATA_DIR", tmp_path)
     with pytest.raises(ConfigError):
         config_module.load_correction_rules_raw()
 
@@ -346,9 +353,10 @@ def test_corrections_yaml_rules_not_a_list_raises(tmp_path, monkeypatch):
 
 def _write_replacements(tmp_path, monkeypatch, body: str):
     import medical_stt.config as config_module
+    from medical_stt.configuration import catalogs as catalogs_module
 
     (tmp_path / "asr_replacements.yaml").write_text(body, encoding="utf-8")
-    monkeypatch.setattr(config_module, "_DATA_DIR", tmp_path)
+    monkeypatch.setattr(catalogs_module, "DATA_DIR", tmp_path)
     return config_module
 
 

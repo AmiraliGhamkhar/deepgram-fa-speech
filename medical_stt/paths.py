@@ -72,6 +72,21 @@ def ui_state_path() -> Path:
     return app_data_dir() / "ui_state.json"
 
 
+def package_root() -> Path:
+    """Root of the shipped application tree (contains `config/` and `data/`)."""
+    return Path(__file__).resolve().parent.parent
+
+
+def bundled_config_dir() -> Path:
+    """Directory of the settings template shipped with the build."""
+    return package_root() / "config"
+
+
+def bundled_data_dir() -> Path:
+    """Directory of the read-only data catalogs shipped with the build."""
+    return package_root() / "data"
+
+
 def ensure_app_data_dir() -> Path:
     """Create the per-user data directory (and the log subdirectory)."""
     directory = app_data_dir()
