@@ -59,7 +59,7 @@ def test_bidi_has_one_owner_at_injection_boundary():
 
 
 def test_p2_tradeoffs_are_explicit():
-    assert 'delta-seconds only' in (ROOT / 'host/core.py').read_text()
+    assert 'delta-seconds only' in (ROOT / 'host/grant.py').read_text()
     assert 'public-api-only' in TextInjector.type_delta_from_partial.__doc__.lower()
     assert '25' in (ROOT / 'medical_stt/host_client.py').read_text()
     assert 'watchdog' in (ROOT / 'host/passenger_wsgi.py').read_text().lower()

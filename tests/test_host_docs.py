@@ -26,7 +26,17 @@ ROOT_README = ROOT / "README.md"
 CPANEL_DOC = ROOT / "docs" / "CPANEL_HOSTING.md"
 
 #: Modules that read configuration from the environment.
-CONFIG_SOURCES = ("host/core.py", "host/app.py", "host/provision.py")
+CONFIG_SOURCES = ("host/config.py", "host/app.py", "host/provision.py")
+
+#: Every module that can raise a "refuses to start" `ConfigurationError`.
+#: `host/core.py` is only a re-exporting facade, so the checks themselves are
+#: asserted against the modules that own them.
+HOST_CORE_MODULES = (
+    "host/config.py",
+    "host/identity.py",
+    "host/grant.py",
+    "host/app.py",
+)
 
 #: Every way the host reads a variable. All four forms must be matched or
 #: this test silently under-reports -- `_int`/`_float` cover every numeric
@@ -153,7 +163,9 @@ def test_the_startup_refusal_list_matches_the_code() -> None:
         assert claim in section, f"host/README.md must document the {claim!r} refusal"
 
     # ...and each claim must correspond to a check the code actually makes.
-    core_source = (ROOT / "host" / "core.py").read_text(encoding="utf-8")
+    core_source = "\n".join(
+        (ROOT / rel).read_text(encoding="utf-8") for rel in HOST_CORE_MODULES
+    )
     assert "def check_api_key_shape" in core_source
     assert "check_api_key_shape(api_key)" in core_source
     assert "contains no client entries" in core_source
@@ -311,12 +323,14 @@ def test_cpanel_provisioning_command_runs_from_the_parent_directory():
 
 
 def test_deepgram_grant_is_https_only():
-    assert "https://api.deepgram.com" in (ROOT / "host" / "core.py").read_text(
-        encoding="utf-8"
+    # The grant URL is defined in `host/config.py`; `host/grant.py` only
+    # consumes it, so the https-only claim is asserted over both.
+    sources = "\n".join(
+        (ROOT / rel).read_text(encoding="utf-8")
+        for rel in ("host/config.py", "host/grant.py")
     )
-    assert "http://api.deepgram.com" not in (ROOT / "host" / "core.py").read_text(
-        encoding="utf-8"
-    )
+    assert "https://api.deepgram.com" in sources
+    assert "http://api.deepgram.com" not in sources
 
 
 def test_docs_do_not_promise_the_host_proxies_audio():
