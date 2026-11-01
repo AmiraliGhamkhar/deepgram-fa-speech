@@ -39,6 +39,10 @@ from .configuration.bootstrap import (
 from .configuration.catalogs import (
     MAX_KEYTERMS,
     MAX_KEYTERM_CHARS,
+    _ASR_BLOCKED_TOKENS,
+    _ASR_LATIN_TOKEN_RE,
+    _contains_non_ascii_letter,
+    _has_blocked_asr_token,
     load_asr_replacements,
     load_correction_rules,
     load_correction_rules_raw,
@@ -49,17 +53,29 @@ from .configuration.loader import get_settings
 from .configuration.model import (
     DEEPGRAM_REGION_HOSTS,
     Settings,
+    _FORBIDDEN_SECRET_KEYS,
     deepgram_api_host,
     keyterm_parameter,
 )
 from .configuration.validation import (
+    _CLIENT_ID_RE,
+    _valid_client_id,
+    _valid_host_url,
+    _valid_specialty_name,
     validate_model_language,
     validate_settings,
 )
 from .configuration.yaml_io import (
+    _flag,
+    _load_yaml,
+    _num,
+    _reject_plaintext_secrets,
     atomic_write_text,
 )
 
+# Names above are intentionally re-exported (including the underscore-prefixed
+# helpers that tests and scripts call directly). Listing them in `__all__` is
+# what keeps a linter from "cleaning up" the facade into a broken one.
 __all__ = [
     "ConfigError",
     "DEEPGRAM_REGION_HOSTS",
@@ -82,4 +98,18 @@ __all__ = [
     "user_settings_path",
     "validate_model_language",
     "validate_settings",
+    # internal helpers, re-exported for the test suite and scripts
+    "_ASR_BLOCKED_TOKENS",
+    "_ASR_LATIN_TOKEN_RE",
+    "_CLIENT_ID_RE",
+    "_FORBIDDEN_SECRET_KEYS",
+    "_contains_non_ascii_letter",
+    "_flag",
+    "_has_blocked_asr_token",
+    "_load_yaml",
+    "_num",
+    "_reject_plaintext_secrets",
+    "_valid_client_id",
+    "_valid_host_url",
+    "_valid_specialty_name",
 ]
