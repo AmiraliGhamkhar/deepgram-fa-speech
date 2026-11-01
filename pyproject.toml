@@ -42,10 +42,13 @@ module = [
     "host.config",
     "host.core",
     "host.grant",
+    "host.hardening",
     "host.identity",
+    "host.limits",
     "host.passenger_wsgi",
     "host.ratelimit",
     "host.request_guard",
+    "host.session_service",
 ]
 disable_error_code = ["no-redef", "unused-ignore", "attr-defined"]
 

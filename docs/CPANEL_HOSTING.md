@@ -47,7 +47,9 @@ cd ~
 mkdir -p apps/medical-stt
 cd apps/medical-stt
 # copy host/ from the repository into this directory, so that:
-ls host/         # app.py  core.py  metrics.py  provision.py  passenger_wsgi.py  requirements.txt
+ls host/         # app.py  config.py  core.py  grant.py  hardening.py  identity.py
+                 # limits.py  metrics.py  passenger_wsgi.py  provision.py  ratelimit.py
+                 # request_guard.py  session_service.py  requirements.txt
 ```
 
 Only `host/` is needed on the server. Never upload `.env`, `clients.txt`,
@@ -147,7 +149,7 @@ python -c "import secrets; print(secrets.token_urlsafe(32))"
 ## 7. Make sure the app can tell that the request arrived over HTTPS
 
 The app refuses a plaintext request. It decides in this exact order
-(`host/core.py::request_is_secure`):
+(`host/request_guard.py::request_is_secure`):
 
 1. **the WSGI scheme** — `wsgi.url_scheme`, which becomes the ASGI
    `scope["scheme"]`. If Apache reports `https` here, the request is accepted

@@ -91,10 +91,16 @@ medical_stt/
     └── overlay.py               # optional floating transcript overlay
 
 host/                       # the self-hosted service (has the API key)
-├── core.py                # env config, client registry, auth, rate limits,
-│                           #   async Deepgram grant
-├── app.py                 # FastAPI wiring (HTTPS, /v1/session, /healthz,
-│                           #   /readyz, /metrics)
+├── app.py                 # composition root + uvicorn entry point
+├── core.py                # facade re-exporting the modules below
+├── config.py              # env config, Deepgram regions/TTLs, key shape
+├── identity.py            # hashed secrets, client registry, constant-time auth
+├── ratelimit.py           # token-bucket + fixed-window limiters
+├── limits.py              # admission control wired from settings
+├── grant.py               # async/sync Deepgram token exchange
+├── request_guard.py       # HTTPS decisions, TTL clamping
+├── hardening.py           # security headers, /healthz, /readyz, /metrics
+├── session_service.py     # the POST /v1/session use case
 ├── metrics.py             # dependency-free counters/gauges/histograms
 ├── provision.py           # mints client_id + secret per device
 ├── requirements.txt       # fastapi, uvicorn, httpx — no Deepgram SDK
@@ -423,7 +429,7 @@ The checked-in `.env.example` documents the same variables
 ```bash
 pytest tests/ -q          # no network, no Windows, no credentials
 ruff check medical_stt tests scripts host
-mypy medical_stt host/core.py
+mypy medical_stt host benchmarks
 ```
 
 The default run includes the 50-client concurrency suite
@@ -914,7 +920,7 @@ GitHub Actions jobs:
 
 - **Test** on Python 3.10/3.11/3.12 (Ubuntu): dependency install, the full
   test suite (everything mocked, no credentials, no network), `ruff` over
-  `medical_stt tests scripts host`, `mypy medical_stt host/core.py`.
+  `medical_stt tests scripts host`, `mypy medical_stt host benchmarks`.
 - **Host service tests** (Ubuntu): `tests/test_host_service.py` and
   `tests/test_host_client.py` without any Deepgram key.
 - **Windows platform checks** (`windows-latest`): the platform tests plus
