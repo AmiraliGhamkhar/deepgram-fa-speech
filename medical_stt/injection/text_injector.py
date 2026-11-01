@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import re
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 from ..processing.bidi import to_injected
 from .backend import InjectionBackend, get_default_backend
@@ -163,6 +163,35 @@ class TextInjector:
             break
         return index
 
+    def _delegate(self, name: str, operation: Callable[[], bool]) -> bool:
+        """Run one backend call under the class's single failure contract.
+
+        Every backend call is wrapped in a broad `except Exception`, not
+        `except OSError`. The backends delegate to third-party OS bindings
+        that raise whatever suits them -- `pyperclip.PyperclipException` when
+        no clipboard helper is installed, `pyautogui.FailSafeException` when
+        the pointer hits a screen corner, `WinError` variants from ctypes --
+        and none of those are `OSError`. These methods run on the speech
+        provider's callback thread, so an exception that escaped here would
+        kill that thread and end dictation silently mid-consult.
+
+        The contract every caller relies on is "returns False and records
+        `last_error`", so this is the one place that enforces it. The try
+        block wraps *only* the backend delegation; our own text handling stays
+        outside it, so a bug in this class is still loud.
+        """
+        self.last_error = None
+        try:
+            ok = operation()
+        except Exception as exc:  # noqa: BLE001 - see this method's docstring
+            self.last_error = str(exc)
+            log.warning("%s failed (%s)", name, type(exc).__name__)
+            return False
+        if not ok:
+            self.last_error = "backend reported failure"
+            log.warning("%s: backend reported failure", name)
+        return ok
+
     def type_text(self, text: str, add_directional_mark: bool = False) -> bool:
         """Type text via synthetic Unicode key events.
 
@@ -179,21 +208,11 @@ class TextInjector:
         backend delegation; our own text handling stays outside them, so a bug
         in this class is still loud.
         """
-        self.last_error = None
         if not text:
             return False
         if add_directional_mark:
             text = to_injected(text)
-        try:
-            ok = self.backend.send_unicode_text(text)
-        except Exception as exc:  # noqa: BLE001 - see the docstring
-            self.last_error = str(exc)
-            log.warning("type_text failed (%s)", type(exc).__name__)
-            return False
-        if not ok:
-            self.last_error = "backend reported failure"
-            log.warning("type_text: backend reported failure")
-        return ok
+        return self._delegate("type_text", lambda: self.backend.send_unicode_text(text))
 
     def paste_text(self, text: str, add_rtl_mark: bool = True) -> bool:
         """Paste `text` via the clipboard.
@@ -211,36 +230,20 @@ class TextInjector:
         processing.bidi.to_injected -- never a forced RLE/PDF embedding
         around the whole string (see processing/bidi.py for why).
         """
-        self.last_error = None
         separator = _trailing_separator(text)
         text = normalize_injected_whitespace(text)
         if not text:
             return False
-        text += separator
-
-        text = to_injected(text)
-
-        try:
-            ok = self.backend.paste_text(text, self.restore_clipboard, self.paste_settle_seconds)
-        except Exception as exc:  # noqa: BLE001 - see the note on type_text
-            self.last_error = str(exc)
-            log.warning("paste_text failed (%s)", type(exc).__name__)
-            return False
-        if not ok:
-            self.last_error = "backend reported failure"
-            log.warning("paste_text: backend reported failure")
-        return ok
+        marker = to_injected(text + separator)
+        return self._delegate(
+            "paste_text",
+            lambda: self.backend.paste_text(
+                marker, self.restore_clipboard, self.paste_settle_seconds
+            ),
+        )
 
     def send_backspaces(self, count: int) -> bool:
         """Send N backspace keystrokes to erase revised text."""
         if count <= 0:
             return True
-        try:
-            ok = self.backend.send_backspaces(count)
-        except Exception as exc:  # noqa: BLE001 - see the note on type_text
-            self.last_error = str(exc)
-            log.warning("send_backspaces failed (%s)", type(exc).__name__)
-            return False
-        if not ok:
-            self.last_error = "backend reported failure"
-        return ok
+        return self._delegate("send_backspaces", lambda: self.backend.send_backspaces(count))
