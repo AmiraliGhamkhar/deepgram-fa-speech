@@ -161,6 +161,9 @@ specific walk-throughs:
 - **[`docs/WINDOWS_POWERSHELL.md`](docs/WINDOWS_POWERSHELL.md)** —
   building, installing and troubleshooting the Windows client entirely
   from PowerShell.
+- **[`docs/CODE_REVIEW.md`](docs/CODE_REVIEW.md)** — the SOLID pass over
+  every section: what each module owns now, what was deliberately left long
+  and why.
 
 The short version:
 
